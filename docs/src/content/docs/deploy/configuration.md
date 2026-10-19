@@ -33,6 +33,20 @@ flowchart LR
 | `DATABASE_URL`           | The PostgreSQL connection. `pnpm start` fills it in for the local container on `127.0.0.1:54329`. Set another URL to use your own database.             | Local container |
 | `DATABASE_POOL_MAX`      | The most database connections the server opens.                                                                                                         | `12`            |
 
+## Simulated private addresses (evaluation only)
+
+`OTTO_SIM_PRIVATE_ADDRESSES` lets a local evaluation run reach simulated vendor services on private addresses. Set it to comma-separated IPv4 or IPv6 addresses, such as `10.45.0.7`.
+
+List the exact address of each simulated service, not a CIDR range or the Kubernetes Service range behind it. A wider range also exposes cluster-internal services, such as the Kubernetes API and the evaluation database, to Otto's web tools and browser.
+
+It works in local mode only. Setting it in gateway or tenant mode stops startup. Otto also stops at startup for an entry that isn't an IP address, including CIDR notation, or for an unspecified, loopback, link-local or metadata address (`0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `::`, `::1`, `fe80::/10` and their IPv4-mapped forms). Those addresses stay refused.
+
+The setting changes one check. Otto treats a listed address as public for the browser, web tools, downloads and remote MCP connections. Every other limit stays. Downloads and remote connections still allow only ports 80 and 443. Otto still pins the checked address for the connection. Otto still drops any proxy a model names. The setting never reaches the workspace or browser container, and no model, app or chat setting can change it.
+
+| Variable                     | What it does                                                          | Default |
+| ---------------------------- | --------------------------------------------------------------------- | ------- |
+| `OTTO_SIM_PRIVATE_ADDRESSES` | Comma-separated addresses treated as public in local evaluation runs. | Empty   |
+
 ## Models
 
 Keys set here become server-managed connections. They stay in server memory and aren't copied into the database. You can also add connections in **Models** without any variable. See [Models](/connect/models/).

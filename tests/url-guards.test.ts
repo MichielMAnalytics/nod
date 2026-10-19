@@ -6,7 +6,13 @@ import { crc32 } from 'node:zlib';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { JSDOM } from 'jsdom';
-import { createBrowserProxy, publicLookup } from '../src/providers/agent-browser/network.ts';
+import {
+  configureSimulatedPrivateAddresses,
+  createBrowserProxy,
+  isPublicAddress,
+  publicLookup,
+  publicUrl,
+} from '../src/providers/agent-browser/network.ts';
 import {
   createPublicLinkPreviewProvider,
   requestPublicPreview,
@@ -407,6 +413,75 @@ test('web tool connections use a DNS answer only when every address in it is pub
     assert.equal(await connect([{ address, family: 6 }]), 'blocked');
   const public6 = { address: '2606:4700:0000::1111', family: 6 };
   assert.deepEqual(await connect([public6]), [public6]);
+});
+
+test('a simulated private address is admitted through the public address checks', async () => {
+  const connect = (answers: Array<{ address: string; family: number }>) =>
+    new Promise((resolve) =>
+      publicLookup(async () => answers)('fixture.example', { all: true }, (error, found) =>
+        resolve(error ? 'blocked' : found),
+      ),
+    );
+  try {
+    configureSimulatedPrivateAddresses('10.45.0.7', 'local');
+    assert.equal(isPublicAddress('10.45.0.7'), true);
+    assert.equal(isPublicAddress('10.45.0.8'), false);
+    assert.equal(
+      (
+        await publicUrl('https://fixture.example', async () => [
+          { address: '10.45.0.7', family: 4 },
+        ])
+      ).address,
+      '10.45.0.7',
+    );
+    await assert.rejects(
+      publicUrl('https://fixture.example', async () => [
+        { address: '10.45.0.7', family: 4 },
+        { address: '169.254.169.254', family: 4 },
+      ]),
+    );
+    assert.deepEqual(await connect([{ address: '10.45.0.7', family: 4 }]), [
+      { address: '10.45.0.7', family: 4 },
+    ]);
+    assert.equal(await connect([{ address: '10.45.0.8', family: 4 }]), 'blocked');
+    configureSimulatedPrivateAddresses('fd00:abcd::7', 'local');
+    assert.equal(isPublicAddress('fd00:abcd::7'), true);
+    assert.equal(isPublicAddress('fd00:abcd::8'), false);
+  } finally {
+    configureSimulatedPrivateAddresses(undefined, 'local');
+  }
+  assert.equal(isPublicAddress('10.45.0.7'), false);
+});
+
+test('a simulated private address setting is refused outside local mode or for a refused address', () => {
+  try {
+    for (const address of [
+      '0.0.0.0',
+      '0.0.0.1',
+      '127.0.0.1',
+      '169.254.169.254',
+      '::',
+      '::1',
+      'fe80::1',
+      '::ffff:0.0.0.0',
+      '::ffff:127.0.0.1',
+      '::ffff:169.254.169.254',
+      '10.45.0.0/24',
+      '10.45.0.7/32',
+      '::1/128',
+      'example.com',
+      '10.45.0.7,',
+    ])
+      assert.throws(() => configureSimulatedPrivateAddresses(address, 'local'), address);
+    for (const mode of ['gateway', 'tenant'] as const)
+      assert.throws(() => configureSimulatedPrivateAddresses('10.45.0.7', mode), mode);
+    configureSimulatedPrivateAddresses('10.45.0.7', 'local');
+    assert.equal(isPublicAddress('10.45.0.7'), true);
+    assert.throws(() => configureSimulatedPrivateAddresses('127.0.0.1', 'local'));
+    assert.equal(isPublicAddress('10.45.0.7'), false);
+  } finally {
+    configureSimulatedPrivateAddresses(undefined, 'local');
+  }
 });
 
 test('the browser proxy refuses private network destinations, including names that resolve to them', async () => {

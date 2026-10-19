@@ -1,11 +1,63 @@
 import * as dns from 'node:dns';
 import { lookup } from 'node:dns/promises';
 import { createServer, request, type OutgoingHttpHeaders } from 'node:http';
-import { connect, isIP, type LookupFunction, type Socket } from 'node:net';
+import { BlockList, connect, isIP, type LookupFunction, type Socket } from 'node:net';
 
 export type AddressResolver = (host: string) => Promise<Array<{ address: string; family: number }>>;
 
+function addressType(family: 4 | 6): 'ipv4' | 'ipv6' {
+  return family === 4 ? 'ipv4' : 'ipv6';
+}
+
+const refusedNetworks = new BlockList();
+for (const [address, prefix, family] of [
+  ['0.0.0.0', 8, 4],
+  ['127.0.0.0', 8, 4],
+  ['169.254.0.0', 16, 4],
+  ['::', 128, 6],
+  ['::1', 128, 6],
+  ['fe80::', 10, 6],
+  ['::ffff:0:0', 104, 6],
+  ['::ffff:127.0.0.0', 104, 6],
+  ['::ffff:169.254.0.0', 112, 6],
+] as const)
+  refusedNetworks.addSubnet(address, prefix, addressType(family));
+
+let simulatedPrivateAddresses = new BlockList();
+
+export function configureSimulatedPrivateAddresses(
+  value: string | undefined,
+  mode: 'local' | 'gateway' | 'tenant',
+): void {
+  simulatedPrivateAddresses = new BlockList();
+  const text = value?.trim();
+  if (!text) return;
+  if (mode !== 'local')
+    throw new Error('OTTO_SIM_PRIVATE_ADDRESSES is only available in local runtime mode.');
+  const allowed = new BlockList();
+  for (const entry of text.split(',')) {
+    const address = entry.trim();
+    const family = isIP(address);
+    if (family !== 4 && family !== 6)
+      throw new Error(`OTTO_SIM_PRIVATE_ADDRESSES entry "${address}" is not an IP address.`);
+    if (refusedNetworks.check(address, addressType(family)))
+      throw new Error(
+        `OTTO_SIM_PRIVATE_ADDRESSES entry "${address}" is an unspecified, loopback, link-local or metadata address.`,
+      );
+    allowed.addAddress(address, addressType(family));
+  }
+  simulatedPrivateAddresses = allowed;
+}
+
+function simulatedPrivate(address: string): boolean {
+  const family = isIP(address);
+  return family === 4 || family === 6
+    ? simulatedPrivateAddresses.check(address, addressType(family))
+    : false;
+}
+
 export function isPublicAddress(address: string): boolean {
+  if (simulatedPrivate(address)) return true;
   if (isIP(address) === 4) {
     const [a, b, c] = address.split('.').map(Number);
     return !(

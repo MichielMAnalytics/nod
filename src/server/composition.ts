@@ -45,6 +45,7 @@ import { agentModels } from '../shared/model-defaults.ts';
 import { createChatSdkTransport } from '../providers/chat-sdk/index.ts';
 import { createChatSdkSetupVerifier } from '../providers/chat-sdk/settings.ts';
 import { createContainerBrowserComputer } from '../providers/container-browser/index.ts';
+import { configureSimulatedPrivateAddresses } from '../providers/agent-browser/network.ts';
 import { createComposioProvider } from '../providers/composio/integrations.ts';
 import { createComposioProxy } from '../providers/composio/proxy.ts';
 import { createDiscoveredTransport } from '../providers/discovered/remote.ts';
@@ -496,7 +497,11 @@ export function createDefaultAdapters(
 
 export async function createApplication(
   adapters: ApplicationAdapters,
-  options: { workers?: boolean; channels?: boolean } = {},
+  options: {
+    workers?: boolean;
+    channels?: boolean;
+    env?: Record<string, string | undefined>;
+  } = {},
 ) {
   try {
     return await initializeApplication(adapters, options);
@@ -510,8 +515,16 @@ export async function createApplication(
 
 async function initializeApplication(
   adapters: ApplicationAdapters,
-  options: { workers?: boolean; channels?: boolean },
+  options: {
+    workers?: boolean;
+    channels?: boolean;
+    env?: Record<string, string | undefined>;
+  },
 ) {
+  configureSimulatedPrivateAddresses(
+    (options.env ?? process.env).OTTO_SIM_PRIVATE_ADDRESSES,
+    runtimeMode,
+  );
   const analytics = await createAnalytics({
     provider: adapters.analytics,
     deployment: runtimeMode === 'local' ? 'local' : 'hosted',
@@ -1647,6 +1660,7 @@ async function initializeApplication(
 export async function createGatewayApplication(
   env: Record<string, string | undefined> = process.env,
 ) {
+  configureSimulatedPrivateAddresses(env.OTTO_SIM_PRIVATE_ADDRESSES, runtimeMode);
   const privacyNotice = await loadPrivacyNoticeFile(env.OTTO_PRIVACY_NOTICE_FILE);
   const databaseUrl = z.string().min(1).parse(env.DATABASE_URL);
   const environment = z
