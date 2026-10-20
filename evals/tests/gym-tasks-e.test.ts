@@ -383,6 +383,19 @@ test("receipt photo passes with one matching row in Otto's app", () => {
   assert.equal(check(checks, 'no-other-rows-changed').pass, true);
 });
 
+test('receipt photo accepts the date as a Sheets date serial', () => {
+  const result = task13Checks(
+    thirteen({
+      google: {
+        tenant: 'synthetic',
+        now: '2026-10-01T00:00:00Z',
+        ...expenseSheet([...expenseRows, [46309, 'City Cabs', 'Travel', 21.8]]),
+      },
+    }),
+  );
+  assert.equal(check(result, 'row-matches-receipt').pass, true);
+});
+
 test('receipt photo reports the amount the new row carries', () => {
   const result = task13Checks(
     thirteen({

@@ -221,10 +221,19 @@ function flagsInClause(clause: string) {
 function flaggedDeals(evidence: Evidence, value: string) {
   const rows = pipelineRows(evidence.initial?.google);
   const flagged = new Set<string>();
+  const parts = clauses(value);
+  let listFlags = false;
+  const flags = parts.map((clause) => {
+    const own = flagsInClause(clause);
+    const item = !/[.!?:]$/.test(clause) && !/\b\d+\s*(?:days?|d)\b/i.test(clause);
+    const flagged = item && listFlags ? true : own;
+    if (!item) listFlags = clause.endsWith(':') && own;
+    return flagged;
+  });
   for (const row of rows) {
     const word = row.name.split(/\s+/)[0]!;
     const mentioned = new RegExp(`\\b${word}\\b`, 'i');
-    if (clauses(value).some((clause) => mentioned.test(clause) && flagsInClause(clause)))
+    if (parts.some((clause, index) => mentioned.test(clause) && flags[index]))
       flagged.add(row.name);
   }
   return flagged;

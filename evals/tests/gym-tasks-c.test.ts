@@ -772,6 +772,37 @@ test('gym task 7 checks pass on three fires and an untouched sheet', () => {
   assert.equal(taskSeven.id, '07-watch-sheet');
 });
 
+test('gym task 7 reads deals listed under a heading that flags them', () => {
+  const listed = task7({
+    telegram: {
+      state: {} as any,
+      replies: [
+        {
+          messageId: 20,
+          text: 'Two deals are past 30 days (41 days):\nAcme Corp — £24,000\nInitech — £12,500\nGlobex Inc is at 29 days.',
+          date: Date.parse('2026-10-05T12:00:00Z') / 1000,
+        },
+        {
+          messageId: 21,
+          text: 'One deal is now over 30 days stale:\n- **Globex Inc** — £31,000 (31 days)\nAcme Corp and Initech had activity this week.',
+          date: Date.parse('2026-10-07T12:00:00Z') / 1000,
+        },
+      ],
+    },
+  });
+  const checks = task7Checks(listed);
+  assert.equal(
+    find(checks, 'fire-one-stale-deals').pass,
+    true,
+    find(checks, 'fire-one-stale-deals').message,
+  );
+  assert.equal(
+    find(checks, 'fire-three-new-deal').pass,
+    true,
+    find(checks, 'fire-three-new-deal').message,
+  );
+});
+
 test('gym task 7 fails each check with its evidence', () => {
   assert.equal(
     find(task7Checks(task7({ schedules: [] })), 'daily-schedule').message,

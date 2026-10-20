@@ -224,7 +224,9 @@ function receiptDateDigits(receipt: Receipt) {
 
 function matchesDate(row: unknown[], receipt: Receipt) {
   const wanted = receiptDateDigits(receipt);
+  const serial = Date.parse(`${receipt.date}T00:00:00Z`) / 86_400_000 + 25_569;
   return row.some((cell) => {
+    if (Number(text(cell)) === serial) return true;
     const digits = dateDigits(text(cell));
     return digits === wanted.iso || digits === wanted.dayFirst;
   });
@@ -242,7 +244,9 @@ export function task13Checks(evidence: Evidence): Check[] {
   const beforeRows = rowsOf(before);
   const afterRows = rowsOf(after);
   const added = afterRows.slice(beforeRows.length);
-  const answer = (evidence.messages ?? []).filter((message) => message.turnId).at(-1);
+  const answer = (evidence.messages ?? [])
+    .filter((message) => message.turnId && message.text.trim())
+    .at(-1);
   const changed: number[] = [];
   for (let index = 0; index < beforeRows.length; index++) {
     const current = afterRows[index];
