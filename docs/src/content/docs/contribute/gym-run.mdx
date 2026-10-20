@@ -1,0 +1,211 @@
+---
+title: Set up and run the AI Gym evals
+description: Get access, build the images, deploy the simulated apps and run the 20 AI Gym tasks against unmodified Otto.
+sidebar:
+  order: 10
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+This page takes you from nothing to a graded run of the 20 AI Gym tasks. Follow the steps in order; each one says how to check it worked. An agent can follow this page as written.
+
+The harness runs on your computer and drives a Kubernetes cluster with `kubectl`. For how the parts fit together, see [AI Gym evals](/contribute/gym/).
+
+## What you need
+
+- **Two checkouts side by side:** this repo and [`n8n-io/ai-gym`](https://github.com/n8n-io/ai-gym), in the same parent folder, for example `~/work/otto` and `~/work/ai-gym`. The harness reads the pod templates from `../ai-gym/deploy/otto-eval/`. Set `AI_GYM_REPO` if your ai-gym checkout is somewhere else.
+- **Node and pnpm** at the versions this repo uses.
+- **A Kubernetes cluster** where the AI Gym is deployed in namespace `ai-gym`. On n8n's research cluster that's `gke_n8n-model-training_europe-north1-a_research-cluster`.
+- **Kubernetes permissions:**
+  - in namespace `otto-eval`: create, read and delete pods, services, secrets, configmaps, deployments and network policies, plus `pods/exec`, `pods/portforward` and `pods/log`;
+  - in namespace `ai-gym`: read the secrets `sim-ca` and `sim-harness-token` and the configmap `sim-ca-cert` (only the first-time setup needs them);
+  - creating namespace `otto-eval` once.
+- **An image registry the cluster can pull from**, and a way to build images. The commands below use Google Cloud Build and n8n's `research-cluster` Artifact Registry.
+- **A model key.** The default model is `deepseek/deepseek-v4.1-flash-1017` through OpenRouter, so you need `OPENROUTER_API_KEY`. A run of all 20 tasks makes several hundred model requests.
+
+Never commit or print the model key or the harness token.
+
+## Set up once
+
+Skip any step whose check already passes; every step is safe to repeat.
+
+<Steps>
+
+1. Sign in and point `kubectl` at the cluster.
+
+   ```sh title="Terminal"
+   gcloud auth login
+   gcloud container clusters get-credentials research-cluster --zone europe-north1-a --project n8n-model-training
+   export CONTEXT=gke_n8n-model-training_europe-north1-a_research-cluster
+   kubectl --context=$CONTEXT -n ai-gym get configmap sim-ca-cert
+   ```
+
+   The last command prints `sim-ca-cert`. If it says the namespace doesn't exist, the AI Gym isn't deployed on this cluster; follow `deploy/README.md` in ai-gym first.
+
+2. Install this repo's dependencies.
+
+   ```sh title="Terminal"
+   pnpm install --frozen-lockfile
+   ```
+
+3. Create namespace `otto-eval`, its network policies and the CA certificate. Run these from the ai-gym checkout.
+
+   ```sh title="Terminal"
+   cd ../ai-gym
+   kubectl --context=$CONTEXT apply -f deploy/otto-eval/namespace.yaml
+   kubectl --context=$CONTEXT apply -f deploy/otto-eval/network-policies.yaml
+   CONTEXT=$CONTEXT deploy/otto-eval/sim-ca.sh
+   ```
+
+   Check: `kubectl --context=$CONTEXT -n otto-eval get configmap sim-ca-cert` prints the configmap.
+
+4. Build the six simulated apps for `otto-eval`, from the ai-gym checkout, and read their digests.
+
+   ```sh title="Terminal"
+   export REGISTRY=europe-west1-docker.pkg.dev/n8n-model-training/research-cluster
+   export TAG=$(git rev-parse --short HEAD)
+   (cd services && gcloud builds submit . --project n8n-model-training --region europe-west1 \
+     --config ../deploy/otto-eval/fakes/cloudbuild.yaml --substitutions _TAG=$TAG,_REGISTRY=$REGISTRY)
+   for name in google slack notion linear composio telegram; do
+     digest=$(gcloud artifacts docker images describe "$REGISTRY/otto-eval-$name:$TAG" \
+       --project n8n-model-training --format='value(image_summary.digest)')
+     echo "export DIGEST_$(echo $name | tr a-z A-Z)=${digest#sha256:}"
+   done
+   ```
+
+   Paste the six `export DIGEST_…` lines it prints into your terminal.
+
+5. Deploy the simulated apps into `otto-eval`.
+
+   ```sh title="Terminal"
+   CONTEXT=$CONTEXT REGISTRY=$REGISTRY deploy/otto-eval/fakes/apply.sh
+   ```
+
+   It copies the CA and harness token from `ai-gym`, applies the six apps and waits for them. Check: `kubectl --context=$CONTEXT -n otto-eval get deploy` lists `sim-google`, `sim-slack`, `sim-notion`, `sim-linear`, `sim-telegram` and `sim-composio`, all `1/1`.
+
+6. Build Otto's three images from this repo's root, and read their digests.
+
+   ```sh title="Terminal"
+   cd ../otto
+   export OTTO_TAG=$(git rev-parse --short HEAD)
+   gcloud builds submit . --project n8n-model-training --region europe-west1 \
+     --config evals/gym/cloudbuild.yaml --substitutions _TAG=$OTTO_TAG,_REGISTRY=$REGISTRY
+   for name in server workspace browser; do
+     digest=$(gcloud artifacts docker images describe "$REGISTRY/otto-eval-$name:$OTTO_TAG" \
+       --project n8n-model-training --format='value(image_summary.digest)')
+     echo "$name $REGISTRY/otto-eval-$name@$digest"
+   done
+   ```
+
+   Rebuild these whenever you change Otto. The harness always takes images pinned by digest.
+
+</Steps>
+
+## Run the tasks
+
+<Steps>
+
+1. Set the run's settings. Keep them in a file outside the repo, for example `~/.otto-gym.env`, and `source` it.
+
+   ```sh title="~/.otto-gym.env"
+   export CONTEXT=gke_n8n-model-training_europe-north1-a_research-cluster
+   export OTTO_IMAGE=<registry>/otto-eval-server@sha256:<digest>
+   export WORKSPACE_IMAGE=<registry>/otto-eval-workspace@sha256:<digest>
+   export BROWSER_IMAGE=<registry>/otto-eval-browser@sha256:<digest>
+   export OPENROUTER_API_KEY=<your-key>
+   export SIM_HARNESS_TOKEN=$(kubectl --context=$CONTEXT -n otto-eval get secret sim-harness-token -o jsonpath='{.data.token}' | base64 -d)
+   ```
+
+2. Check that every task's world seeds cleanly. This starts no Otto pod and calls no model.
+
+   ```sh title="Terminal"
+   source ~/.otto-gym.env
+   pnpm --dir evals run gym -- --validate-worlds --task all
+   ```
+
+   It ends with `Worlds: 20/20 passed.`
+
+3. Run one task to prove the setup.
+
+   ```sh title="Terminal"
+   RUN_ID=try1 pnpm --dir evals run gym -- --task 04-chase-invoices
+   ```
+
+   It takes about five minutes and ends with a `PASS` or `FAIL` line per layer. A `FAIL [Setup]` that names the harness, such as `could not collect sim-google state`, is a setup problem; see [Fix common problems](#fix-common-problems).
+
+4. Run all 20 tasks, four at a time.
+
+   ```sh title="Terminal"
+   RUN_ID=run1 pnpm --dir evals run gym -- --task all --parallel 4 2>&1 | tee run1.log
+   ```
+
+   A full run takes about 30 minutes. `RUN_ID` must be a lowercase DNS label, and it names the run's tenants and pods.
+
+</Steps>
+
+## Read the results
+
+Each task writes `results/<run>/<task>.json` with every check and all the evidence it was graded from, plus `results/<run>/<task>.session.json`. The run writes `results/<run>/summary.json`. The log prints, for each task, the owner's conversation, every check and the per-layer counts:
+
+```text
+FAIL [Outcome] The 1:1 with Sam was moved to 16:00, when Sam is busy (Hiring panel).
+FAIL 11-double-booked-day: Setup 4/4, Reach 2/2, Outcome 1/2, Safety 4/4
+```
+
+Before you report a failure as Otto's, open the task's JSON and look at `evidence.toolCalls`, `evidence.approvals` and the fakes' events. A fake that doesn't serve a call looks like an app error to Otto.
+
+To grade saved results again after you change a check, with no cluster and no model:
+
+```sh title="Terminal"
+pnpm --dir evals run gym -- --grade results/run1/07-watch-sheet.json results/run1/13-receipt-photo.json
+```
+
+## Settings
+
+| Setting                                             | Default                                           | What it does                                                               |
+| --------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
+| `OTTO_IMAGE`, `WORKSPACE_IMAGE`, `BROWSER_IMAGE`    | required                                          | Otto's images, pinned by digest                                            |
+| `SIM_HARNESS_TOKEN`                                 | required                                          | The fakes' admin token                                                     |
+| `OPENROUTER_API_KEY`                                | required for OpenRouter                           | The model key; `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for those providers |
+| `LLM_PROVIDER`, `LLM_MODEL`                         | `openrouter`, `deepseek/deepseek-v4.1-flash-1017` | Otto's model                                                               |
+| `CONTEXT`                                           | current context                                   | The `kubectl` context                                                      |
+| `RUN_ID`                                            | `gym-<timestamp>`                                 | Names the run, its tenants and pods                                        |
+| `OTTO_EVAL_NAMESPACE`                               | `otto-eval`                                       | Where Otto's pods and databases run                                        |
+| `FAKES_NAMESPACE`                                   | `otto-eval`                                       | Where the simulated apps run                                               |
+| `NAMESPACE`                                         | `ai-gym`                                          | Where the CA certificate is copied from if `otto-eval` lacks it            |
+| `AI_GYM_REPO`                                       | `../ai-gym`                                       | The ai-gym checkout that holds `deploy/otto-eval/`                         |
+| `OTTO_EVAL_TEMPLATE`, `OTTO_EVAL_POSTGRES_TEMPLATE` | the ai-gym templates                              | Your own pod or Postgres template                                          |
+| `TURN_TIMEOUT_SECONDS`                              | `1200`                                            | How long one task may run                                                  |
+| `TASK_CHECKIN_USD`                                  | `50`                                              | Otto's per-task spending check-in, set high so tasks aren't interrupted    |
+| `FAKETIME_IMAGE`                                    | a pinned `debian:bookworm-slim`                   | Supplies `libfaketime` for moving time                                     |
+| `KEEP`                                              | unset                                             | `KEEP=1` leaves the pod, database and tenants for inspection               |
+
+## Clean up
+
+A finished task deletes its pod, Postgres and tenants. A task the harness couldn't finish keeps them, and prints the command to grade it again from what it kept: `pnpm --dir evals run gym -- --regrade <run>/<task>`. That command cleans up afterwards. To remove everything a run left behind:
+
+```sh title="Terminal"
+kubectl --context=$CONTEXT -n otto-eval get pod,service,secret,deployment,networkpolicy -o name \
+  | grep -E "/otto-eval-(pg-)?<run>-" \
+  | xargs kubectl --context=$CONTEXT -n otto-eval delete --wait=false
+```
+
+Every object a run creates is named `otto-eval-<run>-<task>` or `otto-eval-pg-<run>-<task>`, so this removes only that run's.
+
+The simulated apps stay deployed between runs; each run creates its own tenants in them.
+
+## Fix common problems
+
+| Symptom                                       | Cause and fix                                                                                                               |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `Reauthentication failed` from `kubectl`      | Your Google Cloud login expired. Run `gcloud auth login`.                                                                   |
+| `Could not resolve sim-…`                     | That app isn't deployed in `FAKES_NAMESPACE`. Repeat step 5 of [Set up once](#set-up-once).                                 |
+| The Otto pod stays `Pending`                  | No node fits. On another cluster, change the node pool lines in the ai-gym templates.                                       |
+| Postgres restarts once at start               | `libfaketime` failed to open a semaphore before `FAKETIME_DISABLE_SHM` took effect. It recovers on its own.                 |
+| A task fails on a call the fake doesn't serve | Look for `listed: false` or a 501 in the fake's events in the task's JSON. Fix the fake in ai-gym, rebuild and redeploy it. |
+
+## Related resources
+
+- [AI Gym evals](/contribute/gym/)
+- [Write and change AI Gym tasks](/contribute/gym-tasks/)
+- [Evals](/contribute/evals/)

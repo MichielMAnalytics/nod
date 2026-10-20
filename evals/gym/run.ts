@@ -11,6 +11,8 @@ import {
   type SavedSession,
   type TaskResult,
 } from './runner.ts';
+import type { Evidence } from './evidence.ts';
+import { commonChecks, report } from './grade.ts';
 import { stopForwards } from './http.ts';
 import { installTaskLogs } from './log.ts';
 import { runPool } from './parallel.ts';
@@ -68,7 +70,7 @@ if (process.argv.includes('--validate-worlds')) {
     runId: 'validate-worlds',
     namespace,
     fakesNamespace: fakesNamespace(environment),
-    research: environment.NAMESPACE?.trim() || 'research',
+    research: environment.NAMESPACE?.trim() || 'ai-gym',
     provider: '',
     model: '',
     keyVariable: '',
@@ -99,6 +101,30 @@ if (process.argv.includes('--validate-worlds')) {
     }`,
   );
   await exitWith(passed.length === results.length ? 0 : 1);
+}
+
+if (process.argv.includes('--grade')) {
+  const files = process.argv
+    .slice(process.argv.indexOf('--grade') + 1)
+    .filter((value) => !value.startsWith('--'));
+  if (!files.length) throw new Error('Use --grade <results/<run>/<task>.json> [more files].');
+  const tasks = await gymTasks();
+  let failed = 0;
+  for (const file of files) {
+    const saved = JSON.parse(await readFile(resolve(file), 'utf8')) as {
+      task: string;
+      evidence: Evidence;
+    };
+    const task = findTask(tasks, saved.task);
+    if (!task) throw new Error(`${file} names task ${saved.task}, which no longer exists.`);
+    const graded = report(task.id, [
+      ...commonChecks(saved.evidence),
+      ...task.checks(saved.evidence),
+    ]);
+    console.log(`\n${graded.text}`);
+    if (!graded.summary.startsWith('PASS')) failed += 1;
+  }
+  await exitWith(failed ? 1 : 0);
 }
 
 const regradeValue = argument('--regrade');
@@ -144,7 +170,7 @@ const config: RunConfig = {
   runId,
   namespace,
   fakesNamespace: fakesNamespace(environment),
-  research: environment.NAMESPACE?.trim() || 'research',
+  research: environment.NAMESPACE?.trim() || 'ai-gym',
   provider,
   model,
   keyVariable: keyVariable ?? '',
@@ -219,8 +245,8 @@ if (regrade) {
   await exitWith(result.passed ? 0 : 1);
 }
 
-const mtp = resolve(environment.MTP_GYM_REPO?.trim() || resolve(root, '../mtp-gym'));
-const workload = resolve(mtp, 'infra/gcp/research-cluster/workloads/otto-eval');
+const aiGym = resolve(environment.AI_GYM_REPO?.trim() || resolve(root, '../ai-gym'));
+const workload = resolve(aiGym, 'deploy/otto-eval');
 config.template = await readFile(
   environment.OTTO_EVAL_TEMPLATE?.trim() || resolve(workload, 'otto-pod.yaml.tmpl'),
   'utf8',

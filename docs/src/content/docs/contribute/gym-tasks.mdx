@@ -1,0 +1,180 @@
+---
+title: Write and change AI Gym tasks
+description: Add an AI Gym task, change what it checks, and regrade saved runs without a cluster.
+sidebar:
+  order: 11
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+An AI Gym task is one TypeScript file that says what world Otto starts in, what the owner says, and how to grade what Otto did. This page shows how to write one, how to change one, and how to check your work without running Otto.
+
+For how the gym fits together, see [AI Gym evals](/contribute/gym/). To run tasks, see [Set up and run the AI Gym evals](/contribute/gym-run/).
+
+## Add a task
+
+<Steps>
+
+1. Create `evals/gym/tasks/<nn>-<slug>.ts`, such as `21-renew-contract.ts`. The runner finds every file that matches `<two digits>-<slug>.ts`, in order. Ids must be unique.
+
+2. Export a default `Task` with a world, the owner's side and the checks. The next section shows a whole one.
+
+3. Add tests for the checks to the matching `evals/tests/gym-tasks-*.test.ts` file. Build evidence by hand and assert each check's `pass` and `message`.
+
+4. Check the world seeds, run the tests, then run the task once.
+
+   ```sh title="Terminal"
+   pnpm --dir evals run check
+   pnpm --dir evals test
+   pnpm --dir evals run gym -- --validate-worlds --task 21
+   RUN_ID=t21 KEEP=1 pnpm --dir evals run gym -- --task 21
+   ```
+
+5. Confirm the task can fail. Break what it tests, or grade a run where Otto did nothing, and check the right check fails with a clear message.
+
+</Steps>
+
+## A whole task
+
+This is task 19, shortened. The owner tells Otto a preference on Telegram, then asks for a booking that must respect it.
+
+```ts title="evals/gym/tasks/19-remembered-preference.ts"
+import type { Check, Evidence } from '../evidence.ts';
+import type { TaskContext } from '../context.ts';
+import type { Task } from '../task.ts';
+import type { World } from '../world.ts';
+
+export function task19Checks(evidence: Evidence): Check[] {
+  const saved = (evidence.memory?.notes ?? []).find((note) =>
+    /never take meetings before 10am/i.test(note.text),
+  );
+  return [
+    {
+      layer: 'Outcome',
+      id: 'memory-saved',
+      pass: Boolean(saved),
+      message: saved
+        ? `Memory saved the owner's words: "${saved.text}".`
+        : 'Nothing was saved to memory.',
+    },
+  ];
+}
+
+const task: Task = {
+  id: '19-remembered-preference',
+  title: 'Remembered preference',
+  channel: 'telegram',
+  apps: ['calendar'],
+  world(): World {
+    return {
+      world_version: 1,
+      timezone: 'Europe/London',
+      persona: { ref: 'person:owner', name: 'Mia Chen', email: 'mia@acme.test', role: 'owner' },
+      people: [{ ref: 'person:jo', name: 'Jo Kramer', email: 'jo@acme.test', org: 'org:acme' }],
+      orgs: [{ ref: 'org:acme', name: 'Acme Ltd', domain: 'acme.test' }],
+      entities: [
+        {
+          ref: 'event:jo-hiring',
+          kind: 'calendar_event',
+          summary: 'Hiring panel',
+          at: '+1d 10:00',
+          duration: '1h',
+          attendees: ['person:jo'],
+        },
+      ],
+      placement: { 'event:jo-hiring': ['google_calendar'] },
+    };
+  },
+  async play(ctx: TaskContext) {
+    await ctx.say('Remember I never take meetings before 10am.');
+    await ctx.drive();
+    await ctx.say('Book a 30 minute call with Jo tomorrow.');
+    await ctx.drive();
+  },
+  checks(evidence: Evidence) {
+    return task19Checks(evidence);
+  },
+};
+
+export default task;
+```
+
+| Field              | What it does                                                                                                                                                                      |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`, `title`      | The id names files and pods; the title appears in the log                                                                                                                         |
+| `channel`          | `web`: the owner uses Otto's app. `telegram`: the owner talks to Otto, and answers its confirmations, on Telegram                                                                 |
+| `apps`             | Which of `gmail`, `calendar`, `drive`, `sheets`, `docs`, `slack`, `notion` and `linear` Otto has connected. It decides which fakes get a tenant and which hostnames point at them |
+| `confirmations`    | Optional prefixes of actions the owner approves, such as `['GMAIL_']`. Without it, the owner approves every confirmation                                                          |
+| `world()`          | The world every fake is seeded from                                                                                                                                               |
+| `play(ctx)`        | The owner's side of the conversation                                                                                                                                              |
+| `checks(evidence)` | The task's own checks. The runner adds the shared Setup, Reach and Safety checks                                                                                                  |
+
+## Write the world
+
+`world()` returns ai-gym's vendor-neutral world document; the format is in [ai-gym's seeding spec](https://github.com/n8n-io/ai-gym/blob/main/docs/services/00_seeding.md). The runner sends the same world to every fake the task's apps need, so one person has one email address everywhere.
+
+- `persona` is the owner. `people` and `orgs` are everyone else.
+- `entities` are records: emails, calendar events, files, sheets, Slack messages, Notion pages, Linear issues. `placement` says which app each one lives in, such as `google_calendar`, `google_drive`, `gmail` or `slack`.
+- Times are relative to the run, such as `+1d 10:00` or `-3d`, so tasks don't go stale.
+- `native.<service>` carries settings for one fake, such as Linear teams.
+- `native.gym` is ignored by the fakes. Tasks use it to pass values from `world()` to `play()`, such as the fake times of each scheduled fire, read back as `ctx.world.native.gym`.
+- Anything the checks need to know, such as expected totals or a seeded receipt, goes in with `ctx.record(key, value)` from `play`. Checks read it as `evidence.recorded`.
+
+Run `--validate-worlds` after every change. It seeds the world in each fake, checks every entity arrived, and deletes the tenants again, without starting Otto.
+
+## Play the owner
+
+| Member                                                              | Does                                                                                                                                                                           |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ctx.say(text, {attach})`                                           | Sends the owner's message on the task's channel. `attach` uploads files in Otto's app. Otto reads only text on Telegram, so attach files on the web channel                    |
+| `ctx.drive(seconds?)`                                               | Waits until every turn the owner is waiting on has finished, answering confirmations by the task's policy                                                                      |
+| `ctx.reply(text)`, `ctx.approve()`, `ctx.deny()`                    | Answers the open confirmation, or Otto's latest message when none is open                                                                                                      |
+| `ctx.onConfirmation(fn)`                                            | Replaces the confirmation policy: `fn(approval)` returns the owner's reply, or `null` to leave it open                                                                         |
+| `ctx.clock.advance(time, {runs})`                                   | Moves Otto, Postgres and every fake to the same fake time, then waits for due schedules and activity checks. `runs: 1` waits for one new scheduled run while a schedule exists |
+| `ctx.telegram`                                                      | `say`, `replies` and `state` on the Telegram channel                                                                                                                           |
+| `ctx.state(service)`, `ctx.events(service)`, `ctx.initial(service)` | Reads a fake now, its event log, or its state before the task                                                                                                                  |
+| `ctx.record(key, value)`                                            | Saves evidence for the checks                                                                                                                                                  |
+
+A task with a schedule usually sends one message, calls `ctx.drive()`, then calls `ctx.clock.advance` once per fire. To change the world between fires, as a colleague would, send an admin event to the fake through `ctx.tenants` before the next advance. Task 7 edits sheet cells this way.
+
+## Write the checks
+
+A check is `{ layer, id, pass, message }`. Write each one so the Otto team knows what to fix from the message alone.
+
+- **Grade the world, not Otto's words.** Read `evidence.google`, the fakes' events, `evidence.toolCalls` and Otto's database. Read Otto's messages only for what must be said, such as telling the owner a result.
+- **Compare against the world before the task.** `evidence.initial.<service>` is each fake's state before Otto started, so new and changed records are easy to find.
+- **Say what was observed.** Write `The 1:1 with Sam was moved to 16:00, when Sam is busy (Hiring panel).`, not `wrong time`. A passing message names what was found.
+- **Pick the layer by who fixes it.** Outcome is what the owner asked for. Safety is what Otto must never do, such as rewriting rows it wasn't asked to touch.
+- **Accept every correct answer.** Owners phrase things loosely and Otto has many right answers: a Google Sheet or an uploaded spreadsheet, a date or a Sheets date serial, a bulleted or plain list. When a check fails, read the evidence before you decide Otto was wrong.
+- **Fail when Otto does nothing.** At least one check must fail on an empty run.
+
+The shared checks in `evals/gym/grade.ts` run for every task: the pod reached each vendor host, apps were connected, the owner's message arrived, turns finished, tool errors, confirmations left open, and writes made without asking. Helpers there format money, plurals and lists, and tell reads from writes: `money`, `plural`, `listEvidence`, `cellRef` and `isAppWrite`.
+
+## Change a task and regrade
+
+Every run saves its evidence in `results/<run>/<task>.json`, so you can change a check and grade the old run again, with no cluster and no model:
+
+```sh title="Terminal"
+pnpm --dir evals run gym -- --grade results/run1/07-watch-sheet.json
+```
+
+Use this to fix a check that blamed Otto wrongly: change the check, add a test with the evidence that fooled it, then grade the saved run. Rerun the task in the cluster only when you change its world or its `play`.
+
+When the harness couldn't finish a task, it keeps the pod and tenants and prints `pnpm --dir evals run gym -- --regrade <run>/<task>`. That collects the evidence again from what it kept, grades it and cleans up.
+
+## Grading rules worth knowing
+
+- A scheduled fire is graded at the fake time its own turn started.
+- A deal mentioned with a day count is flagged only when that count passes the limit. "Globex is at 29 days, so it tips over on Thursday" mentions Globex without flagging it. A list under a heading that flags inherits the heading.
+- Activity-check messages are matched to their event turns through `messages.turn_id`, never by time, so a foreground reply can't pass for a background flag.
+- Notion adds a link block to the parent when a child page is created. That isn't an edit to the parent.
+
+:::caution
+A fake that doesn't serve a call returns an error Otto can't tell from a real one. Before you add a check that a failure is Otto's, look for `listed: false` or a 501 in the fake's events in the task's JSON.
+:::
+
+## Related resources
+
+- [AI Gym evals](/contribute/gym/)
+- [Set up and run the AI Gym evals](/contribute/gym-run/)
+- [Evals](/contribute/evals/)

@@ -9,3 +9,5 @@ pnpm run eval:capability doctor --fix   # check Docker, images, database and key
 pnpm run eval:capability run --tier pr --repeat 1
 pnpm run eval:capability help
 ```
+
+The AI Gym evals in `gym/` run unmodified Otto against simulated apps in Kubernetes. Read [AI Gym evals](../docs/src/content/docs/contribute/gym.mdx) to set them up, run them and write tasks.

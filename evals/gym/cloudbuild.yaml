@@ -1,0 +1,50 @@
+substitutions:
+  _REGISTRY: europe-west1-docker.pkg.dev/n8n-model-training/research-cluster
+  _TAG: dev
+steps:
+  - id: server
+    name: gcr.io/cloud-builders/docker
+    args:
+      [
+        build,
+        --platform=linux/amd64,
+        --build-arg=OTTO_RELEASE=gym-$_TAG,
+        -f,
+        deployment/cloudflare/Dockerfile,
+        -t,
+        $_REGISTRY/otto-eval-server:$_TAG,
+        .,
+      ]
+    waitFor: ['-']
+  - id: workspace
+    name: gcr.io/cloud-builders/docker
+    args:
+      [
+        build,
+        --platform=linux/amd64,
+        -f,
+        deployment/cloudflare/Dockerfile.workspace,
+        -t,
+        $_REGISTRY/otto-eval-workspace:$_TAG,
+        .,
+      ]
+    waitFor: ['-']
+  - id: browser
+    name: gcr.io/cloud-builders/docker
+    args:
+      [
+        build,
+        --platform=linux/amd64,
+        -f,
+        deployment/cloudflare/Dockerfile.browser,
+        -t,
+        $_REGISTRY/otto-eval-browser:$_TAG,
+        .,
+      ]
+    waitFor: ['-']
+images:
+  - $_REGISTRY/otto-eval-server:$_TAG
+  - $_REGISTRY/otto-eval-workspace:$_TAG
+  - $_REGISTRY/otto-eval-browser:$_TAG
+options: { machineType: E2_HIGHCPU_8, env: [DOCKER_BUILDKIT=1] }
+timeout: 3600s
