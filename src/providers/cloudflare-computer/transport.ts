@@ -8,6 +8,25 @@ import { loopbackHost } from '../../shared/loopback.ts';
 
 const frameLimit = 22_000;
 
+export function computerOrigin(value?: string) {
+  try {
+    const url = new URL(value ?? 'http://otto.computer');
+    if (
+      url.protocol !== 'http:' ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      (url.origin !== 'http://otto.computer' && !loopbackHost(url.hostname))
+    )
+      throw new Error();
+    return url.origin;
+  } catch {
+    throw new Error('The remote computer configuration is invalid.');
+  }
+}
+
 export function launchCloudflareCommand(options: {
   role: 'browser' | 'workspace';
   generation: string;
@@ -21,15 +40,8 @@ export function launchCloudflareCommand(options: {
   const { role, generation, threadId: selectedThreadId, connected, session, onUncertain } = options;
   let origin: string;
   try {
-    const url = new URL(options.origin ?? 'http://otto.computer');
+    origin = computerOrigin(options.origin);
     if (
-      url.protocol !== 'http:' ||
-      url.username ||
-      url.password ||
-      url.pathname !== '/' ||
-      url.search ||
-      url.hash ||
-      (url.origin !== 'http://otto.computer' && !loopbackHost(url.hostname)) ||
       !['browser', 'workspace'].includes(role) ||
       !/^[1-9]\d{0,18}$/.test(generation) ||
       (role === 'workspace' && !selectedThreadId) ||
@@ -38,7 +50,6 @@ export function launchCloudflareCommand(options: {
     )
       throw new Error();
     if (selectedThreadId !== undefined) threadIdentity(selectedThreadId);
-    origin = url.origin;
   } catch {
     throw new Error('The remote computer configuration is invalid.');
   }
@@ -334,11 +345,20 @@ export function launchCloudflareCommand(options: {
   });
 }
 
-export async function cloudflareBrowserLive(options: { generation: string; fetch?: typeof fetch }) {
-  if (!/^[1-9]\d{0,18}$/.test(options.generation))
-    throw new Error('The remote computer configuration is invalid.');
+export async function cloudflareBrowserLive(options: {
+  generation: string;
+  fetch?: typeof fetch;
+  origin?: string;
+}) {
+  let origin: string;
   try {
-    const response = await (options.fetch ?? fetch)('http://otto.computer/v1/status', {
+    if (!/^[1-9]\d{0,18}$/.test(options.generation)) throw new Error();
+    origin = computerOrigin(options.origin);
+  } catch {
+    throw new Error('The remote computer configuration is invalid.');
+  }
+  try {
+    const response = await (options.fetch ?? fetch)(origin + '/v1/status', {
       headers: { 'x-otto-generation': options.generation, 'x-otto-computer-role': 'browser' },
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),

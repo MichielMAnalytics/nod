@@ -19,6 +19,7 @@ COPY --chmod=555 src/providers/container-browser/chromium.sh ./src/providers/con
 COPY --chmod=555 src/providers/container-browser/xvfb.sh /usr/local/bin/Xvfb
 RUN mkdir -p /data /opt/otto && chown node:node /data && chmod 700 /data
 COPY src/providers/cloudflare-computer/entrypoint.mjs /opt/otto/entrypoint.mjs
+COPY src/providers/cloudflare-computer/sidecar.mjs /opt/otto/sidecar.mjs
 COPY src/providers/cloudflare-computer/checkpoint.py /opt/otto/checkpoint.py
 RUN chmod 555 /opt/otto && chmod 444 /opt/otto/*
 USER node

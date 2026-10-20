@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -21,7 +22,10 @@ import type {
 import { createComputerAllocationStore } from '../src/server/computer-allocations.ts';
 import type { CommandProcess } from '../src/providers/command-process.ts';
 import { createCloudflareAdapters } from '../src/providers/cloudflare-computer/index.ts';
-import { launchCloudflareCommand } from '../src/providers/cloudflare-computer/transport.ts';
+import {
+  cloudflareBrowserLive,
+  launchCloudflareCommand,
+} from '../src/providers/cloudflare-computer/transport.ts';
 import { runBrowserBridge } from '../src/providers/container-browser/bridge.ts';
 import { startContainerBrowserWorker } from '../src/providers/container-browser/worker.ts';
 import { connectedUser, workspaceCommandProgram } from '../src/providers/docker/command.ts';
@@ -1331,6 +1335,155 @@ test(
     }
   },
 );
+
+test('sidecar adapters keep workspace and browser traffic on their own loopback origins', async () => {
+  const root = await mkdtemp('/tmp/otto-sidecar-adapters-');
+  const calls: string[] = [];
+  const request: typeof fetch = async (input, init) => {
+    const value = new Request(input, init);
+    const url = new URL(value.url);
+    calls.push(`${url.origin} ${value.headers.get('x-otto-computer-role')}`);
+    if (url.pathname === '/v1/commands') {
+      const id = ((await value.json()) as { id: string }).id;
+      return Response.json({ id }, { status: 201 });
+    }
+    if (url.pathname.endsWith('/output'))
+      return new Response(
+        frame('stdout', '{"type":"exit","code":0,"reason":null}\n') + '{"type":"exit","code":0}\n',
+      );
+    return new Response(null, { status: 204 });
+  };
+  const adapters = createCloudflareAdapters({
+    ownerId: ownerA,
+    generation: '1',
+    workspaceRoot: join(root, 'roots', ownerA),
+    browserOrigin: 'http://127.0.0.1:4312',
+    workspaceOrigin: 'http://127.0.0.1:4313',
+    fetch: request,
+  });
+  try {
+    assert.throws(
+      () =>
+        createCloudflareAdapters({
+          ownerId: ownerA,
+          generation: '1',
+          workspaceRoot: join(root, 'roots', ownerA),
+          browserOrigin: 'http://example.test',
+        }),
+      { message: 'The remote computer configuration is invalid.' },
+    );
+    const session = adapters.workspace.open({
+      threadId: 'sidecar-task',
+      workspacePath: join(root, 'roots', ownerA, 'sidecar-task'),
+      signal: new AbortController().signal,
+    });
+    await execute(session, 'true');
+    assert.equal(
+      await cloudflareBrowserLive({
+        generation: '1',
+        origin: 'http://127.0.0.1:4312',
+        fetch: async (url) => {
+          calls.push(new URL(String(url)).origin);
+          return Response.json({ live: true });
+        },
+      }),
+      true,
+    );
+  } finally {
+    await adapters.workspace.dispose();
+    await adapters.computer.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.ok(calls.includes('http://127.0.0.1:4313 workspace'));
+  assert.ok(calls.includes('http://127.0.0.1:4312'));
+});
+
+async function sidecarPort() {
+  const probe = createNetServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+  const address = probe.address();
+  const port = address && typeof address === 'object' ? address.port : 0;
+  await new Promise((done) => probe.close(done));
+  assert.ok(port);
+  return port;
+}
+
+test(
+  'the sidecar command server mirrors the Cloudflare command contract on loopback',
+  { timeout: 20000 },
+  async () => {
+    const root = await mkdtemp('/tmp/otto-sidecar-server-');
+    const stub = join(root, 'stub.mjs');
+    await writeFile(stub, 'process.stdin.pipe(process.stdout)\n');
+    const port = await sidecarPort();
+    const server = spawn(
+      process.execPath,
+      ['src/providers/cloudflare-computer/sidecar.mjs', 'workspace'],
+      {
+        env: {
+          ...process.env,
+          OTTO_COMPUTER_PORT: String(port),
+          OTTO_COMPUTER_GENERATION: '7',
+          OTTO_SIDECAR_COMMAND: JSON.stringify([process.execPath, stub]),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stderr = '';
+    server.stderr.setEncoding('utf8');
+    server.stderr.on('data', (chunk: string) => (stderr += chunk));
+    try {
+      const headers = {
+        'x-otto-generation': '7',
+        'x-otto-computer-role': 'workspace',
+      };
+      await waitForLifecycle(async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/v1/status`, { headers }).catch(
+          () => undefined,
+        );
+        return response?.ok === true ? true : undefined;
+      }, 5000);
+      const refused = await fetch(`http://127.0.0.1:${port}/v1/status`, {
+        headers: { ...headers, 'x-otto-generation': '8' },
+      });
+      assert.equal(refused.status, 403);
+      const invalid = await fetch(`http://127.0.0.1:${port}/v1/commands`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ id: randomUUID(), role: 'workspace' }),
+      });
+      assert.equal(invalid.status, 400);
+      const command = launch({
+        role: 'workspace',
+        generation: '7',
+        threadId: 'sidecar-task',
+        origin: `http://127.0.0.1:${port}`,
+      });
+      command.process.stdin.write('héllo 🌍\n');
+      command.process.stdin.end();
+      assert.equal(await command.completed, 'close');
+      assert.deepEqual(command.closes, [0]);
+      assert.deepEqual(command.errors, []);
+      assert.equal(command.uncertain(), 0);
+      assert.equal(Buffer.concat(command.stdout).toString(), 'héllo 🌍\n');
+      assert.equal(Buffer.concat(command.stderr).toString(), '');
+    } finally {
+      server.kill('SIGTERM');
+      await new Promise((done) => server.once('close', done));
+      await rm(root, { recursive: true, force: true });
+      assert.equal(stderr, '');
+    }
+  },
+);
+
+async function waitForLifecycle(check: () => Promise<true | undefined>, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await check()) return;
+    if (Date.now() >= deadline) throw new Error('The sidecar server never started.');
+    await delay(50);
+  }
+}
 
 test('Cloudflare rejects unsupported origins, identities and task paths before contacting transport', () => {
   const invalid: Array<Partial<Parameters<typeof launchCloudflareCommand>[0]>> = [

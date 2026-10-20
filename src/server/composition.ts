@@ -342,9 +342,11 @@ export function createDefaultAdapters(
     : ownIntegrations;
   const computerProvider = env.COMPUTER_PROVIDER || 'docker';
   if (
-    !['docker', 'e2b', 'cloudflare'].includes(computerProvider) ||
-    (runtimeMode === 'tenant' && computerProvider === 'docker') ||
-    (computerProvider === 'cloudflare' && runtimeMode !== 'tenant')
+    !['docker', 'e2b', 'cloudflare', 'sidecar'].includes(computerProvider) ||
+    (runtimeMode === 'tenant' && ['docker', 'sidecar'].includes(computerProvider)) ||
+    (computerProvider === 'cloudflare' && runtimeMode !== 'tenant') ||
+    (computerProvider === 'sidecar' &&
+      (runtimeMode !== 'local' || !env.COMPUTER_BROWSER_URL || !env.COMPUTER_WORKSPACE_URL))
   )
     throw new Error('Configure a supported, isolated computer provider.');
   const allocations =
@@ -372,7 +374,15 @@ export function createDefaultAdapters(
           generation: runtimeGeneration,
           workspaceRoot: join(dataRoot, 'workspaces'),
         })
-      : undefined;
+      : computerProvider === 'sidecar'
+        ? createCloudflareAdapters({
+            ownerId: '00000000-0000-4000-8000-000000000001',
+            generation: '1',
+            workspaceRoot: join(dataRoot, 'workspaces'),
+            browserOrigin: env.COMPUTER_BROWSER_URL,
+            workspaceOrigin: env.COMPUTER_WORKSPACE_URL,
+          })
+        : undefined;
   const remote = cloudflare ?? e2b;
   const databaseObjects =
     env.OBJECT_STORAGE_PROVIDER === 'postgres'

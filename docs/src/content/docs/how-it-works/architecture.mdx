@@ -105,6 +105,7 @@ The workspace and the browser are "the computer". `COMPUTER_PROVIDER` picks who 
 | `docker` (default) | Local only  | Separate workspace and browser containers on your computer.                                              |
 | `cloudflare`       | Hosted only | Separate browser and workspace containers per owner, checkpointed to private R2.                         |
 | `e2b`              | Optional    | One combined E2B sandbox per owner, with separate Linux users for browser, workspace and connected CLIs. |
+| `sidecar`          | Eval only   | Separate workspace and browser containers in the same pod as Otto, reached over loopback HTTP.           |
 
 Cloudflare is the selected hosted provider. E2B must pass its live acceptance check before you turn it on anywhere. See the [E2B notes](https://github.com/n8n-io/otto/blob/main/deployment/e2b/README.md).
 

@@ -140,11 +140,13 @@ For an operator-owned collector, set `OTTO_FEEDBACK_URL=https://feedback.example
 
 ## Computers
 
-| Variable              | What it does                                                                                                    | Default          |
-| --------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `COMPUTER_PROVIDER`   | Where the workspace and browser run: `docker` on your computer, `e2b`, or `cloudflare` for hosted tenants only. | `docker`         |
-| `WORKSPACE_CONTAINER` | The Docker container for the workspace.                                                                         | `otto-workspace` |
-| `BROWSER_CONTAINER`   | The Docker container for the browser.                                                                           | `otto-browser`   |
+| Variable                 | What it does                                                                                                                                                          | Default          |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `COMPUTER_PROVIDER`      | Where the workspace and browser run: `docker` on your computer, `e2b`, `cloudflare` for hosted tenants only, or `sidecar` (eval only) for two containers beside Otto. | `docker`         |
+| `WORKSPACE_CONTAINER`    | The Docker container for the workspace.                                                                                                                               | `otto-workspace` |
+| `BROWSER_CONTAINER`      | The Docker container for the browser.                                                                                                                                 | `otto-browser`   |
+| `COMPUTER_BROWSER_URL`   | The browser sidecar's loopback origin, such as `http://127.0.0.1:4312`. Required by `sidecar`.                                                                        | None             |
+| `COMPUTER_WORKSPACE_URL` | The workspace sidecar's loopback origin, such as `http://127.0.0.1:4313`. Required by `sidecar`.                                                                      | None             |
 
 ## Hosted only
 

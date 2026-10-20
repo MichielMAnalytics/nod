@@ -4,12 +4,14 @@ import type { Computer, Workspace } from '../../ports/computer.ts';
 import { createBridgeComputer } from '../container-browser/client.ts';
 import { createCommandWorkspace } from '../docker/index.ts';
 import { connectedUser, runSupervisedCommand, WorkspaceCommandError } from '../docker/command.ts';
-import { cloudflareBrowserLive, launchCloudflareCommand } from './transport.ts';
+import { cloudflareBrowserLive, computerOrigin, launchCloudflareCommand } from './transport.ts';
 
 export function createCloudflareAdapters(options: {
   ownerId: string;
   generation: string;
   workspaceRoot: string;
+  browserOrigin?: string;
+  workspaceOrigin?: string;
   browserTimeoutMs?: number;
   drainTimeoutMs?: number;
   transportGraceMs?: number;
@@ -26,6 +28,8 @@ export function createCloudflareAdapters(options: {
     fetch: requestFetch,
     launch = launchCloudflareCommand,
   } = options;
+  const browserOrigin = computerOrigin(options.browserOrigin);
+  const workspaceOrigin = computerOrigin(options.workspaceOrigin);
   if (!z.uuid().safeParse(ownerId).success || !/^[1-9]\d{0,18}$/.test(generation))
     throw new Error('The remote computer configuration is invalid.');
   let browserUsed = false;
@@ -42,6 +46,7 @@ export function createCloudflareAdapters(options: {
         role: 'browser',
         generation,
         fetch: requestFetch,
+        origin: browserOrigin,
         onUncertain() {},
       });
     },
@@ -77,6 +82,7 @@ export function createCloudflareAdapters(options: {
           threadId,
           ...mode,
           fetch: requestFetch,
+          origin: workspaceOrigin,
           onUncertain: () => {
             workspaceUnavailable = true;
           },
@@ -90,7 +96,11 @@ export function createCloudflareAdapters(options: {
         if (
           browserUsed &&
           !browserDisposed &&
-          (await cloudflareBrowserLive({ generation, fetch: requestFetch }))
+          (await cloudflareBrowserLive({
+            generation,
+            fetch: requestFetch,
+            origin: browserOrigin,
+          }))
         )
           await computer.hold(threadId, held);
       },

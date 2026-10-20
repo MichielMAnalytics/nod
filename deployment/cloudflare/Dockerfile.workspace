@@ -24,6 +24,7 @@ RUN mkdir -p /opt/otto \
 RUN groupadd --gid 1002 otto-connected && useradd --uid 1002 --gid 1002 --create-home --shell /usr/sbin/nologin otto-connected && chmod 700 /home/otto-connected
 COPY --from=helpers /workspace-command.py /opt/otto/workspace-command.py
 COPY src/providers/cloudflare-computer/entrypoint.mjs /opt/otto/entrypoint.mjs
+COPY src/providers/cloudflare-computer/sidecar.mjs /opt/otto/sidecar.mjs
 COPY src/providers/cloudflare-computer/checkpoint.py /opt/otto/checkpoint.py
 RUN chmod 555 /opt/otto && chmod 444 /opt/otto/*
 USER node
