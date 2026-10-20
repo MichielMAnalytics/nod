@@ -6,6 +6,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "eval": "tsx src/cli.ts"
+    "eval": "tsx src/cli.ts",
+    "gym": "node --import tsx gym/run.ts"
   }
 }

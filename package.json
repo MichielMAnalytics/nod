@@ -25,7 +25,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "eval:voice": "tsx scripts/voice-eval.ts",
-    "eval:capability": "tsx evals/src/cli.ts"
+    "eval:capability": "tsx evals/src/cli.ts",
+    "eval:gym": "node --import tsx evals/gym/run.ts"
   },
   "dependencies": {
     "@chat-adapter/state-pg": "^4.42.0",

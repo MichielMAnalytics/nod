@@ -1,5 +1,7 @@
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": { "paths": {} },
-  "include": ["src", "tests"]
+  "compilerOptions": {
+    "paths": {}
+  },
+  "include": ["src", "tests", "gym"]
 }

@@ -1,0 +1,20 @@
+{
+  "currency": "GBP",
+  "period": {
+    "from": "2026-07-01",
+    "to": "2026-09-29"
+  },
+  "transactions": 62,
+  "openingBalance": 12500,
+  "closingBalance": 9121.54,
+  "netCashMovement": -3378.46,
+  "revenue": 52895,
+  "operatingExpenses": 37003.46,
+  "netProfit": 15891.54,
+  "netProfitIncludingVat": 9071.54,
+  "netProfitNote": "VAT paid to HMRC is a balance-sheet/tax movement, not an operating cost, so strict net profit is revenue minus operating expenses (15,891.54). Treating the VAT payments as an expense is also accepted (9,071.54). Owner drawings and loan principal are never in either figure.",
+  "vatPaid": 6820,
+  "drawings": 9000,
+  "loanPrincipal": 3450,
+  "tolerance": 1
+}

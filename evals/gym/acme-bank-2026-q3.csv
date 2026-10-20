@@ -1,0 +1,63 @@
+Date,Description,Amount,Balance
+2026-07-01,"Stripe payout ST-7421",4820.00,17320.00
+2026-07-01,"Office rent - July",-2400.00,14920.00
+2026-07-02,"Google Workspace subscription",-64.80,14855.20
+2026-07-03,"Adobe Creative Cloud",-59.99,14795.21
+2026-07-06,"Invoice INV-1042 Northwind Ltd",6450.00,21245.21
+2026-07-07,"HMRC VAT payment Q2",-3180.00,18065.21
+2026-07-08,"Train London to Manchester",-128.50,17936.71
+2026-07-10,"Payroll July",-8400.00,9536.71
+2026-07-13,"Figma subscription",-45.00,9491.71
+2026-07-14,"AWS hosting",-312.44,9179.27
+2026-07-15,"Invoice INV-1047 Blue Harbour Media",2980.00,12159.27
+2026-07-16,"Bank account fee",-18.00,12141.27
+2026-07-17,"Hotel Manchester",-189.00,11952.27
+2026-07-20,"Stripe payout ST-7438",3240.00,15192.27
+2026-07-22,"Xero accounting software",-32.00,15160.27
+2026-07-24,"Business insurance quarterly",-540.00,14620.27
+2026-07-27,"Owner drawing July",-3000.00,11620.27
+2026-07-28,"Loan repayment July",-1150.00,10470.27
+2026-07-29,"GitHub Team subscription",-76.00,10394.27
+2026-07-30,"Client lunch - Harbourline",-84.60,10309.67
+2026-08-01,"Stripe payout ST-7450",5610.00,15919.67
+2026-08-03,"Office rent - August",-2400.00,13519.67
+2026-08-04,"Google Workspace subscription",-64.80,13454.87
+2026-08-05,"Adobe Creative Cloud",-59.99,13394.88
+2026-08-06,"Invoice INV-1053 Ridgeway Consulting",7200.00,20594.88
+2026-08-07,"Rail tickets to Edinburgh",-164.20,20430.68
+2026-08-10,"Payroll August",-8400.00,12030.68
+2026-08-11,"Notion subscription",-24.00,12006.68
+2026-08-12,"AWS hosting",-298.17,11708.51
+2026-08-13,"Flight London to Amsterdam",-214.80,11493.71
+2026-08-14,"Bank account fee",-18.00,11475.71
+2026-08-17,"Stripe payout ST-7462",2875.00,14350.71
+2026-08-18,"Figma subscription",-45.00,14305.71
+2026-08-19,"Hotel Amsterdam",-362.40,13943.31
+2026-08-20,"Invoice INV-1059 Cobalt Labs",4100.00,18043.31
+2026-08-21,"Xero accounting software",-32.00,18011.31
+2026-08-24,"Slack subscription",-61.20,17950.11
+2026-08-25,"Owner drawing August",-3000.00,14950.11
+2026-08-26,"Loan repayment August",-1150.00,13800.11
+2026-08-27,"HMRC VAT payment Q3 instalment",-3640.00,10160.11
+2026-08-28,"Courier and postage",-46.75,10113.36
+2026-08-29,"Bank transaction fees",-27.40,10085.96
+2026-09-01,"Stripe payout ST-7475",4390.00,14475.96
+2026-09-02,"Office rent - September",-2400.00,12075.96
+2026-09-03,"Google Workspace subscription",-64.80,12011.16
+2026-09-04,"Adobe Creative Cloud",-59.99,11951.17
+2026-09-07,"Invoice INV-1064 Northwind Ltd",5850.00,17801.17
+2026-09-08,"Train London to Bristol",-96.40,17704.77
+2026-09-09,"Payroll September",-8400.00,9304.77
+2026-09-10,"AWS hosting",-331.08,8973.69
+2026-09-11,"Figma subscription",-45.00,8928.69
+2026-09-14,"Bank account fee",-18.00,8910.69
+2026-09-15,"Invoice INV-1068 Willow & Stone",3420.00,12330.69
+2026-09-16,"Google Ads campaign",-450.00,11880.69
+2026-09-17,"Stripe payout ST-7489",1960.00,13840.69
+2026-09-18,"Xero accounting software",-32.00,13808.69
+2026-09-21,"Slack subscription",-61.20,13747.49
+2026-09-22,"Taxi to client meeting",-24.80,13722.69
+2026-09-23,"Owner drawing September",-3000.00,10722.69
+2026-09-24,"Loan repayment September",-1150.00,9572.69
+2026-09-25,"Accountant fees",-420.00,9152.69
+2026-09-29,"Bank transaction fees",-31.15,9121.54
