@@ -11,6 +11,7 @@ export interface PendingApproval {
   id: string;
   action: string;
   messageId: string;
+  question: string;
 }
 
 export interface Otto {
@@ -27,6 +28,7 @@ export interface Otto {
     threadId: string,
     seconds: number,
     onApproval?: (approval: PendingApproval) => string | null,
+    answer?: (approval: PendingApproval, text: string) => Promise<void>,
   ): Promise<{ timedOut: boolean }>;
   latestAssistantMessageId(threadId: string): Promise<string | undefined>;
   apps(): Promise<Array<Record<string, any>>>;
@@ -169,19 +171,14 @@ export async function startOtto(options: {
   const sqlString = (value: string) => `'${value.replaceAll("'", "''")}'`;
   const jsonRows = async <T>(sql: string): Promise<T[]> =>
     JSON.parse((await psql(`SELECT coalesce(json_agg(x),'[]') FROM (${sql}) x`)) || '[]') as T[];
-  const approved = async (): Promise<PendingApproval[]> => {
-    const rows = await psql(
-      "SELECT id, action, confirmation_message_id FROM approvals WHERE status='pending' ORDER BY created_at DESC",
-    );
-    return rows
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
-        const [id, action, messageId] = line.split('|');
-        return { id: id!, action: action!, messageId: messageId ?? '' };
-      })
-      .filter((approval) => approval.messageId);
-  };
+  const approved = async (): Promise<PendingApproval[]> =>
+    (
+      await jsonRows<PendingApproval>(
+        `SELECT a.id, a.action, a.confirmation_message_id AS "messageId", coalesce(m.text,'') AS question
+         FROM approvals a LEFT JOIN messages m ON m.id=a.confirmation_message_id
+         WHERE a.status='pending' AND a.confirmation_message_id IS NOT NULL ORDER BY a.created_at DESC`,
+      )
+    ).map((approval) => ({ ...approval, messageId: String(approval.messageId) }));
   return {
     port: () => endpoint.port(),
     request: json,
@@ -222,7 +219,7 @@ export async function startOtto(options: {
       return result.turnId;
     },
     approved,
-    async drive(threadId, seconds, onApproval) {
+    async drive(threadId, seconds, onApproval, answer) {
       const deadline = Date.now() + seconds * 1000;
       const replied = new Set<string>();
       let leftOpen = false;
@@ -239,20 +236,22 @@ export async function startOtto(options: {
         const pending = await approved();
         for (const approval of pending) {
           if (replied.has(approval.id)) continue;
-          const answer = onApproval ? onApproval(approval) : 'Yes';
+          const text = onApproval ? onApproval(approval) : 'Yes';
           replied.add(approval.id);
-          if (answer === null) {
+          if (text === null) {
             leftOpen = true;
             continue;
           }
           console.log(
-            `Answering ${approval.action} (${approval.id}) with ${JSON.stringify(answer)}.`,
+            `Answering ${approval.action} (${approval.id}) with ${JSON.stringify(text)}.`,
           );
-          await json('POST', '/api/messages', {
-            text: answer,
-            replyToMessageId: approval.messageId,
-            threadId,
-          });
+          if (answer) await answer(approval, text);
+          else
+            await json('POST', '/api/messages', {
+              text,
+              replyToMessageId: approval.messageId,
+              threadId,
+            });
         }
         if (leftOpen && active === 0) return { timedOut: false };
         if (Date.now() >= deadline) return { timedOut: true };

@@ -46,7 +46,7 @@ import {
 import { createChatSdkSetupVerifier } from '../../src/providers/chat-sdk/settings.ts';
 import { chooseForm, formBody, parseForms } from '../gym/mcp.ts';
 import { postgresName, runPool } from '../gym/parallel.ts';
-import { confirmationHandler } from '../gym/runner.ts';
+import { answerOnTelegram, confirmationHandler } from '../gym/runner.ts';
 import { prefixLines } from '../gym/log.ts';
 import task1 from '../gym/tasks/01-accounts.ts';
 import {
@@ -2358,14 +2358,48 @@ test('a gym Telegram message that reached Otto is reported apart from its turn',
   );
 });
 
+test('the gym answers a Telegram confirmation as a reply to the bot message that asked it', async () => {
+  const sent: Array<{ text: string; replyTo?: number }> = [];
+  const telegram = {
+    replies: async () => [
+      {
+        messageId: 11,
+        text: 'Do you want me to create the event **Call with Jo** tomorrow at 11:00?',
+      },
+      { messageId: 12, text: 'Checking your calendar.' },
+    ],
+    say: async (text: string, replyTo?: number) => {
+      sent.push({ text, replyTo });
+      return 13;
+    },
+  } as unknown as Parameters<typeof answerOnTelegram>[0];
+  await answerOnTelegram(
+    telegram,
+    {
+      id: 'a',
+      action: 'GOOGLECALENDAR_CREATE_EVENT',
+      messageId: 'm',
+      question: 'Do you want me to create the event “Call with Jo” tomorrow at 11:00?',
+    },
+    'Yes',
+  );
+  assert.deepEqual(sent, [{ text: 'Yes', replyTo: 11 }]);
+});
+
 test('the gym approves every confirmation unless its task lists the ones to approve', () => {
   const approving = confirmationHandler({
     confirmations: ['GMAIL_'],
   } as Parameters<typeof confirmationHandler>[0]);
-  assert.equal(approving({ id: 'a', action: 'GMAIL_SEND_EMAIL', messageId: 'm' }), 'Yes');
-  assert.equal(approving({ id: 'b', action: 'GOOGLESHEETS_BATCH_UPDATE', messageId: 'm' }), null);
+  assert.equal(
+    approving({ id: 'a', action: 'GMAIL_SEND_EMAIL', messageId: 'm', question: '' }),
+    'Yes',
+  );
+  assert.equal(
+    approving({ id: 'b', action: 'GOOGLESHEETS_BATCH_UPDATE', messageId: 'm', question: '' }),
+    null,
+  );
   const none = confirmationHandler({} as Parameters<typeof confirmationHandler>[0]);
-  assert.equal(none({ id: 'c', action: 'GMAIL_SEND_EMAIL', messageId: 'm' }), 'Yes');
+  assert.equal(none({ id: 'c', action: 'GMAIL_SEND_EMAIL', messageId: 'm', question: '' }), 'Yes');
 });
 
 test('a failed gym turn names the approved action and the error', () => {

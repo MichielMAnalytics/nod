@@ -562,7 +562,12 @@ function contextFor(
     evidence: session.recorded,
     say,
     drive: (seconds = config.turnSeconds) =>
-      otto.drive(threadId, seconds, (approval: PendingApproval) => session.handler(approval)),
+      otto.drive(
+        threadId,
+        seconds,
+        (approval: PendingApproval) => session.handler(approval),
+        telegram ? (approval, text) => answerOnTelegram(telegram, approval, text) : undefined,
+      ),
     reply,
     approve: () => reply('Yes'),
     deny: () => reply('No'),
@@ -1044,6 +1049,23 @@ async function cleanupTask(config: RunConfig, session: Session, keep: boolean) {
       '--wait=false',
     ])
     .catch(() => '');
+}
+
+function plainText(value: string) {
+  return value.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
+}
+
+export async function answerOnTelegram(
+  telegram: TelegramOwner,
+  approval: PendingApproval,
+  text: string,
+) {
+  const replies = await telegram.replies();
+  const question = plainText(approval.question).slice(0, 60);
+  const target =
+    replies.findLast((reply) => question && plainText(reply.text).startsWith(question)) ??
+    replies.at(-1);
+  await telegram.say(text, target?.messageId);
 }
 
 export async function runTask(config: RunConfig, task: Task): Promise<TaskResult> {
