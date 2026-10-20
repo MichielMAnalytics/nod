@@ -34,6 +34,7 @@ export interface ClockRun {
 export interface ClockSnapshot {
   turns: ClockTurn[];
   runs: ClockRun[];
+  schedules?: number;
 }
 
 export interface ClockAdvance {
@@ -49,6 +50,7 @@ export interface ClockAdvanceOptions {
   discoverySeconds?: number;
   settleSeconds?: number;
   intervalMs?: number;
+  runs?: number;
 }
 
 export interface Clock {
@@ -73,7 +75,8 @@ export interface ClockDependencies {
 
 const snapshotSql = `SELECT json_build_object(
   'turns', (SELECT coalesce(json_agg(json_build_object('id',id,'source',source,'status',status,'started',started_at IS NOT NULL)),'[]') FROM turns),
-  'runs', (SELECT coalesce(json_agg(json_build_object('id',r.id,'turnId',r.turn_id,'turnStatus',t.status)),'[]') FROM schedule_runs r LEFT JOIN turns t ON t.id=r.turn_id)
+  'runs', (SELECT coalesce(json_agg(json_build_object('id',r.id,'turnId',r.turn_id,'turnStatus',t.status)),'[]') FROM schedule_runs r LEFT JOIN turns t ON t.id=r.turn_id),
+  'schedules', (SELECT count(*) FROM schedules WHERE enabled)
 )`;
 
 export function clockOffsetSeconds(target: Date | number, now = new Date()) {
@@ -144,11 +147,12 @@ export function createClock(dependencies: ClockDependencies): Clock {
 
   const readSnapshot = async (): Promise<ClockSnapshot> => {
     const output = (await psql(snapshotSql)).trim();
-    if (!output) return { turns: [], runs: [] };
+    if (!output) return { turns: [], runs: [], schedules: 0 };
     const parsed = JSON.parse(output) as Partial<ClockSnapshot>;
     return {
       turns: Array.isArray(parsed.turns) ? parsed.turns : [],
       runs: Array.isArray(parsed.runs) ? parsed.runs : [],
+      schedules: Number(parsed.schedules) || 0,
     };
   };
 
@@ -195,6 +199,7 @@ export function createClock(dependencies: ClockDependencies): Clock {
     const discoverySeconds = options.discoverySeconds ?? dependencies.discoverySeconds ?? 35;
     const settleSeconds = options.settleSeconds ?? dependencies.settleSeconds ?? 5;
     const intervalMs = options.intervalMs ?? dependencies.intervalMs ?? 1000;
+    const wantedRuns = options.runs ?? 0;
     const before = await readSnapshot();
     const offsetSeconds = clockOffsetSeconds(target, realNow());
     const offset = formatClockOffset(offsetSeconds);
@@ -227,6 +232,8 @@ export function createClock(dependencies: ClockDependencies): Clock {
       const elapsed = current - startedAt;
       if (
         elapsed >= discoverySeconds * 1000 &&
+        (!snapshot.schedules ||
+          runs.filter((run) => run.turnStatus !== null).length >= wantedRuns) &&
         !activeTurns.length &&
         !activeRuns.length &&
         current - lastChange >= settleSeconds * 1000
@@ -243,7 +250,7 @@ export function createClock(dependencies: ClockDependencies): Clock {
           (item) => `${item.id} (${'status' in item ? item.status : item.turnStatus})`,
         );
         throw new Error(
-          `Otto had not finished the work due after ${timeoutSeconds}s: ${pending.join(', ') || `${turns.length} due turn(s), ${runs.length} schedule run(s)`}.`,
+          `Otto had not finished the work due after ${timeoutSeconds}s: ${pending.join(', ') || `${turns.length} due turn(s), ${runs.length} of ${wantedRuns} expected schedule run(s)`}.`,
         );
       }
       await sleep(intervalMs);

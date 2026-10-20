@@ -39,6 +39,8 @@ export interface ComposioToolCall {
   at?: string;
   tool: string;
   toolkit: string;
+  method?: string;
+  endpoint?: string;
   successful: boolean;
   upstream_status?: number;
   duration_ms?: number;

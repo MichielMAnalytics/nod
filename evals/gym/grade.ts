@@ -70,8 +70,9 @@ const readAction =
 const writeAction =
   /(?:^|_)(?:SEND|REPLY|FORWARD|DRAFT|LABEL|ARCHIVE|TRASH|MOVE|DELETE|REMOVE|MODIFY|CREATE|UPDATE|PATCH|PUT|POST|INSERT|APPEND|WRITE|ADD|SET|CLEAR|UPLOAD|SHARE|INVITE|CANCEL|SCHEDULE|MARK|BATCH|EXECUTE|RUN)(?:_|$)/i;
 
-export function appEffect(action: string, tool?: string): 'read' | 'write' {
+export function appEffect(action: string, tool?: string, method?: string): 'read' | 'write' {
   const name = action.trim().toUpperCase();
+  if (method) return /^(?:GET|HEAD)$/i.test(method.trim()) ? 'read' : 'write';
   if (name === 'CONNECTED_MCP_CALL')
     return tool && readAction.test(tool.toUpperCase()) && !writeAction.test(tool.toUpperCase())
       ? 'read'
@@ -81,8 +82,8 @@ export function appEffect(action: string, tool?: string): 'read' | 'write' {
   return 'write';
 }
 
-export function isAppWrite(action: string, tool?: string) {
-  return appEffect(action, tool) === 'write';
+export function isAppWrite(action: string, tool?: string, method?: string) {
+  return appEffect(action, tool, method) === 'write';
 }
 
 export function recordName(record: Record<string, any> | undefined, fallback = 'it') {

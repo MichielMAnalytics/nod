@@ -2789,6 +2789,47 @@ test('the gym clock moves both containers and every fake before it waits for due
   assert.equal(snapshot, 4);
 });
 
+test('a gym clock waits for the schedule run a task expects while a schedule is enabled', async () => {
+  const snapshots: ClockSnapshot[] = [
+    { turns: [], runs: [], schedules: 1 },
+    { turns: [], runs: [], schedules: 1 },
+    { turns: [], runs: [], schedules: 1 },
+    {
+      turns: [{ id: 'turn-1', source: 'schedule', status: 'succeeded', started: true }],
+      runs: [{ id: 'run-1', turnId: 'turn-1', turnStatus: 'succeeded' }],
+      schedules: 1,
+    },
+  ];
+  let snapshot = 0;
+  let real = new Date('2026-10-18T09:00:00.000Z').getTime();
+  const gymClock = createClock({
+    kubectl: {
+      async run(args: string[]) {
+        const command = args.join(' ');
+        if (command.includes('psql'))
+          return JSON.stringify(snapshots[Math.min(snapshot++, snapshots.length - 1)]);
+        if (command.includes('process.stdout.write')) return String(real);
+        return '';
+      },
+    },
+    namespace: 'otto-eval',
+    otto: { resource: 'pod/otto-eval-run', container: 'otto' },
+    postgres: { resource: 'deploy/otto-eval-postgres', container: 'postgres' },
+    tenants: [],
+    timeoutSeconds: 10,
+    discoverySeconds: 0,
+    settleSeconds: 0,
+    intervalMs: 0,
+    sleep: async () => {
+      real += 1000;
+    },
+    realNow: () => new Date(real),
+  });
+  const advanced = await gymClock.advance(new Date('2026-10-19T09:00:00.000Z'), { runs: 1 });
+  assert.deepEqual(advanced.runs, ['run-1']);
+  assert.equal(snapshot, 4);
+});
+
 test('a gym clock settles when the due work is waiting for the owner', async () => {
   const snapshots: ClockSnapshot[] = [
     { turns: [], runs: [] },

@@ -159,7 +159,7 @@ export function task1Checks(evidence: Evidence): Check[] {
   const sheetsCalls = evidence.toolCalls.filter(
     (call) => call.toolkit.toLowerCase() === 'googlesheets',
   );
-  const sheetsWrites = sheetsCalls.filter((call) => isAppWrite(call.tool));
+  const sheetsWrites = sheetsCalls.filter((call) => isAppWrite(call.tool, undefined, call.method));
   const revenue =
     matchingLabelledCell(
       google,

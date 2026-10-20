@@ -78,7 +78,7 @@ export function task6Checks(evidence: Evidence): Check[] {
   const reads = calls.filter(
     (call) =>
       call.successful &&
-      appEffect(call.tool) === 'read' &&
+      appEffect(call.tool, undefined, call.method) === 'read' &&
       (!Number.isFinite(deliveredAt) ||
         (Number.isFinite(new Date(String(call.at)).getTime()) &&
           new Date(String(call.at)).getTime() >= deliveredAt)),
@@ -94,7 +94,7 @@ export function task6Checks(evidence: Evidence): Check[] {
   const salesMessage = messages.find((message) =>
     /bright ?ads|q4 campaigns|sales email/i.test(message.text),
   );
-  const writes = calls.filter((call) => appEffect(call.tool) === 'write');
+  const writes = calls.filter((call) => appEffect(call.tool, undefined, call.method) === 'write');
   const gmailWrites = evidence.appWrites.filter(
     (write) => /^GMAIL_/i.test(write.action) && isAppWrite(write.action, write.tool),
   );

@@ -523,6 +523,29 @@ test('task 12 outcome check reports a duplicated forwarded receipt', () => {
   );
 });
 
+test('task 12 names an uploaded spreadsheet whose contents the gym cannot read', () => {
+  const checks = task12Checks(
+    expenseEvidence(expenseRows, {
+      google: google({
+        mailboxes: [{ email: 'alex@acme.test', messages: [], labels: [], drafts: [] }],
+        spreadsheets: [],
+        files: [
+          {
+            id: 'file-xlsx',
+            name: 'October-2026-Expense-Report.xlsx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          },
+        ],
+      }),
+    }),
+  );
+  assert.equal(found(checks, 'six-expense-lines').pass, false);
+  assert.equal(
+    found(checks, 'six-expense-lines').message,
+    "Otto saved October-2026-Expense-Report.xlsx to Drive, but the gym can't read .xlsx contents yet.",
+  );
+});
+
 test('task 12 outcome checks report a wrong amount, an unconverted EUR line and a wrong total', () => {
   const wrongAmount = expenseRows.map((row) =>
     row[1] === 'Hotel Lux' ? ['2026-09-04', 'Hotel Lux', 210, 'EUR'] : row,

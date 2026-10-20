@@ -3,7 +3,7 @@ import type { TaskContext } from '../context.ts';
 import type { Task } from '../task.ts';
 import type { World } from '../world.ts';
 import { fakeCall } from '../fakes.ts';
-import { cellRef, listEvidence } from '../grade.ts';
+import { cellRef, listEvidence, plural } from '../grade.ts';
 
 const timeZone = 'Europe/London';
 
@@ -238,6 +238,11 @@ function sameDeals(flagged: Set<string>, expected: Array<{ name: string }>) {
   return flagged.size === expected.length && expected.every((deal) => flagged.has(deal.name));
 }
 
+function staleText(expected: Array<{ name: string; days: number }>) {
+  if (!expected.length) return 'no deal was stale';
+  return `${expected.map(daysLabel).join(' and ')} ${expected.length === 1 ? 'is' : 'are'} stale`;
+}
+
 export function task7Checks(evidence: Evidence): Check[] {
   const schedules = evidence.schedules ?? [];
   const schedule = schedules.find((item) => item.kind === 'recurring') ?? schedules[0];
@@ -292,9 +297,7 @@ export function task7Checks(evidence: Evidence): Check[] {
       message: firstOk
         ? `Fire 1 flagged ${expected[0]!.map(daysLabel).join(' and ')} and no other deal.`
         : !found[0]?.messages.length
-          ? `Fire 1 sent no message; ${expected[0]!.map(daysLabel).join(' and ')} ${
-              expected[0]!.length === 1 ? 'is' : 'are'
-            } stale.`
+          ? `Fire 1 sent no message; ${staleText(expected[0]!)}.`
           : missing(0)
             ? `Fire 1 did not flag ${missing(0)!.name}, which has gone ${Math.round(
                 missing(0)!.days,
@@ -323,9 +326,9 @@ export function task7Checks(evidence: Evidence): Check[] {
       message: thirdOk
         ? `Fire 3 flagged ${expected[2]!.map(daysLabel).join(' and ')} and no other deal.`
         : !found[2]?.messages.length
-          ? `Fire 3 sent no message; ${expected[2]!.map(daysLabel).join(' and ')} ${
-              expected[2]!.length === 1 ? 'is' : 'are'
-            } stale.`
+          ? runs[2]
+            ? `Fire 3 sent no message; ${staleText(expected[2]!)}.`
+            : `The schedule ran ${plural(runs.length, 'time')}; there was no third run.`
           : missing(2)
             ? `Fire 3 missed ${missing(2)!.name}, which has gone ${Math.round(
                 missing(2)!.days,
@@ -403,8 +406,8 @@ const task: Task = {
     const plan = ctx.world.native?.gym as { fire1: string; fire2: string; fire3: string };
     await ctx.say(prompt);
     await ctx.drive();
-    await ctx.clock.advance(new Date(plan.fire1), { timeoutSeconds: 600 });
-    await ctx.clock.advance(new Date(plan.fire2), { timeoutSeconds: 600 });
+    await ctx.clock.advance(new Date(plan.fire1), { timeoutSeconds: 600, runs: 1 });
+    await ctx.clock.advance(new Date(plan.fire2), { timeoutSeconds: 600, runs: 1 });
     const fire3 = new Date(plan.fire3);
     const parts = partsIn(fire3);
     const fire3Day = {
@@ -432,7 +435,7 @@ const task: Task = {
         values: [[acme], [initech]],
       },
     );
-    await ctx.clock.advance(fire3, { timeoutSeconds: 600 });
+    await ctx.clock.advance(fire3, { timeoutSeconds: 600, runs: 1 });
   },
   checks(evidence: Evidence) {
     return task7Checks(evidence);

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Check, Evidence, Expected } from '../gym/evidence.ts';
-import type { MonitorEvent } from '../gym/fakes.ts';
 import { task11Checks } from '../gym/tasks/11-double-booked-day.ts';
 import { task13Checks } from '../gym/tasks/13-receipt-photo.ts';
 import { task15Checks } from '../gym/tasks/15-customer-feedback-report.ts';
@@ -343,48 +342,29 @@ function expenseSheet(rows: unknown[][]) {
   };
 }
 
-const photoEvent: MonitorEvent = {
-  service: 'telegram',
-  seq: 3,
-  ts: '2026-10-15T10:00:00Z',
-  kind: 'request',
-  type: 'file.read',
-  outcome: 'success',
-  request: { op: 'getFile', method: 'POST', path: '/bot/file' },
-};
-
 function thirteen(overrides: Partial<Evidence> = {}): Evidence {
   return evidence({
     task: 'gym-13',
-    message: { messageId: 5 },
+    message: { messageId: 5, channel: 'web' },
     initial: { google: expenseSheet(expenseRows) },
     google: {
       tenant: 'synthetic',
       now: '2026-10-01T00:00:00Z',
       ...expenseSheet([...expenseRows, ['2026-10-14', 'City Cabs', 'Travel', 21.8]]),
     },
-    fakes: { telegram: { state: {}, events: [photoEvent] } },
-    telegram: {
-      state: {
-        bot: { id: 1, username: 'otto_gym_bot', first_name: 'Otto' },
-        people: [],
-        chats: [],
-        pending: [],
+    messages: [
+      {
+        text: 'Added the City Cabs taxi, £21.80, to October expenses.',
+        turnId: 'turn-1',
       },
-      replies: [{ messageId: 6, text: 'Added the City Cabs taxi, £21.80, to October expenses.' }],
-    },
+    ],
     recorded: { receipt },
     ...overrides,
   });
 }
 
-test('receipt photo passes with one matching row, the download and a Telegram confirmation', () => {
+test("receipt photo passes with one matching row in Otto's app", () => {
   const checks = task13Checks(thirteen());
-  assert.equal(check(checks, 'photo-fetched').pass, true);
-  assert.equal(
-    check(checks, 'photo-fetched').message,
-    'Otto downloaded the photo from Telegram (file.read).',
-  );
   assert.equal(check(checks, 'one-row-appended').pass, true);
   assert.equal(
     check(checks, 'one-row-appended').message,
@@ -395,16 +375,12 @@ test('receipt photo passes with one matching row, the download and a Telegram co
     check(checks, 'row-matches-receipt').message,
     'The new row says 2026-10-14, City Cabs, £21.80.',
   );
-  assert.equal(check(checks, 'confirmed-on-telegram').pass, true);
-  assert.equal(check(checks, 'no-other-rows-changed').pass, true);
-});
-
-test('receipt photo fails when the photo was never fetched', () => {
-  const result = task13Checks(thirteen({ fakes: { telegram: { state: {}, events: [] } } }));
+  assert.equal(check(checks, 'confirmed').pass, true);
   assert.equal(
-    check(result, 'photo-fetched').message,
-    'Otto never fetched the photo: no getFile or file download in the Telegram fake.',
+    check(checks, 'confirmed').message,
+    'Otto confirmed: "Added the City Cabs taxi, £21.80, to October expenses.".',
   );
+  assert.equal(check(checks, 'no-other-rows-changed').pass, true);
 });
 
 test('receipt photo reports the amount the new row carries', () => {
@@ -442,22 +418,14 @@ test('receipt photo fails when nothing was added and nothing was confirmed', () 
   const result = task13Checks(
     thirteen({
       google: { tenant: 'synthetic', now: '2026-10-01T00:00:00Z', ...expenseSheet(expenseRows) },
-      telegram: {
-        state: {
-          bot: { id: 1, username: 'otto_gym_bot', first_name: 'Otto' },
-          people: [],
-          chats: [],
-          pending: [],
-        },
-        replies: [{ messageId: 4, text: 'Earlier message.' }],
-      },
+      messages: [{ text: 'Earlier message.' }],
     }),
   );
   assert.equal(
     check(result, 'one-row-appended').message,
     'Nothing was added to the October expenses sheet.',
   );
-  assert.equal(check(result, 'confirmed-on-telegram').message, "Otto didn't confirm on Telegram.");
+  assert.equal(check(result, 'confirmed').message, "Otto didn't reply.");
 });
 
 test('receipt photo reports rewritten rows', () => {

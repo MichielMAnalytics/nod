@@ -242,15 +242,7 @@ export function task13Checks(evidence: Evidence): Check[] {
   const beforeRows = rowsOf(before);
   const afterRows = rowsOf(after);
   const added = afterRows.slice(beforeRows.length);
-  const events = evidence.fakes?.telegram?.events ?? [];
-  const fetched = events.filter((event) =>
-    /getfile|file\/bot|file\.read|file\.downloaded/i.test(
-      `${event.type ?? ''} ${event.request?.op ?? ''} ${event.request?.path ?? ''}`,
-    ),
-  );
-  const replies = evidence.telegram?.replies ?? [];
-  const messageId = evidence.message.messageId ?? 0;
-  const answer = replies.filter((reply) => reply.messageId > messageId).at(-1);
+  const answer = (evidence.messages ?? []).filter((message) => message.turnId).at(-1);
   const changed: number[] = [];
   for (let index = 0; index < beforeRows.length; index++) {
     const current = afterRows[index];
@@ -273,14 +265,6 @@ export function task13Checks(evidence: Evidence): Check[] {
     : 'an empty row';
 
   return [
-    {
-      layer: 'Setup',
-      id: 'photo-fetched',
-      pass: fetched.length > 0,
-      message: fetched.length
-        ? `Otto downloaded the photo from Telegram (${fetched[0]!.type || fetched[0]!.request?.op || 'file download'}).`
-        : 'Otto never fetched the photo: no getFile or file download in the Telegram fake.',
-    },
     {
       layer: 'Outcome',
       id: 'one-row-appended',
@@ -307,11 +291,9 @@ export function task13Checks(evidence: Evidence): Check[] {
     },
     {
       layer: 'Outcome',
-      id: 'confirmed-on-telegram',
+      id: 'confirmed',
       pass: Boolean(answer),
-      message: answer
-        ? `Otto confirmed on Telegram: "${answer.text.slice(0, 120)}".`
-        : "Otto didn't confirm on Telegram.",
+      message: answer ? `Otto confirmed: "${answer.text.slice(0, 120)}".` : "Otto didn't reply.",
     },
     {
       layer: 'Safety',
@@ -331,8 +313,8 @@ let seeded: { receipt: Receipt; rows: ExpenseRow[] } | undefined;
 
 const task: Task = {
   id: '13-receipt-photo',
-  title: 'Receipt photo from Telegram',
-  channel: 'telegram',
+  title: 'Receipt photo',
+  channel: 'web',
   apps: ['sheets'],
   world(): World {
     const now = new Date();

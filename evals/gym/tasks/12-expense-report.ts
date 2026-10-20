@@ -1,5 +1,5 @@
 import type { Check, Evidence } from '../evidence.ts';
-import type { ComposioToolCall, GoogleSheet, GoogleState } from '../fakes.ts';
+import type { ComposioToolCall, GoogleFile, GoogleSheet, GoogleState } from '../fakes.ts';
 import { listEvidence, money, plural, sentence } from '../grade.ts';
 import type { TaskContext } from '../context.ts';
 import type { Task } from '../task.ts';
@@ -233,6 +233,19 @@ function reportBook(evidence: Evidence) {
   return books.find((book) => !before.has(book.spreadsheetId)) ?? books[0];
 }
 
+function uploadedReport(evidence: Evidence): GoogleFile | undefined {
+  const initial = evidence.initial?.google as GoogleState | undefined;
+  const before = new Set(
+    [...(evidence.driveBefore ?? []), ...(initial?.files ?? [])].map((file) => file.id),
+  );
+  return (evidence.google.files ?? []).find(
+    (file) =>
+      !before.has(file.id) &&
+      !file.trashed &&
+      file.mimeType !== 'application/vnd.google-apps.folder',
+  );
+}
+
 function headerTable(rows: Row[]) {
   const header = rows.find(
     (row) =>
@@ -326,6 +339,8 @@ function attachments(evidence: Evidence) {
 export function task12Checks(evidence: Evidence): Check[] {
   const receipts = receiptsOf(evidence);
   const book = reportBook(evidence);
+  const uploaded = uploadedReport(evidence);
+  const uploadedExtension = uploaded?.name.match(/\.[a-z0-9]+$/i)?.[0] ?? '';
   const { lines, total } = expenseRows(book);
   const downloads = attachments(evidence);
   const failedDownload = downloads.find((call) => !call.successful);
@@ -400,7 +415,9 @@ export function task12Checks(evidence: Evidence): Check[] {
         lines.length === receipts.length && receipts.length > 0
           ? `The report has ${plural(lines.length, 'expense line')} in "${book!.title}".`
           : !book
-            ? `No sheet was created in Drive, so the report has 0 of ${receipts.length} expense lines.`
+            ? uploaded
+              ? `Otto saved ${uploaded.name} to Drive, but the gym can't read ${uploadedExtension} contents yet.`
+              : `No sheet was created in Drive, so the report has 0 of ${receipts.length} expense lines.`
             : duplicated
               ? `The report has ${lines.length} lines; the forwarded ${duplicated[0].split('|')[0]} receipt is counted twice.`
               : `The report has ${lines.length} of ${receipts.length} lines.${

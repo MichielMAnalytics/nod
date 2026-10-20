@@ -584,8 +584,8 @@ const task: Task = {
     await ctx.otto.request('PATCH', '/api/preferences', { timeZone });
     await ctx.say(prompt);
     await ctx.drive();
-    await ctx.clock.advance(new Date(plan.fire1), { timeoutSeconds: 600 });
-    await ctx.clock.advance(new Date(plan.fire2), { timeoutSeconds: 600 });
+    await ctx.clock.advance(new Date(plan.fire1), { timeoutSeconds: 600, runs: 1 });
+    await ctx.clock.advance(new Date(plan.fire2), { timeoutSeconds: 600, runs: 1 });
   },
   checks(evidence: Evidence) {
     return task5Checks(evidence);

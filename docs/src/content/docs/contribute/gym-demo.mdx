@@ -84,8 +84,8 @@ documented deviation from Telegram's public-HTTPS rule. The harness reads the pa
 
 Two harness actions reach the fake but not Otto today: `sendPhoto` sends a photo update with its caption, and `tap` sends a
 callback query. Otto's Telegram webhook parser accepts `message` and `message_reaction` updates only, and a message needs
-text, so it ignores photos, documents and button taps. Tasks 13 (receipt photo) and button taps need an Otto change to its
-channel receiver; the gym does not change Otto.
+text, so it ignores photos, documents and button taps. A task that needs a photo must attach it in Otto's app; button taps
+still need an Otto change to its channel receiver, and the gym does not change Otto.
 
 ## Tasks and the runner
 

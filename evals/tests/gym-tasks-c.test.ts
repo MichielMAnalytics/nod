@@ -683,6 +683,25 @@ test('gym task 6 fails each check with its evidence', () => {
   );
 });
 
+test('gym task 6 treats a Gmail proxy GET as a read', () => {
+  const checks = task6Checks(
+    task6({
+      toolCalls: [
+        {
+          tool: 'PROXY_EXECUTE',
+          toolkit: 'gmail',
+          method: 'GET',
+          endpoint: 'https://gmail.googleapis.com/gmail/v1/users/me/history',
+          successful: true,
+          at: '2026-10-05T08:31:00Z',
+        },
+      ],
+    }),
+  );
+  assert.equal(find(checks, 'activity-check-read-gmail').pass, true);
+  assert.equal(find(checks, 'no-email-changes').pass, true);
+});
+
 test('gym task 7 treats a deal described as under the limit as mentioned, not flagged', () => {
   const checks = task7Checks(
     task7({
@@ -845,6 +864,12 @@ test('gym task 7 fails each check with its evidence', () => {
       'fire-three-new-deal',
     ).message,
     'Fire 3 sent no message; Globex Inc (31 days) is stale.',
+  );
+  const short = task7();
+  short.scheduleRuns = short.scheduleRuns!.slice(0, 2);
+  assert.equal(
+    find(task7Checks(short), 'fire-three-new-deal').message,
+    'The schedule ran 2 times; there was no third run.',
   );
   const edited = task7({
     google: pipelineGoogle(['2026-10-06', '2026-10-05'], ['2026-10-06', '2026-10-05']),

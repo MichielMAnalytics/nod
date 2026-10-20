@@ -1013,7 +1013,7 @@ function stopSession(session: Session) {
   })();
 }
 
-async function cleanupTask(config: RunConfig, session: Session, keep: boolean, postgres = false) {
+async function cleanupTask(config: RunConfig, session: Session, keep: boolean) {
   if (keep) return;
   for (const tenant of Object.values(session.tenants)) await tenant?.dispose().catch(() => {});
   await config.kubectl
@@ -1032,19 +1032,18 @@ async function cleanupTask(config: RunConfig, session: Session, keep: boolean, p
   await config.kubectl
     .run(['-n', config.namespace, 'delete', 'secret', session.pod, '--ignore-not-found'])
     .catch(() => '');
-  if (postgres)
-    await config.kubectl
-      .run([
-        '-n',
-        config.namespace,
-        'delete',
-        'deployment,service,networkpolicy',
-        '-l',
-        `otto-eval-postgres=${session.postgres}`,
-        '--ignore-not-found',
-        '--wait=false',
-      ])
-      .catch(() => '');
+  await config.kubectl
+    .run([
+      '-n',
+      config.namespace,
+      'delete',
+      'deployment,service,networkpolicy',
+      '-l',
+      `otto-eval-postgres=${session.postgres}`,
+      '--ignore-not-found',
+      '--wait=false',
+    ])
+    .catch(() => '');
 }
 
 export async function runTask(config: RunConfig, task: Task): Promise<TaskResult> {
@@ -1389,6 +1388,6 @@ export async function regradeTask(
     return result;
   } finally {
     await stopSession(session);
-    await cleanupTask(config, session, config.keep, true);
+    await cleanupTask(config, session, config.keep);
   }
 }
