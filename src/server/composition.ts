@@ -181,7 +181,7 @@ export interface ApplicationAdapters {
     verifier: ChannelSetupVerifier;
     create(environment: Record<string, string>): MessagingTransport;
   };
-  model: { provider: string; name: string; configured: boolean };
+  model: { provider: string; name: string; configured: boolean; reconnect?: boolean };
 }
 
 export function createDefaultAdapters(
@@ -1476,6 +1476,7 @@ async function initializeApplication(
         provider: adapters.model.provider,
         model: adapters.model.name,
         llmReady: adapters.model.configured,
+        modelReconnect: adapters.model.reconnect === true,
         integrationsReady: adapters.integrations.configured,
       }),
   });

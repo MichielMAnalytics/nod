@@ -7074,7 +7074,7 @@ assert.deepEqual(models.connections,[previous]);
 assert.equal(requests.length,1,'showing recovery must not mutate the saved account');
 await click('Sign in with ChatGPT');
 await waitFor(()=>oauthResult);
-assert.deepEqual(requests.at(-1),{path:'/api/models/oauth',method:'POST',body:{provider:'openai',connectionId:previous.id}});
+assert.deepEqual(requests.at(-1),{path:'/api/models/oauth',method:'POST',body:{provider:'openai'}});
 assert.deepEqual(models.connections,[previous]);
 assert.equal(advances,0);
 await click('Cancel');
