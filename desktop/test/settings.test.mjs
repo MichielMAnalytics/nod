@@ -30,6 +30,27 @@ import { createChatReadCursorStore } from '../main/chat-read-cursors.mjs';
 import { createReadinessNotice, isQuietTime } from '../main/notifications.mjs';
 import { saveArtifactDownload } from '../main/downloads.mjs';
 import { createDesktopLifecycle } from '../main/lifecycle.mjs';
+import { appOpenPath } from '../main/app-links.mjs';
+import appPages from '../../src/shared/app-pages.json' with { type: 'json' };
+
+test('external app links can only open named screens without action data', () => {
+  for (const path of Object.keys(appPages))
+    assert.equal(appOpenPath(`nod://open${path}`, appPages), path);
+  for (const value of [
+    undefined,
+    'https://example.test/settings/models',
+    'nod://other/settings/models',
+    'nod://open/settings/models?key=synthetic',
+    'nod://open/settings/models#synthetic',
+    'nod://open/settings/unknown',
+    'nod://open/api/account',
+    'nod://open/trust?add=card',
+    'nod://open/settings/../apps',
+    'nod://open/credentials/request-id',
+    'nod://open@evil.test/apps',
+  ])
+    assert.equal(appOpenPath(value, appPages), null);
+});
 import {
   createDesktopUpdater,
   createUpdateSource,
@@ -373,6 +394,7 @@ async function runningDesktop(
       senderFrame: window.webContents.mainFrame,
     });
   const notifications = [];
+  const appEvents = new EventEmitter();
   const externalURLs = [];
   const updateMenu = {};
   const ipc = Object.assign(new EventEmitter(), {
@@ -388,7 +410,10 @@ async function runningDesktop(
     },
   });
   const context = {
+    readFileSync: () => JSON.stringify(appPages),
+    appOpenPath,
     app: {
+      on: (name, listener) => appEvents.on(name, listener),
       isPackaged: packaged,
       setName() {},
       setPath: (name, path) => paths.set(name, path),
@@ -649,6 +674,7 @@ async function runningDesktop(
   await runInNewContext(
     `(async () => {
     ${source}
+    appLinksReady = true;
     engine = {};
     enginePreferencesReady = true;
     engineRuntimeReady = true;
@@ -687,6 +713,7 @@ async function runningDesktop(
   );
   return {
     ...context.running,
+    openLink: (value) => appEvents.emit('open-url', { preventDefault() {} }, value),
     windows,
     children,
     helpers,
@@ -1278,6 +1305,34 @@ test('runtime handoff and readiness respect closed, minimized and background win
         await f.close();
       }
     });
+  }
+});
+
+test('app links wait for the owned renderer and open only a named screen', async (t) => {
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    readyRenderers: false,
+  });
+  try {
+    f.openLink('nod://open/settings/models');
+    const window = f.windows.at(-1);
+    await new Promise(setImmediate);
+    assert.equal(
+      window.sent.some(([name]) => name === 'nod:navigate'),
+      false,
+    );
+    await f.rendererReady(window);
+    assert.deepEqual(
+      window.sent.filter(([name]) => name === 'nod:navigate'),
+      [['nod:navigate', '/settings/models']],
+    );
+    f.openLink('nod://open/trust?add=card');
+    f.showEngine();
+    assert.equal(window.sent.filter(([name]) => name === 'nod:navigate').length, 1);
+    f.openLink('nod://open/channels');
+    assert.deepEqual(window.sent.at(-1), ['nod:navigate', '/channels']);
+  } finally {
+    f.crash();
+    await f.close();
   }
 });
 
@@ -1880,6 +1935,11 @@ test('partial onboarding restart keeps acknowledged consent and normal app progr
     assert.equal(new URL(window.url).pathname, '/onboarding');
     assert.equal(new URL(window.url).searchParams.get('welcome'), 'complete');
     assert.equal((await next.storage.store.get()).welcome.acknowledged, true);
+    next.openLink('nod://open/settings/models');
+    assert.equal(
+      window.sent.some(([name]) => name === 'nod:navigate'),
+      false,
+    );
     await next.storage.store.save({ notifications: true, launchAtLogin: true });
     completed = true;
     await next.handlers.get('nod:settings:save')(
@@ -1888,6 +1948,10 @@ test('partial onboarding restart keeps acknowledged consent and normal app progr
     );
     assert.equal((await next.storage.store.get()).welcome, undefined);
     assert.equal(writes, 1);
+    assert.deepEqual(
+      window.sent.filter(([name]) => name === 'nod:navigate'),
+      [['nod:navigate', '/settings/models']],
+    );
   } finally {
     await next.close();
   }
@@ -3110,6 +3174,20 @@ test('engine preload exposes no credential reveal and withholds privileged IPC e
   const status = { phase: 'preparing', runtime: { phase: 'starting' } };
   listeners.get('nod:status')({ sender: 'privileged-synthetic-ipc' }, status);
   assert.deepEqual(received, [status]);
+  listeners.get('nod:navigate')({ sender: 'privileged-synthetic-ipc' }, '/settings/models');
+  let navigationCalls = 0;
+  const stop = bridge.onNavigate((...values) => {
+    navigationCalls++;
+    received = values;
+  });
+  assert.deepEqual(received, ['/settings/models']);
+  stop();
+  listeners.get('nod:navigate')({ sender: 'privileged-synthetic-ipc' }, '/trust');
+  assert.equal(navigationCalls, 1);
+  bridge.onNavigate((...values) => {
+    received = values;
+  });
+  assert.deepEqual(received, ['/trust']);
 });
 
 async function chatReadFixture(t) {
