@@ -140,7 +140,7 @@ export function createAccountSession(options: {
             if (!(await options.onboardingReady()))
               return reply
                 .code(409)
-                .send({ error: 'Connect an AI provider and Gmail before finishing setup.' });
+                .send({ error: 'Connect an AI provider before finishing setup.' });
           } catch {
             return reply.code(503).send({ error: 'Could not verify setup. Try again.' });
           }

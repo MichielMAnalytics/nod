@@ -1,32 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { LoaderCircle, Plus, Search } from 'lucide-react';
+import { LoaderCircle, Search } from '../../../components/icons';
 import type { AppSetupStatus, Connection } from '../../../../shared/contracts';
+import { onboardingEmailProviders } from '../../../../shared/onboarding';
 import { AppConnectionDialog, type AppSignIn } from '../../../components/app-connection-dialog';
 import { AppDiscoveryDialog } from '../../../components/app-discovery-dialog';
 import { ServiceLogo } from '../../../components/service-logo';
-import {
-  Button,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-  Notice,
-  SearchField,
-} from '../../../components/ui';
+import { Button, Notice, SearchField } from '../../../components/ui';
 import { usePageData } from '../../../hooks/use-page-data';
 import { api, errorMessage } from '../../../lib/api';
 import { searchApps } from '../../../lib/app-search';
 import { analyticsForCurrentSession } from '../../../lib/analytics';
 import { connectionUrl } from '../../../lib/connection-url';
 import { desktopLinksAvailable, openConnection } from '../../../lib/desktop';
-import {
-  connectionGroups,
-  connectionIdentity,
-  connectionIssue,
-  removeConnection,
-} from '../../../lib/secondary-pages';
-import { ConnectedAccount } from '../../apps';
+import { connectionGroups, connectionIssue, removeConnection } from '../../../lib/secondary-pages';
+import { AppAccountManager } from '../../../components/app-account-manager';
 import type { StepProps } from '..';
 import { Footer } from '../motion';
 
@@ -65,7 +53,7 @@ function appCategory(key: string, service: Connection) {
   return 'More apps';
 }
 
-export function Apps({ onNext, onBack, onSkip }: StepProps) {
+export function Apps({ onNext, onBack }: StepProps) {
   const connections = usePageData<Connection[]>('/api/apps');
   const catalog = usePageData<Connection[]>('/api/apps/catalog');
   const refresh = connections.refresh;
@@ -76,9 +64,7 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
   const [opening, setOpening] = useState(false);
   const [openingService, setOpeningService] = useState<string>();
   const [manageService, setManageService] = useState<string>();
-  const [disconnectAccount, setDisconnectAccount] = useState<Connection>();
   const [disconnecting, setDisconnecting] = useState(false);
-  const [disconnectError, setDisconnectError] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [announcement, setAnnouncement] = useState('');
   const [fades, setFades] = useState({ top: false, bottom: false });
@@ -86,8 +72,6 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
   const trigger = useRef<HTMLElement | null>(null);
   const triggerCard = useRef<HTMLElement | null>(null);
   const manageTitle = useRef<HTMLHeadingElement>(null);
-  const accountTrigger = useRef<HTMLButtonElement | null>(null);
-  const keepAccount = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const listContent = useRef<HTMLDivElement>(null);
@@ -115,12 +99,11 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
     );
   }, [groups]);
   const managed = groups.find((group) => group.key === manageService);
-  const addAccountConnection =
-    managed?.accounts.find(
-      (account) => account.slug === managed.service.slug && account.status !== 'not_configured',
-    ) ??
-    managed?.accounts.find((account) => account.status !== 'not_configured') ??
-    managed?.service;
+  const connectedCount = groups.filter(
+    (group) =>
+      !onboardingEmailProviders.some((provider) => provider === group.key) &&
+      group.accounts.some((account) => !connectionIssue(account) && !account.disconnectPending),
+  ).length;
   const locked = opening || disconnecting || Boolean(signIn) || Boolean(discoveryId);
   const pendingName =
     signIn?.name ?? groups.find((group) => group.service.slug === openingService)?.name;
@@ -207,7 +190,6 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
         event.isComposing ||
         locked ||
         managed?.accounts.length ||
-        disconnectAccount ||
         document.querySelector(
           '[role="dialog"]:not([data-state="closed"]), [role="alertdialog"]:not([data-state="closed"])',
         )
@@ -227,7 +209,7 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
     };
     window.addEventListener('keydown', clearSearch);
     return () => window.removeEventListener('keydown', clearSearch);
-  }, [query, locked, managed?.accounts.length, disconnectAccount]);
+  }, [query, locked, managed?.accounts.length]);
 
   function closeSignIn() {
     request.current?.abort();
@@ -458,14 +440,12 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
     }
   }
 
-  async function disconnect() {
-    const connection = disconnectAccount;
-    if (!connection?.connectionId || request.current || locked) return;
+  async function disconnect(connection: Connection) {
+    if (!connection.connectionId || request.current || locked) return;
     const capture = analyticsForCurrentSession();
     const controller = new AbortController();
     request.current = controller;
     setDisconnecting(true);
-    setDisconnectError('');
     try {
       await api(
         `/api/apps/${encodeURIComponent(connection.slug)}/accounts/${encodeURIComponent(connection.connectionId)}/disconnect`,
@@ -480,13 +460,12 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
         current ? removeConnection(current, connection.connectionId!) : current,
       );
       if (managed?.accounts.length === 1) setManageService(undefined);
-      setDisconnectAccount(undefined);
       void refresh();
     } catch (cause) {
       if (controller.signal.aborted) return;
-      setDisconnectError(errorMessage(cause));
       capture('nod_ui_error', { area: 'onboarding', action: 'disconnect' });
       void refresh();
+      throw cause;
     } finally {
       if (request.current === controller) request.current = null;
       if (!controller.signal.aborted) setDisconnecting(false);
@@ -529,7 +508,6 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
                   onClick={(event) => {
                     trigger.current = event.currentTarget;
                     triggerCard.current = event.currentTarget.closest('article');
-                    accountTrigger.current = null;
                     setManageService(key);
                   }}
                 >
@@ -569,7 +547,7 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
   return (
     <section className="ob-apps" aria-labelledby="ob-apps-title">
       <header className="ob-apps-heading">
-        <h1 id="ob-apps-title">Which apps do you use often?</h1>
+        <h1 id="ob-apps-title">Connect your tools</h1>
         <SearchField
           className="ob-apps-search"
           inputRef={search}
@@ -679,10 +657,13 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
         <Footer
           onBack={onBack}
           onNext={onNext}
-          onSkip={() => {
-            onSkip?.();
-            onNext();
-          }}
+          summary={
+            connectedCount > 0 ? (
+              <span role="status">
+                {connectedCount} {connectedCount === 1 ? 'app' : 'apps'} connected
+              </span>
+            ) : undefined
+          }
         />
       </div>
       <div className="sr-only" role="status" aria-live="polite">
@@ -699,94 +680,23 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
           if (!discoveryId) returnFocus()?.focus({ preventScroll: true });
         }}
       />
-      <Dialog
-        open={Boolean(managed?.accounts.length) && !disconnectAccount && !signIn && !discoveryId}
-        onOpenChange={(open) => {
-          if (!open && !disconnectAccount) {
-            if (opening) closeSignIn();
-            setManageService(undefined);
-          }
+      <AppAccountManager
+        group={managed}
+        suspended={Boolean(signIn) || Boolean(discoveryId)}
+        busy={locked}
+        error={managed && errors[managed.key]}
+        titleRef={manageTitle}
+        onDismissError={() => {
+          if (managed) setErrors((current) => ({ ...current, [managed.key]: '' }));
         }}
-      >
-        <DialogContent
-          className="app-manage-dialog"
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            const id = accountTrigger.current?.dataset.disconnectAccount;
-            const previous = Array.from(
-              manageTitle.current
-                ?.closest('[role="dialog"]')
-                ?.querySelectorAll<HTMLButtonElement>('[data-disconnect-account]') ?? [],
-            ).find((button) => button.dataset.disconnectAccount === id);
-            (previous ?? manageTitle.current)?.focus({ preventScroll: true });
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            if (!signIn && !discoveryId && !disconnectAccount)
-              returnFocus()?.focus({ preventScroll: true });
-          }}
-        >
-          <div className="dialog-heading app-manage-heading">
-            {managed && <ServiceLogo {...managed.service} />}
-            <div>
-              <DialogTitle ref={manageTitle} tabIndex={-1}>
-                {managed?.service.name} accounts
-              </DialogTitle>
-              <DialogDescription>Choose which accounts nod can use.</DialogDescription>
-            </div>
-          </div>
-          {managed && errors[managed.key] && (
-            <div data-analytics-private>
-              <Notice onDismiss={() => setErrors((current) => ({ ...current, [managed.key]: '' }))}>
-                {errors[managed.key]}
-              </Notice>
-            </div>
-          )}
-          <div className="app-manage-accounts">
-            {managed?.accounts.map((account) => (
-              <ConnectedAccount
-                key={account.connectionId}
-                account={account}
-                busy={locked}
-                onDisconnect={(source) => {
-                  accountTrigger.current = source;
-                  setDisconnectError('');
-                  setDisconnectAccount(account);
-                }}
-                onReconnect={() => void connect(account)}
-              />
-            ))}
-          </div>
-          <div className="dialog-actions app-manage-actions">
-            {!addAccountConnection?.browserUrl && (
-              <Button
-                size="sm"
-                disabled={locked || addAccountConnection?.status === 'not_configured'}
-                onClick={() =>
-                  addAccountConnection && void connect(addAccountConnection, undefined, true)
-                }
-              >
-                {opening ? (
-                  <LoaderCircle size={16} className="spin" aria-hidden="true" />
-                ) : (
-                  <Plus size={16} aria-hidden="true" />
-                )}
-                Add account
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                if (opening) closeSignIn();
-                setManageService(undefined);
-              }}
-            >
-              Done
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+        onClose={() => {
+          if (opening) closeSignIn();
+          setManageService(undefined);
+        }}
+        onConnect={(account, addAccount) => void connect(account, undefined, addAccount)}
+        onDisconnect={disconnect}
+        onRestoreFocus={() => returnFocus()?.focus({ preventScroll: true })}
+      />
       {discoveryId && (
         <AppDiscoveryDialog
           key={discoveryId}
@@ -799,55 +709,6 @@ export function Apps({ onNext, onBack, onSkip }: StepProps) {
           returnFocus={returnFocus}
         />
       )}
-      <Dialog
-        open={Boolean(disconnectAccount)}
-        onOpenChange={(open) => {
-          if (!open && !disconnecting) setDisconnectAccount(undefined);
-        }}
-      >
-        <DialogContent
-          className="app-disconnect-dialog"
-          aria-busy={disconnecting}
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            keepAccount.current?.focus({ preventScroll: true });
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            returnFocus()?.focus({ preventScroll: true });
-          }}
-        >
-          <DialogTitle>
-            Disconnect from {disconnectAccount?.name.replace(/\s+MCP$/i, '')}?
-          </DialogTitle>
-          <DialogDescription data-analytics-private>
-            {disconnectAccount && connectionIdentity(disconnectAccount).primary}
-            <span>nod will lose access to this account. You can connect it again later.</span>
-          </DialogDescription>
-          {disconnectError && (
-            <div data-analytics-private>
-              <Notice>{disconnectError}</Notice>
-            </div>
-          )}
-          <div className="app-disconnect-actions">
-            <Button
-              ref={keepAccount}
-              variant="outline"
-              disabled={disconnecting}
-              onClick={() => setDisconnectAccount(undefined)}
-            >
-              Keep account
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={disconnecting}
-              onClick={() => void disconnect()}
-            >
-              {disconnecting ? 'Disconnecting…' : 'Disconnect'}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
     </section>
   );
 }

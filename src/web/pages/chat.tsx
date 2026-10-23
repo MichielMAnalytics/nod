@@ -22,6 +22,7 @@ import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
 import { PrivateEntryWorkspace } from '../components/private-entry';
 import { ChatTurnRail } from '../components/chat-turn-rail';
+import { ChatNotifications } from '../components/chat-notifications';
 import { BrandMark } from '../components/brand';
 import { FeedbackLauncher } from '../components/feedback-discovery';
 import {
@@ -336,10 +337,14 @@ export function Chat({
   const [welcoming, setWelcoming] = useState(
     () => allMessages.length === 0 && !working && state.configuration.llmReady,
   );
+  const introduction = usePageData<{ messageId: string | null }>('/api/onboarding/introduction');
   useEffect(() => {
     if (!welcoming) return;
     void post('/api/account/welcome', {})
-      .then(() => refresh())
+      .then(() => {
+        void introduction.refresh();
+        return refresh();
+      })
       .catch((cause) => setError(errorMessage(cause)))
       .finally(() => setWelcoming(false));
   }, []);
@@ -1042,6 +1047,9 @@ export function Chat({
                       }
                     />
                   )}
+                  {message.id === introduction.data?.messageId && (
+                    <ChatNotifications messageId={message.id} />
+                  )}
                 </Fragment>
               ))}
               {planning ? (
@@ -1049,9 +1057,7 @@ export function Chat({
                   <div className="assistant-mark" aria-hidden="true">
                     <NodGlyph size={24} mode="thinking" />
                   </div>
-                  <span className="task-bubble">
-                    Pulling together a few ideas from what you told me…
-                  </span>
+                  <span className="task-bubble">Pulling together a few ideas to get started…</span>
                 </div>
               ) : (
                 <>

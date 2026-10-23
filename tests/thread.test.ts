@@ -147,12 +147,14 @@ test(
     let briefAnswer: () => unknown = () => null;
     let planGate: Promise<void> | undefined;
     let inbox: InboxSnippet[] = [];
-    const onboardingFor = (owner: string) =>
+    const onboardingFor = (owner: string, configured = () => true) =>
       createOnboardingSuggestions({
         ownerId: owner,
         curator: {
           id: 'fixture',
-          configured: true,
+          get configured() {
+            return configured();
+          },
           curate: async ({ task, input }) => {
             if (task === 'brief') {
               briefInputs.push({ owner, input: structuredClone(input) });
@@ -1839,6 +1841,9 @@ test(
             assert.equal(response.statusCode, 202);
           await waitFor(() => planInputs.length === 1);
           const landing = () => request('POST', '/api/account/welcome', {});
+          assert.deepEqual((await request('GET', '/api/onboarding/introduction')).json(), {
+            messageId: null,
+          });
           assert.equal((await landing()).statusCode, 409);
           const complete = () => request('PATCH', '/api/account', { onboardingCompleted: true });
           for (const response of await Promise.all([complete(), complete(), complete()]))
@@ -1869,13 +1874,16 @@ test(
               sources: ['gmail', 'web'],
             },
           });
+          const introduction = (await request('GET', '/api/onboarding/introduction')).json();
+          assert.equal(typeof introduction.messageId, 'string');
           const posted = await db.pool.query(
-            `SELECT text,thread_id AS "threadId",turn_id AS "turnId",suggestions FROM messages
-             WHERE owner_id=$1 AND turn_id IS NULL AND (suggestions IS NOT NULL OR text LIKE 'Hi! Give me%')
+            `SELECT id,text,thread_id AS "threadId",turn_id AS "turnId",suggestions FROM messages
+             WHERE owner_id=$1 AND turn_id IS NULL AND (suggestions IS NOT NULL OR id=$2)
              ORDER BY created_at,id`,
-            [ownerId],
+            [ownerId, introduction.messageId],
           );
           assert.equal(posted.rowCount, 2);
+          assert.equal(posted.rows[0].id, introduction.messageId);
           assert.equal(posted.rows[0].suggestions, null);
           const { tasks } = posted.rows[1].suggestions;
           assert.deepEqual(
@@ -1903,11 +1911,15 @@ test(
           assert.equal(
             (
               await db.pool.query(
-                "SELECT 1 FROM messages WHERE owner_id=$1 AND (suggestions IS NOT NULL OR text LIKE 'Hi! Give me%')",
-                [ownerId],
+                'SELECT 1 FROM messages WHERE owner_id=$1 AND (suggestions IS NOT NULL OR id=$2)',
+                [ownerId, introduction.messageId],
               )
             ).rowCount,
             2,
+          );
+          assert.deepEqual(
+            (await request('GET', '/api/onboarding/introduction')).json(),
+            introduction,
           );
         },
       );
@@ -1936,6 +1948,33 @@ test(
           await failing.complete('Sam');
           await failing.delivered();
           assert.deepEqual(await ownerCards(ownerId), before);
+          const firstGreeting = (
+            await db.pool.query(
+              'SELECT greeting_message_id FROM onboarding_suggestions WHERE owner_id=$1',
+              [ownerId],
+            )
+          ).rows[0].greeting_message_id;
+          assert.equal(
+            (await request('GET', '/api/onboarding/introduction')).json().messageId,
+            firstGreeting,
+          );
+          const otherGreeting = (
+            await db.pool.query(
+              'SELECT greeting_message_id FROM onboarding_suggestions WHERE owner_id=$1',
+              ['synthetic-other-owner'],
+            )
+          ).rows[0].greeting_message_id;
+          await db.pool.query(
+            'UPDATE onboarding_suggestions SET greeting_message_id=$2 WHERE owner_id=$1',
+            [ownerId, otherGreeting],
+          );
+          assert.deepEqual((await request('GET', '/api/onboarding/introduction')).json(), {
+            messageId: null,
+          });
+          await db.pool.query(
+            'UPDATE onboarding_suggestions SET greeting_message_id=$2 WHERE owner_id=$1',
+            [ownerId, firstGreeting],
+          );
           assert.deepEqual(
             (await ownerCards('synthetic-other-owner')).map((row) => row.suggestions.intro),
             [fallback.intro],
@@ -2215,6 +2254,28 @@ test(
             ).rowCount,
             0,
           );
+          let configured = false;
+          let reads = 0;
+          const deferredOwner = 'synthetic-delayed-model-owner';
+          const deferred = onboardingFor(deferredOwner, () => configured);
+          await deferred.initialize();
+          await deferred.briefInbox(async () => {
+            reads++;
+            return [thread({})];
+          });
+          assert.equal(reads, 0);
+          assert.equal(briefInputs.length, calls);
+          configured = true;
+          await deferred.complete();
+          await deferred.delivered();
+          assert.equal(reads, 1);
+          assert.equal(briefInputs.length, calls + 1);
+          assert.equal(briefInputs.at(-1)?.owner, deferredOwner);
+          assert.equal(
+            (planInputs.at(-1)?.input as { brief?: { summary: string } }).brief?.summary,
+            'Runs a synthetic launch with Riley.',
+          );
+          assert.equal(await deferred.currentBrief(), undefined);
           currentApps = [];
           briefAnswer = () => null;
           planAnswer = () => null;

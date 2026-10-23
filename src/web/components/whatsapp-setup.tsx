@@ -13,6 +13,8 @@ export function WhatsAppSetup({
   onRefresh,
   onCloud,
   onDone,
+  onDisconnect,
+  selfChatOnly = false,
 }: {
   setup?: ChannelSetupSummary;
   busy: boolean;
@@ -24,10 +26,14 @@ export function WhatsAppSetup({
     policyConfirmed: true;
   }): Promise<boolean>;
   onRefresh(): Promise<unknown>;
-  onCloud(): void;
+  onCloud?(): void;
   onDone(): void;
+  onDisconnect?(): void;
+  selfChatOnly?: boolean;
 }) {
-  const [mode, setMode] = useState<'bot' | 'self-chat'>(setup?.linkMode ?? 'bot');
+  const [mode, setMode] = useState<'bot' | 'self-chat'>(
+    selfChatOnly ? 'self-chat' : (setup?.linkMode ?? 'bot'),
+  );
   const [number, setNumber] = useState('');
   const [policy, setPolicy] = useState(false);
   const [link, setLink] = useState<ChannelLinkStatus>();
@@ -123,34 +129,36 @@ export function WhatsAppSetup({
             event.preventDefault();
             if (policy)
               void onSave({
-                mode,
-                ...(mode === 'bot' ? { allowedNumber: number.trim() } : {}),
+                mode: selfChatOnly ? 'self-chat' : mode,
+                ...(!selfChatOnly && mode === 'bot' ? { allowedNumber: number.trim() } : {}),
                 policyConfirmed: true,
               });
           }}
         >
-          <fieldset disabled={busy} className="channel-modes">
-            <legend>Choose how you will message nod</legend>
-            <label>
-              <input
-                type="radio"
-                name="whatsapp-mode"
-                checked={mode === 'bot'}
-                onChange={() => setMode('bot')}
-              />{' '}
-              Separate bot number
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="whatsapp-mode"
-                checked={mode === 'self-chat'}
-                onChange={() => setMode('self-chat')}
-              />{' '}
-              Use my own number
-            </label>
-          </fieldset>
-          {mode === 'bot' ? (
+          {!selfChatOnly && (
+            <fieldset disabled={busy} className="channel-modes">
+              <legend>Choose how you will message nod</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="whatsapp-mode"
+                  checked={mode === 'bot'}
+                  onChange={() => setMode('bot')}
+                />{' '}
+                Separate bot number
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="whatsapp-mode"
+                  checked={mode === 'self-chat'}
+                  onChange={() => setMode('self-chat')}
+                />{' '}
+                Use my own number
+              </label>
+            </fieldset>
+          )}
+          {!selfChatOnly && mode === 'bot' ? (
             <>
               <p>
                 Register a second number in WhatsApp or the WhatsApp Business app. You will link
@@ -210,21 +218,25 @@ export function WhatsAppSetup({
               {busy ? 'Preparing connection…' : 'Show QR code'}
             </Button>
           </div>
-          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onCloud}>
-            Use Meta Cloud API instead
-          </Button>
+          {!selfChatOnly && onCloud && (
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onCloud}>
+              Use Meta Cloud API instead
+            </Button>
+          )}
         </form>
       ) : (
         <>
           <div role="status" aria-live="polite">
             {state === 'connected' ? (
               <>
-                <p>
-                  <strong>WhatsApp is connected</strong>
-                </p>
-                <p>
-                  {link?.accountName} {link?.accountHandle}
-                </p>
+                <div className="whatsapp-connected-identity">
+                  <strong>
+                    {link?.accountName || setup?.accountName || 'Your WhatsApp account'}
+                  </strong>
+                  {(link?.accountHandle || setup?.accountHandle) && (
+                    <span>{link?.accountHandle || setup?.accountHandle}</span>
+                  )}
+                </div>
                 <p>
                   {setup?.linkMode === 'self-chat'
                     ? 'Open Message yourself in WhatsApp and send nod a message.'
@@ -270,6 +282,11 @@ export function WhatsAppSetup({
           <div className="channel-wizard-actions">
             {state === 'connected' ? (
               <>
+                {onDisconnect && (
+                  <Button type="button" variant="ghost" disabled={busy} onClick={onDisconnect}>
+                    Disconnect
+                  </Button>
+                )}
                 {chatUrl && (
                   <Button asChild variant="outline">
                     <a href={chatUrl} target="_blank" rel="noopener noreferrer">
@@ -283,6 +300,16 @@ export function WhatsAppSetup({
               </>
             ) : (
               <>
+                {onDisconnect && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy || restarting}
+                    onClick={onDisconnect}
+                  >
+                    Disconnect
+                  </Button>
+                )}
                 <Button
                   type="button"
                   variant="ghost"

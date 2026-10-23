@@ -96,6 +96,10 @@
   overflow-y: auto;
   scrollbar-gutter: stable both-edges;
 }
+.ob-main:focus,
+.ob-desktop-preference:focus {
+  outline: none;
+}
 .ob-screen {
   display: contents;
 }
@@ -296,6 +300,11 @@
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+.ob-footer-summary {
+  margin-right: 12px;
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
 }
 .ob .ob-next {
   min-width: 120px;

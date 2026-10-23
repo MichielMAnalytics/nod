@@ -1,94 +1,65 @@
-.ob-email-card {
+.ob-email-choices {
   display: grid;
-  gap: 24px;
-  padding: 28px;
+  gap: 16px;
+}
+.ob-email-benefits,
+.ob-email-muted,
+.ob-email-connected {
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
+}
+.ob-email-providers {
+  display: grid;
+  gap: 12px;
+}
+.ob-email-provider {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 20px;
   border: 1px solid var(--border);
   border-radius: var(--dialog-radius);
   background: var(--surface);
 }
-.ob-email-retry {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-  font-size: var(--text-control);
-}
-.ob-email-gmail {
-  display: grid;
-  gap: 16px;
-  min-width: 0;
-}
-.ob-email-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px;
-}
-.ob-email-tile {
-  display: grid;
+.ob-email-provider > .service-logo {
   flex-shrink: 0;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: var(--dialog-radius);
-  background: var(--control);
 }
-.ob-email-tile > img {
-  display: block;
-  width: 30px;
-  height: 30px;
-}
-.ob-email-title {
-  flex: 1 1 200px;
-  min-width: 0;
-}
-.ob-email-name {
-  font-size: 18px;
-  font-weight: 500;
-}
-.ob-email-muted {
-  color: var(--muted-foreground);
-  font-size: var(--text-control);
-}
-.ob-email-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 12px;
-  border-radius: var(--radius-full);
-  background: var(--success-soft);
-  color: var(--success);
-  font-size: var(--text-control);
-  font-weight: 500;
-  animation: ob-step-in 240ms var(--ease-enter);
-}
-.ob-email-notes {
+.ob-email-identity {
   display: grid;
-  gap: 4px;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
   font-size: var(--text-control);
+}
+.ob-email-identity > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ob-email-retry,
+.ob-email-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-control);
+}
+.ob-email-provider > .ob-email-retry {
+  flex-basis: 100%;
+}
+.ob-email-waiting {
+  color: var(--muted-foreground);
+}
+.ob-email-waiting > p {
+  flex: 1 1 200px;
 }
 .ob-email-error {
   color: var(--error);
   font-size: var(--text-control);
 }
-.ob-email-waiting {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-.ob-email-waiting > svg {
-  color: var(--text-secondary);
-}
-.ob-email-waiting > p {
-  flex: 1 1 200px;
-}
 @media (max-width: 640px) {
-  .ob-email-card {
-    padding: 20px;
-  }
-  .ob-gmail-connect {
-    width: 100%;
-    margin-top: 8px;
+  .ob-email-provider {
+    padding: 16px;
   }
 }

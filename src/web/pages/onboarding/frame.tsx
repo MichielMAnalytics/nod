@@ -4,13 +4,19 @@ import { onboardingSteps, type OnboardingStep } from '../../../shared/onboarding
 import { NodGlyph } from '../../components/motion';
 import { Button } from '../../components/ui';
 
-type DisplayStep = OnboardingStep | 'notifications' | 'launchAtLogin';
+type DisplayStep = OnboardingStep | 'launchAtLogin';
 
-export const desktopOnboardingSteps: readonly DisplayStep[] = [
-  ...onboardingSteps,
-  'notifications',
-  'launchAtLogin',
-];
+const stepNames: Record<DisplayStep, string> = {
+  welcome: 'Welcome to nod',
+  intro: 'Meet nod',
+  email: 'Connect your email',
+  brain: 'Connect an AI provider',
+  apps: 'Connect your tools',
+  messaging: 'Take nod with you',
+  launchAtLogin: 'Open at login',
+};
+
+export const desktopOnboardingSteps: readonly DisplayStep[] = [...onboardingSteps, 'launchAtLogin'];
 
 export function OnboardingFrame({
   step,
@@ -68,7 +74,7 @@ export function OnboardingFrame({
           )}
         </div>
       </header>
-      <main className="ob-main" ref={mainRef}>
+      <main className="ob-main" ref={mainRef} tabIndex={-1} aria-label={stepNames[step]}>
         {children}
       </main>
     </div>

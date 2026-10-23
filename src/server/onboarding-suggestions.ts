@@ -245,7 +245,7 @@ function assembled(checked: Checked, fallback: PreparedSuggestions, sources: rea
 
 function welcomeGreeting(name: string | undefined) {
   const firstName = name?.trim().split(/\s+/)[0]?.slice(0, 40);
-  return `${firstName ? `Hi ${firstName}, give` : 'Hi! Give'} me a moment to line up a few things I can take off your plate.`;
+  return `${firstName ? `Hi ${firstName}!` : 'Hi!'} What are you working on these days? I’d like to find something I can take off your plate.`;
 }
 
 const extraTasks: Task[] = [
@@ -286,13 +286,20 @@ export function createOnboardingSuggestions(options: {
   let stale = false;
   let delivering: Promise<void> | undefined;
   let briefing: Promise<void> | undefined;
+  let pendingBrief:
+    { read: (signal: AbortSignal) => Promise<InboxThread[]>; stop?: AbortSignal } | undefined;
 
   function briefInbox(read: (signal: AbortSignal) => Promise<InboxThread[]>, stop?: AbortSignal) {
-    if (!options.curator.configured) return Promise.resolve();
+    if (!options.curator.configured) {
+      pendingBrief = { read, stop };
+      return Promise.resolve();
+    }
+    pendingBrief = undefined;
     const run = (async () => {
+      if (stop?.aborted || !(await options.gmail())) return;
       const open = await pool.query<{ open: boolean }>(
         `SELECT NOT EXISTS (SELECT 1 FROM onboarding_suggestions
-           WHERE owner_id=$1 AND (greeted_at IS NOT NULL OR posted_at IS NOT NULL))
+           WHERE owner_id=$1 AND posted_at IS NOT NULL)
          AND NOT EXISTS (SELECT 1 FROM messages WHERE owner_id=$1 AND role='user') AS open`,
         [owner],
       );
@@ -315,7 +322,7 @@ export function createOnboardingSuggestions(options: {
       await pool.query(
         `INSERT INTO onboarding_suggestions(owner_id,brief,brief_at) VALUES($1,$2,now())
          ON CONFLICT(owner_id) DO UPDATE SET brief=EXCLUDED.brief,brief_at=now()
-         WHERE onboarding_suggestions.greeted_at IS NULL AND onboarding_suggestions.posted_at IS NULL`,
+         WHERE onboarding_suggestions.posted_at IS NULL`,
         [owner, JSON.stringify(brief)],
       );
     })().catch(() => {});
@@ -355,6 +362,7 @@ export function createOnboardingSuggestions(options: {
     const fallback = fallbackSuggestions({ gmail, telegram });
     if (!options.curator.configured) return fallback;
     try {
+      if (gmail && pendingBrief) void briefInbox(pendingBrief.read, pendingBrief.stop);
       const brief = gmail ? await savedBrief().catch(() => undefined) : undefined;
       const signal = AbortSignal.timeout(45_000);
       const inbox =
@@ -448,11 +456,13 @@ export function createOnboardingSuggestions(options: {
     text: string,
     suggestions: unknown = null,
   ) {
+    const id = randomUUID();
     await client.query(
       `INSERT INTO messages(id,owner_id,role,text,thread_id,suggestions,created_at)
        VALUES($1,$2,'assistant',$3,$4,$5,GREATEST(now(),(SELECT max(created_at)+interval '1 millisecond' FROM messages WHERE owner_id=$2 AND thread_id=$4)))`,
-      [randomUUID(), owner, text, threadId, suggestions && JSON.stringify(suggestions)],
+      [id, owner, text, threadId, suggestions && JSON.stringify(suggestions)],
     );
+    return id;
   }
 
   function deliver() {
@@ -508,7 +518,13 @@ export function createOnboardingSuggestions(options: {
         'UPDATE onboarding_suggestions SET greeted_at=now() WHERE owner_id=$1 AND greeted_at IS NULL',
         [owner],
       );
-      if (claimed.rowCount) await insert(client, thread.id, welcomeGreeting(name));
+      if (claimed.rowCount) {
+        const id = await insert(client, thread.id, welcomeGreeting(name));
+        await client.query(
+          'UPDATE onboarding_suggestions SET greeting_message_id=$2 WHERE owner_id=$1',
+          [owner, id],
+        );
+      }
       return true;
     }, pool);
     if (!greeted) return;
@@ -522,7 +538,8 @@ export function createOnboardingSuggestions(options: {
       created_at timestamptz NOT NULL DEFAULT now()
     );
     ALTER TABLE onboarding_suggestions ADD COLUMN IF NOT EXISTS brief jsonb;
-    ALTER TABLE onboarding_suggestions ADD COLUMN IF NOT EXISTS brief_at timestamptz`);
+    ALTER TABLE onboarding_suggestions ADD COLUMN IF NOT EXISTS brief_at timestamptz;
+    ALTER TABLE onboarding_suggestions ADD COLUMN IF NOT EXISTS greeting_message_id uuid`);
     await pool.query(
       `UPDATE onboarding_suggestions SET brief=NULL WHERE owner_id=$1 AND brief IS NOT NULL
        AND (posted_at IS NOT NULL OR brief_at IS NULL OR brief_at<now()-interval '1 day')`,
@@ -536,6 +553,17 @@ export function createOnboardingSuggestions(options: {
   }
 
   function registerRoutes(app: FastifyInstance) {
+    app.get('/api/onboarding/introduction', async (_request, response) => {
+      const result = await pool.query<{ id: string }>(
+        `SELECT messages.id FROM onboarding_suggestions
+         JOIN messages ON messages.id=onboarding_suggestions.greeting_message_id
+           AND messages.owner_id=onboarding_suggestions.owner_id
+         WHERE onboarding_suggestions.owner_id=$1`,
+        [owner],
+      );
+      response.header('cache-control', 'no-store');
+      return { messageId: result.rows[0]?.id ?? null };
+    });
     app.post('/api/onboarding/suggestions', async (request, response) => {
       z.object({})
         .strict()

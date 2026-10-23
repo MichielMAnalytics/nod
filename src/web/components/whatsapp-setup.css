@@ -1,0 +1,16 @@
+.whatsapp-connected-identity {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0 16px;
+}
+
+.whatsapp-connected-identity strong {
+  color: var(--foreground);
+  font-size: var(--text-body);
+  font-weight: 500;
+}
+
+.whatsapp-connected-identity span {
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
+}

@@ -1,0 +1,66 @@
+.ob-messaging-options {
+  display: grid;
+  gap: 12px;
+}
+
+.ob-messaging-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--dialog-radius);
+  background: var(--surface);
+}
+
+.ob-messaging-card > img {
+  flex-shrink: 0;
+}
+
+.ob-messaging-card > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.ob-messaging-card h2 {
+  font-size: var(--text-body);
+  font-weight: 500;
+}
+
+.ob-messaging-card p {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
+}
+
+@media (max-width: 640px) {
+  .ob-messaging-card {
+    flex-wrap: wrap;
+    padding: 16px;
+  }
+
+  .ob-messaging-card > div {
+    flex-basis: 65%;
+  }
+
+  .ob-messaging-card > button {
+    margin-left: 48px;
+  }
+}
+
+.ob-messaging-identity {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.ob-messaging-identity strong {
+  color: var(--foreground);
+  font-size: var(--text-body);
+  font-weight: 500;
+}
+
+.ob-messaging-identity span {
+  color: var(--muted-foreground);
+  font-size: var(--text-control);
+}

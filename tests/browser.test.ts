@@ -3479,19 +3479,19 @@ for (const surface of ['channels', 'onboarding'])
       const { act, createElement } = await import('react');
       const { createRoot } = await import('react-dom/client');
       const { Channels } = await import('./src/web/pages/channels.tsx');
-      const { Telegram } = await import('./src/web/pages/onboarding/steps/telegram.tsx');
+      const { Messaging } = await import('./src/web/pages/onboarding/steps/messaging.tsx');
       const root = createRoot(document.querySelector('#root'));
       try {
         await act(async () => root.render(${
           surface === 'channels'
             ? 'createElement(Channels, { hosted: true })'
-            : "createElement(Telegram, { arrived: 'back', onNext() {}, onBack() {} })"
+            : "createElement(Messaging, { arrived: 'back', onNext() {}, onBack() {} })"
         }));
         ${
           surface === 'channels'
             ? `setup = { ...setup, pairingCandidate: { id: '123456789', name: 'Fixture Person', username: 'fixture_person' } };
         await act(async () => document.querySelector('.channel-account-actions button').click());`
-            : ''
+            : `await act(async () => document.querySelector('.ob-messaging-card button').click());`
         }
         assert.deepEqual(writes, []);
         const identity = document.querySelector('.telegram-setup-identity');
@@ -3504,7 +3504,10 @@ for (const surface of ['channels', 'onboarding'])
         assert.equal(button.disabled, true);
         await act(async () => confirm());
         assert.equal(document.querySelector('.telegram-setup-identity'), null);
-        assert.ok(document.querySelector('.telegram-setup-connected').textContent.includes('123456789'));
+        const connected = document.querySelector('.channel-wizard-step[data-analytics-private]');
+        assert.ok(connected.textContent.includes(setup.accountHandle));
+        assert.ok(connected.textContent.includes(setup.pairedUser));
+        assert.equal(document.querySelector('[data-telegram-primary]'), null);
         assert.deepEqual(writes, [['/api/channel-settings/telegram/confirm', 'POST', {}]]);
       } finally {
         await act(async () => root.unmount());

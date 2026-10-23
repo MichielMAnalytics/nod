@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { Check, LoaderCircle } from '../../../components/icons';
+import { LoaderCircle } from '../../../components/icons';
 import type { AppSetupStatus, Configuration, Connection } from '../../../../shared/contracts';
-import { connectedGmail } from '../../../../shared/onboarding';
+import { onboardingEmailProviders } from '../../../../shared/onboarding';
+import { ServiceLogo } from '../../../components/service-logo';
 import { Rise } from '../../../components/motion';
 import { Button } from '../../../components/ui';
 import { usePageData } from '../../../hooks/use-page-data';
@@ -13,33 +14,35 @@ import { desktopLinksAvailable, openConnection } from '../../../lib/desktop';
 import type { StepProps } from '..';
 import { Bubble, Footer, Messages, useReveal, type RevealStep } from '../motion';
 
-const sequence: RevealStep[] = [
-  { typing: 450 },
-  { wait: 300, typing: 550 },
-  { wait: 200 },
-  { wait: 200 },
-];
+const sequence: RevealStep[] = [{ typing: 450 }, { wait: 200 }, { wait: 200 }];
 
 const outcomes = ['connected', 'cancelled', 'failed', 'expired'];
 
-const unavailableReasons = {
-  load: 'Couldn’t check your app connections.',
-  ready: 'App connections aren’t available right now.',
-  gmail: 'Gmail isn’t available with this connection.',
-};
+type EmailProvider = (typeof onboardingEmailProviders)[number];
+const providerNames: Record<EmailProvider, string> = { gmail: 'Gmail', outlook: 'Outlook' };
 
-function connectionMessage(result?: string) {
+function ownedAccount(connection: Connection) {
+  return (
+    connection.status === 'connected' &&
+    Boolean(connection.connectionId && connection.accountId) &&
+    !connection.disconnectPending
+  );
+}
+
+function connectionMessage(service: EmailProvider, result?: string) {
   if (result === 'cancelled') return 'Sign-in cancelled. You can try again.';
-  if (result === 'failed' || result === 'expired') return 'Gmail didn’t connect. Try again?';
+  if (result === 'failed' || result === 'expired')
+    return `${providerNames[service]} didn’t connect. Try again?`;
   return '';
 }
 
-export function Email({ arrived, onNext, onBack }: StepProps) {
+export function Email({ arrived, onNext, onBack, onSkip }: StepProps) {
   const { revealed, typing, done, skip } = useReveal(sequence, {
     enabled: arrived === 'forward',
   });
   const configuration = usePageData<Configuration>('/api/configuration');
   const apps = usePageData<Connection[]>('/api/apps');
+  const catalog = usePageData<Connection[]>('/api/apps/catalog');
   const refreshApps = apps.refresh;
   const [reloading, setReloading] = useState(false);
   const [recovering, setRecovering] = useState<string>();
@@ -49,13 +52,14 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
   const [stale, setStale] = useState(false);
   const [pollFailing, setPollFailing] = useState(false);
   const [error, setError] = useState('');
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState<EmailProvider>();
+  const [provider, setProvider] = useState<EmailProvider>();
   const request = useRef<AbortController | null>(null);
-  const attempt = useRef<string | undefined>(undefined);
+  const attempt = useRef<{ id: string; service: EmailProvider } | undefined>(undefined);
   const active = useRef(false);
 
   function clearAttempt() {
-    setCompleted(false);
+    setCompleted(undefined);
     attempt.current = undefined;
     setSignInUrl(undefined);
     setStale(false);
@@ -72,15 +76,17 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
       ) => {
         const { connection, service, attempt: value } = event.data ?? {};
         if (
-          service !== 'gmail' ||
+          !attempt.current ||
+          service !== attempt.current.service ||
           !value ||
-          attempt.current !== value ||
+          attempt.current.id !== value ||
           !outcomes.includes(connection ?? '')
         )
           return;
+        const selected = attempt.current.service;
         clearAttempt();
-        setCompleted(connection === 'connected');
-        setError(connectionMessage(connection));
+        setCompleted(connection === 'connected' ? selected : undefined);
+        setError(connectionMessage(selected, connection));
         setPending((current) => (current === 'waiting' ? undefined : current));
         void refreshApps();
       };
@@ -108,9 +114,9 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
       window.clearTimeout(poll);
       window.clearTimeout(grace);
       clearAttempt();
-      setCompleted(result === 'connected');
+      setCompleted(result === 'connected' ? currentAttempt.service : undefined);
       setPending(undefined);
-      setError(connectionMessage(result));
+      setError(connectionMessage(currentAttempt.service, result));
       void refreshApps();
     };
     const read = async () => {
@@ -185,49 +191,67 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
       window.removeEventListener('focus', returned);
       document.removeEventListener('visibilitychange', returned);
     };
-  }, [signInUrl, refreshApps]);
+  }, [signInUrl, provider, refreshApps]);
 
-  const gmail = apps.data?.filter((connection) => connection.slug === 'gmail') ?? [];
-  const disconnections = gmail.filter((connection) => connection.disconnectPending);
-  const account = gmail.find(connectedGmail);
-  const connected = !!account;
+  const providers = onboardingEmailProviders.map((slug) => {
+    const accounts = apps.data?.filter((connection) => connection.slug === slug) ?? [];
+    const service =
+      catalog.data?.find((connection) => connection.slug === slug) ??
+      accounts.find((connection) => connection.status !== 'not_configured');
+    return {
+      slug,
+      service,
+      account: accounts.find(ownedAccount),
+      disconnections: accounts.filter((connection) => connection.disconnectPending),
+    };
+  });
+  const connected = providers.some((entry) => entry.account);
   const loading = (!configuration.data && !configuration.error) || (!apps.data && !apps.error);
-  const unavailable: keyof typeof unavailableReasons | undefined = loading
-    ? undefined
+  const unavailable = loading
+    ? ''
     : !configuration.data || !apps.data
-      ? 'load'
+      ? 'Couldn’t check your app connections.'
       : !configuration.data.integrationsReady
-        ? 'ready'
-        : gmail.some((connection) => connection.status !== 'not_configured')
-          ? undefined
-          : 'gmail';
-  const canConnect = !disconnections.length && !recovering && !loading && !unavailable;
+        ? 'Email connections aren’t available right now.'
+        : '';
+  const canConnect = (slug: EmailProvider) => {
+    const entry = providers.find((item) => item.slug === slug)!;
+    return (
+      !entry.disconnections.length &&
+      !recovering &&
+      !loading &&
+      !unavailable &&
+      Boolean(entry.service && entry.service.status !== 'not_configured')
+    );
+  };
+  const confirmed = completed && providers.find((entry) => entry.slug === completed)?.account;
+  const ready = Boolean(completed && canConnect(completed));
 
   useEffect(() => {
     if (
       arrived !== 'forward' ||
       !completed ||
-      !connected ||
-      !canConnect ||
+      !confirmed ||
+      !ready ||
       pending ||
       apps.refreshing ||
       apps.error
     )
       return;
-    setCompleted(false);
+    setCompleted(undefined);
     onNext();
-  }, [arrived, completed, connected, canConnect, pending, apps.refreshing, apps.error, onNext]);
+  }, [arrived, completed, confirmed, ready, pending, apps.refreshing, apps.error, onNext]);
 
-  async function connect() {
-    if (request.current || !canConnect) return;
+  async function connect(slug: EmailProvider) {
+    if (request.current || !canConnect(slug)) return;
     const capture = analyticsForCurrentSession();
     capture('nod_app_connect_clicked', { entry: 'onboarding', result: 'opened' });
     const external = desktopLinksAvailable();
     const popup = external
       ? null
       : window.open(
-          '/connection-loading.html?service=gmail',
-          'nod-connect-gmail',
+          `/connection-loading.html?service=${slug}`,
+          `nod-connect-${slug}`,
           'popup,width=520,height=720',
         );
     try {
@@ -235,13 +259,15 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
     } catch {}
     const controller = new AbortController();
     request.current = controller;
+    controller.signal.addEventListener('abort', () => popup?.close(), { once: true });
     clearAttempt();
+    setProvider(slug);
     setPending('opening');
     setPairingConfirmed(false);
     setError('');
     let next: 'waiting' | undefined;
     try {
-      const response = await api<{ url: string; attempt?: string }>('/api/apps/gmail/connect', {
+      const response = await api<{ url: string; attempt?: string }>(`/api/apps/${slug}/connect`, {
         method: 'POST',
         body: JSON.stringify({ returnTo: 'window' }),
         signal: controller.signal,
@@ -249,8 +275,8 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
       if (controller.signal.aborted) throw new DOMException('Cancelled.', 'AbortError');
       const url = connectionUrl(response.url, window.location.origin);
       if (!response.attempt || !/^[A-Za-z0-9_-]{43}$/.test(response.attempt))
-        throw new Error('Gmail didn’t connect. Try again?');
-      attempt.current = response.attempt;
+        throw new Error(connectionMessage(slug, 'failed'));
+      attempt.current = { id: response.attempt, service: slug };
       flushSync(() => {
         setSignInUrl(url);
       });
@@ -259,11 +285,10 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
       else if (popup && !popup.closed) popup.location.href = url;
     } catch (cause) {
       popup?.close();
+      if (controller.signal.aborted || request.current !== controller) return;
       clearAttempt();
-      if (!controller.signal.aborted) {
-        setError(errorMessage(cause));
-        capture('nod_ui_error', { area: 'onboarding', action: 'connect' });
-      }
+      setError(errorMessage(cause));
+      capture('nod_ui_error', { area: 'onboarding', action: 'connect' });
     } finally {
       if (request.current === controller) {
         request.current = null;
@@ -272,17 +297,21 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
     }
   }
 
-  async function retryDisconnection(id: string) {
+  async function retryDisconnection(connection: Connection) {
+    const id = connection.connectionId!;
     if (request.current || recovering) return;
     const controller = new AbortController();
     request.current = controller;
     setRecovering(id);
     setError('');
     try {
-      await api(`/api/apps/gmail/accounts/${encodeURIComponent(id)}/disconnect`, {
-        method: 'POST',
-        signal: controller.signal,
-      });
+      await api(
+        `/api/apps/${encodeURIComponent(connection.slug)}/accounts/${encodeURIComponent(id)}/disconnect`,
+        {
+          method: 'POST',
+          signal: controller.signal,
+        },
+      );
       await refreshApps();
     } catch (cause) {
       if (!controller.signal.aborted) setError(errorMessage(cause));
@@ -301,139 +330,133 @@ export function Email({ arrived, onNext, onBack }: StepProps) {
 
   async function reload() {
     setReloading(true);
-    await Promise.all([configuration.refresh(), refreshApps()]);
+    await Promise.all([configuration.refresh(), refreshApps(), catalog.refresh()]);
     if (active.current) setReloading(false);
   }
-
-  const gmailState = connected ? 'connected' : (pending ?? 'idle');
-  let status;
-  if (disconnections.length)
-    status = (
-      <div className="ob-email-notes">
-        <p>Disconnection wasn’t confirmed. Retry to check its status and finish disconnecting.</p>
-        {disconnections.map((connection) => (
-          <div className="ob-email-retry" key={connection.connectionId ?? connection.accountId}>
-            {connection.accountEmail && (
-              <p className="ob-email-muted" data-analytics-private>
-                {connection.accountEmail}
-              </p>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!!recovering || !!pending || !connection.connectionId}
-              onClick={() => void retryDisconnection(connection.connectionId!)}
-            >
-              {recovering === connection.connectionId ? 'Checking…' : 'Retry disconnection'}
-            </Button>
-          </div>
-        ))}
-      </div>
-    );
-  else if (account) status = null;
-  else if (gmailState === 'waiting')
-    status = (
-      <div className="ob-email-waiting">
-        <LoaderCircle size={18} className="spin" aria-hidden="true" />
-        <p>
-          {stale ? 'Didn’t finish signing in?' : 'Finish signing in in your browser.'}{' '}
-          {signInUrl && !pairingConfirmed && (
-            <a href={signInUrl} target="_blank" rel="noreferrer">
-              Open sign-in
-            </a>
-          )}
-        </p>
-        {stale && (
-          <Button variant="outline" size="sm" onClick={() => void connect()}>
-            Start again
-          </Button>
-        )}
-        <Button variant="ghost" size="sm" onClick={cancel}>
-          Cancel
-        </Button>
-      </div>
-    );
-  else if (loading) status = <p className="ob-email-muted">Checking app connections…</p>;
-  else if (unavailable)
-    status = (
-      <div className="ob-email-retry">
-        <p className="ob-email-muted">{unavailableReasons[unavailable]}</p>
-        <Button variant="ghost" size="sm" disabled={reloading} onClick={() => void reload()}>
-          {reloading && <LoaderCircle size={16} className="spin" aria-hidden="true" />}
-          Try again
-        </Button>
-      </div>
-    );
-  else status = <p className="ob-email-muted">Sign in to Gmail and review what nod can access.</p>;
 
   return (
     <section className="ob-step ob-email" data-analytics-public onClick={done ? undefined : skip}>
       <Messages
         revealed={revealed}
         typing={typing}
-        items={[
-          <Bubble>Let’s connect your email.</Bubble>,
-          <Bubble>
-            I can help you read, sort and draft.
-            <br />
-            I’ll only send when you ask.
-          </Bubble>,
-        ]}
+        items={[<Bubble>Let’s connect your email.</Bubble>]}
       />
-      <Rise show={revealed >= 3} className="ob-email-card">
-        <div className="ob-email-gmail" data-gmail={gmailState}>
-          <div className="ob-email-head">
-            <span className="ob-email-tile">
-              <img src="/logos/gmail.svg" alt="" width={24} height={24} />
-            </span>
-            <div className="ob-email-title">
-              <p className="ob-email-name">Gmail</p>
+      <Rise show={revealed >= 2} className="ob-email-choices">
+        <p className="ob-email-benefits">
+          Catch up on important emails and get help drafting replies.
+        </p>
+        <div className="ob-email-providers">
+          {providers.map(({ slug, service, account, disconnections: issues }) => (
+            <div
+              className="ob-email-provider"
+              key={slug}
+              data-provider={slug}
+              data-connected={Boolean(account)}
+            >
+              <ServiceLogo slug={slug} logoUrl={service?.logoUrl} size={28} />
+              <div className="ob-email-identity">
+                <span>{providerNames[slug]}</span>
+                {account?.accountEmail && (
+                  <span className="ob-email-muted" data-analytics-private>
+                    {account.accountEmail}
+                  </span>
+                )}
+                {!loading &&
+                  !catalog.loading &&
+                  (!service || service.status === 'not_configured') &&
+                  !unavailable && <span className="ob-email-muted">Unavailable right now</span>}
+              </div>
               {account ? (
-                <p className="ob-email-muted" data-analytics-private>
-                  {account.accountEmail ?? 'Signed in.'}
-                </p>
-              ) : (
-                <p className="ob-email-muted">Choose the inbox you want to connect.</p>
-              )}
-            </div>
-            {connected ? (
-              <span className="ob-email-chip">
-                <Check size={14} strokeWidth={2.5} aria-hidden="true" />
-                Connected
-              </span>
-            ) : (
-              gmailState !== 'waiting' && (
-                <Button
-                  className="ob-gmail-connect"
-                  disabled={!canConnect || gmailState === 'opening'}
-                  onClick={() => void connect()}
-                >
-                  {gmailState === 'opening' && (
-                    <LoaderCircle size={16} className="spin" aria-hidden="true" />
-                  )}
-                  Connect Gmail
+                <span className="ob-email-connected">Connected</span>
+              ) : pending && provider === slug ? (
+                <Button variant="ghost" size="sm" onClick={cancel}>
+                  Cancel
                 </Button>
-              )
+              ) : (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  aria-label={`Connect ${providerNames[slug]}`}
+                  disabled={!canConnect(slug) || Boolean(pending)}
+                  onClick={() => void connect(slug)}
+                >
+                  Connect
+                </Button>
+              )}
+              {issues.map((connection) => (
+                <div
+                  className="ob-email-retry"
+                  key={connection.connectionId ?? connection.accountId}
+                >
+                  <p>Disconnection wasn’t confirmed.</p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={Boolean(recovering || pending || !connection.connectionId)}
+                    onClick={() => void retryDisconnection(connection)}
+                  >
+                    {recovering === connection.connectionId ? 'Checking…' : 'Retry disconnection'}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {pending && (
+          <div className="ob-email-waiting" role="status">
+            <LoaderCircle size={16} className="spin" aria-hidden="true" />
+            <p>
+              {pending === 'opening'
+                ? 'Opening sign-in…'
+                : stale
+                  ? 'Didn’t finish signing in?'
+                  : 'Finish signing in in your browser.'}
+            </p>
+            {signInUrl && !pairingConfirmed && (
+              <a href={signInUrl} target="_blank" rel="noreferrer">
+                Open sign-in
+              </a>
+            )}
+            {stale && provider && (
+              <Button variant="ghost" size="sm" onClick={() => void connect(provider)}>
+                Start again
+              </Button>
             )}
           </div>
-          {status}
-          {pollFailing && (
-            <p role="alert" className="ob-email-error">
-              Can’t check on the sign-in right now. Still trying.
-            </p>
-          )}
-          {error && (
-            <p role="alert" className="ob-email-error" data-analytics-private>
-              {error}
-            </p>
-          )}
-        </div>
+        )}
+        {(unavailable || (!loading && catalog.error)) && (
+          <div className="ob-email-retry">
+            <p className="ob-email-muted">{unavailable || 'Couldn’t load all email providers.'}</p>
+            <Button variant="ghost" size="sm" disabled={reloading} onClick={() => void reload()}>
+              Try again
+            </Button>
+          </div>
+        )}
+        {pollFailing && (
+          <p role="alert" className="ob-email-error">
+            Can’t check sign-in right now. Still trying.
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="ob-email-error" data-analytics-private>
+            {error}
+          </p>
+        )}
       </Rise>
       <Footer
-        show={revealed >= 4}
+        show={revealed >= 3}
         onBack={onBack}
         onNext={onNext}
-        nextDisabled={!connected || !!disconnections.length || !!recovering}
+        onSkip={
+          connected
+            ? undefined
+            : () => {
+                cancel();
+                onSkip?.();
+                onNext();
+              }
+        }
+        nextDisabled={!connected || Boolean(pending || recovering)}
       />
     </section>
   );

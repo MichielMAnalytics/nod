@@ -38,7 +38,9 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
   });
   useEffect(() => {
     const press = (event: KeyboardEvent) => {
-      if (event.key !== 'Enter' || event.target !== document.body || event.repeat) return;
+      const surface =
+        event.target === document.body || event.target === document.querySelector('.ob-main');
+      if (event.key !== 'Enter' || !surface || event.repeat) return;
       if (done) void next();
     };
     window.addEventListener('keydown', press);

@@ -1512,9 +1512,7 @@ async function initializeApplication(
     developerIds: desktopMode ? new Set() : new Set([ownerId]),
     start: welcome,
     prepare: prepareRuntime,
-    onboardingReady: async () =>
-      adapters.model.configured &&
-      (await integrations.list(ownerId, { refresh: false })).some(connectedGmail),
+    onboardingReady: async () => adapters.model.configured,
     traces: adapters.traces?.available ?? false,
     onTraces: (enabled) => adapters.traces?.configure({ enabled }),
   }).register(app);

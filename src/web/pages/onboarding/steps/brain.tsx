@@ -3,7 +3,7 @@ import { Check, LoaderCircle } from '../../../components/icons';
 import type { ModelConnection, ModelProvider, ModelsResponse } from '../../../../shared/models';
 import { modelProviderNames, modelSource } from '../../../../shared/models';
 import { agentModels } from '../../../../shared/model-defaults';
-import { Button, Input } from '../../../components/ui';
+import { Button, Input, Notice } from '../../../components/ui';
 import { CloudKeyFields, ModelPicker } from '../../../components/models';
 import {
   keyConnection,
@@ -288,12 +288,10 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
   function options(provider: ModelProvider) {
     const settings = providers[provider];
     if (!data)
-      return (
+      return models.error ? null : (
         <div className="ob-brain-status" data-analytics-public>
           <Spinner />
-          <p className="ob-brain-wait">
-            {models.error ? <span data-analytics-private>{models.error}</span> : 'Loading…'}
-          </p>
+          <p className="ob-brain-wait">Loading…</p>
         </div>
       );
     if (shown)
@@ -533,6 +531,22 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
           <Bubble data-analytics-public>Sign in with your ChatGPT plan, or use an API key.</Bubble>,
         ]}
       />
+      {!data && models.error && (
+        <Notice>
+          <span data-analytics-private>{models.error}</span>{' '}
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={models.refreshing}
+            onClick={() => {
+              models.setError('');
+              void models.refresh();
+            }}
+          >
+            {models.refreshing ? 'Trying again…' : 'Try again'}
+          </Button>
+        </Notice>
+      )}
       <div className="ob-brain-list" data-analytics-public>
         {modelProviders.map((item, index) => {
           const open = item === provider;

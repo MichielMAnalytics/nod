@@ -119,6 +119,8 @@ test(
     const runtimeReady = new Promise<void>((resolve) => {
       storageReady = resolve;
     });
+    const model = { provider: 'fixture', name: 'fixture', configured: true };
+    let onboardingInboxReads = 0;
     const application = await createApplication(
       {
         agent: {
@@ -146,7 +148,17 @@ test(
         },
         computer: fakeComputer(),
         workspace: fakeWorkspace(),
-        integrations: createIntegrationFixture('http://localhost:4320').provider,
+        integrations: {
+          ...createIntegrationFixture('http://localhost:4320').provider,
+          inboxSnippets: async () => {
+            onboardingInboxReads++;
+            throw new Error('No fixture inbox is connected.');
+          },
+          inboxThreads: async () => {
+            onboardingInboxReads++;
+            throw new Error('No fixture inbox is connected.');
+          },
+        },
         memoryCurator: {
           id: 'fixture',
           configured: true,
@@ -187,7 +199,7 @@ test(
           }),
         },
         keyStore: { id: 'fixture', configured: true, getKey: async () => Buffer.alloc(32, 7) },
-        model: { provider: 'fixture', name: 'fixture', configured: true },
+        model,
       },
       { channels: false, runtimeReady },
     );
@@ -572,6 +584,54 @@ test(
       await legacy();
       assert.equal(await profileTable(), null);
       assert.equal(await remembered(), true);
+      await t.test('setup requires a model and finishes without a connected inbox', async () => {
+        const session = async () =>
+          (await application.app.inject({ method: 'GET', url: '/api/session', headers })).json();
+        const complete = () =>
+          application.app.inject({
+            method: 'PATCH',
+            url: '/api/account',
+            headers,
+            payload: { onboardingCompleted: true },
+          });
+        const introduction = async () =>
+          (
+            await application.app.inject({
+              method: 'GET',
+              url: '/api/onboarding/introduction',
+              headers,
+            })
+          ).json();
+        assert.deepEqual(await application.integrations.connectedApps(), []);
+        assert.equal((await session()).settings.onboardingCompleted, false);
+        const turnsBefore = (await pool.query('SELECT count(*) FROM turns')).rows[0].count;
+        const openedBefore = contexts.length;
+        model.configured = false;
+        assert.equal((await complete()).statusCode, 409);
+        assert.equal((await session()).settings.onboardingCompleted, false);
+        assert.deepEqual(await introduction(), { messageId: null });
+        assert.equal(onboardingInboxReads, 0);
+        model.configured = true;
+        assert.equal((await complete()).statusCode, 200);
+        assert.equal((await session()).settings.onboardingCompleted, true);
+        await waitFor(
+          async () =>
+            Boolean(
+              (
+                await pool.query(
+                  'SELECT 1 FROM messages WHERE owner_id=$1 AND suggestions IS NOT NULL',
+                  [ownerId],
+                )
+              ).rowCount,
+            ),
+          'First-chat suggestions without an inbox',
+        );
+        assert.equal(typeof (await introduction()).messageId, 'string');
+        assert.deepEqual(await application.integrations.connectedApps(), []);
+        assert.equal(onboardingInboxReads, 0);
+        assert.equal(contexts.length, openedBefore);
+        assert.equal((await pool.query('SELECT count(*) FROM turns')).rows[0].count, turnsBefore);
+      });
     } finally {
       await application.app.close();
       await pool.end();

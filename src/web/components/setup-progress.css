@@ -9,6 +9,9 @@
   text-align: center;
   outline: none;
 }
+.setup-progress:focus {
+  outline: none;
+}
 :root[data-desktop='true'] .setup-progress {
   min-height: calc(100dvh - var(--desktop-titlebar-height, 0px));
 }
