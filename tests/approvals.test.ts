@@ -552,9 +552,20 @@ test(
 
       const { createTrust } = await import('../src/server/trust.ts');
       const reviews: Array<Record<string, any>> = [];
-      let aligned: boolean | string | ((input: Record<string, any>) => boolean) = false;
+      const prompts: string[] = [];
+      let aligned:
+        boolean | string | ((input: Record<string, any>) => boolean | Record<string, unknown>) =
+        false;
+      let ruled = false;
+      const cite = (input: Record<string, any>) =>
+        input.userMessages?.at(-1)?.text ??
+        input.scheduledTaskInstruction ??
+        input.standingInstruction ??
+        input.userRules ??
+        'read';
       t.beforeEach(() => {
         aligned = false;
+        ruled = false;
       });
       const replies: object[] = [];
       const replyAnswers: Record<string, string> = {
@@ -567,7 +578,7 @@ test(
       const trust = createTrust({
         pool: db.pool,
         ownerId,
-        review: async (_instructions, input) => {
+        review: async (instructions, input) => {
           if ('reply' in input) {
             replies.push(input);
             const reply = String(input.reply)
@@ -577,9 +588,15 @@ test(
             return { answer: replyAnswers[reply] ?? 'other' };
           }
           reviews.push(input as Record<string, any>);
+          prompts.push(instructions);
           const yes =
             typeof aligned === 'function' ? aligned(input as Record<string, any>) : aligned;
-          return { run: yes };
+          if (yes && typeof yes === 'object') return yes;
+          return {
+            run: yes,
+            ...(yes === true ? { because: cite(input) } : {}),
+            ...(ruled ? { rule: true } : {}),
+          };
         },
       });
       const email = (to: string) => ({
@@ -811,8 +828,15 @@ test(
           });
           assert.equal(reviews.at(-1)?.userMessages.at(-1).text, 'Check my inbox.');
           const approved = await begin('Yes, send that reply to the client.');
+          const yes = (
+            await db.pool.query(
+              "SELECT id FROM messages WHERE owner_id=$1 AND role='user' AND text=$2",
+              [ownerId, 'Yes, send that reply to the client.'],
+            )
+          ).rows[0].id;
           assert.deepEqual(await trust.check(approved, 'GMAIL_REPLY_TO_THREAD', reply), {
             confirm: false,
+            basis: { kind: 'message', messageId: yes, quote: 'Yes, send that reply to the client' },
           });
           assert.equal(
             reviews.at(-1)?.userMessages.at(-1).text,
@@ -848,7 +872,7 @@ test(
               message_id: 'synthetic-invoice',
               recipient_email: 'accounting@example.test',
             }),
-            { confirm: false },
+            { confirm: false, basis: { kind: 'standing', quote: standing.slice(0, -1) } },
           );
           assert.equal(reviews.at(-1)?.userMessages, undefined);
           await trust.check(await begin('Check my inbox.'), 'GMAIL_FETCH_EMAILS', {});
@@ -877,11 +901,132 @@ test(
               event_id: 'synthetic-standup',
               start_time: '10:00',
             }),
-            { confirm: false },
+            { confirm: false, basis: { kind: 'schedule', quote: instruction.slice(0, -1) } },
           );
           assert.equal(reviews.at(-1)?.userMessages, undefined);
           assert.equal(reviews.at(-1)?.standingInstruction, undefined);
           await setRule('');
+        },
+      );
+
+      await t.test(
+        'owner rules reach the checker in chat, scheduled and background work, only owners with rules get the rules prompt, and only a real rule is named as the reason to ask',
+        async () => {
+          const setRules = (rules: string) =>
+            db.pool.query(
+              `INSERT INTO preferences(owner_id,rules) VALUES($1,$2)
+               ON CONFLICT(owner_id) DO UPDATE SET rules=EXCLUDED.rules`,
+              [ownerId, rules],
+            );
+          const send = email('ana.named@example.test');
+          await setRules('');
+          aligned = true;
+          const chat = await begin('Send Ana the synthetic update.');
+          assert.equal((await trust.check(chat, 'GMAIL_SEND_EMAIL', send)).confirm, false);
+          assert.equal(reviews.at(-1)?.userRules, undefined);
+          const plain = prompts.at(-1)!;
+          assert.doesNotMatch(plain, /userRules/);
+          aligned = false;
+          ruled = true;
+          assert.deepEqual(await trust.check(chat, 'GMAIL_SEND_EMAIL', { ...send }), {
+            confirm: true,
+            reason: 'unrequested',
+          });
+          const rules = 'Always ask me before sending any email.';
+          await setRules(`  ${rules}\n`);
+          aligned = (input) => input.userRules === undefined;
+          for (const turn of [
+            chat,
+            await begin('Synthetic event', { source: 'event' }),
+            await begin('Synthetic scheduled work', { source: 'schedule' }),
+          ]) {
+            assert.deepEqual(await trust.check(turn, 'GMAIL_SEND_EMAIL', send), {
+              confirm: true,
+              reason: 'rule',
+            });
+            assert.equal(reviews.at(-1)?.userRules, rules);
+            assert.ok(prompts.at(-1)!.startsWith(plain));
+            assert.match(prompts.at(-1)!, /userRules/);
+          }
+          ruled = false;
+          assert.deepEqual(
+            await trust.check(
+              await begin('Synthetic event', { source: 'event' }),
+              'GMAIL_SEND_EMAIL',
+              send,
+            ),
+            { confirm: true, reason: 'background' },
+          );
+          await setRules('');
+          await trust.check(chat, 'NOD_notification_preferences_update', {
+            rules,
+            currentRules: '',
+          });
+          assert.equal(reviews.at(-1)?.userRules, undefined);
+          assert.match(prompts.at(-1)!, /currentRules/);
+        },
+      );
+
+      await t.test(
+        'a run verdict counts only when it quotes words the checker was actually shown',
+        async () => {
+          const turn = await begin('Send Lena the synthetic report.');
+          const said = (
+            await db.pool.query(
+              "SELECT id FROM messages WHERE owner_id=$1 AND role='user' AND text=$2",
+              [ownerId, 'Send Lena the synthetic report.'],
+            )
+          ).rows[0].id;
+          const subject = `Synthetic report ${randomUUID()}`;
+          const send = { ...email('lena@example.test'), subject };
+          for (const answer of [
+            { run: true },
+            { run: true, because: '' },
+            { run: true, because: 'Send Noa the synthetic report' },
+            { run: true, because: said },
+            { run: true, because: 'schedule' },
+            { run: true, because: 'rule' },
+            { run: true, because: subject },
+            { run: 'true', because: 'Send Lena the synthetic report.' },
+          ]) {
+            aligned = () => answer;
+            assert.deepEqual(
+              await trust.check(turn, 'GMAIL_SEND_EMAIL', send),
+              { confirm: true, reason: 'unrequested' },
+              JSON.stringify(answer),
+            );
+          }
+          aligned = () => ({ run: true, because: '“send lena the  synthetic report”' });
+          assert.deepEqual(await trust.check(turn, 'GMAIL_SEND_EMAIL', send), {
+            confirm: false,
+            basis: {
+              kind: 'message',
+              messageId: said,
+              quote: 'send lena the  synthetic report',
+            },
+          });
+          aligned = () => ({ run: true, because: 'read' });
+          assert.deepEqual(await trust.check(turn, 'GMAIL_FETCH_EMAILS', {}), {
+            confirm: false,
+            basis: { kind: 'read' },
+          });
+          await db.pool.query(
+            `INSERT INTO preferences(owner_id,rules) VALUES($1,$2)
+             ON CONFLICT(owner_id) DO UPDATE SET rules=EXCLUDED.rules`,
+            [ownerId, 'Send Noa the weekly synthetic report without asking.'],
+          );
+          try {
+            aligned = () => ({ run: true, because: 'Send Noa the weekly synthetic report' });
+            assert.deepEqual(
+              await trust.check(turn, 'GMAIL_SEND_EMAIL', email('noa@example.test')),
+              {
+                confirm: false,
+                basis: { kind: 'rule', quote: 'Send Noa the weekly synthetic report' },
+              },
+            );
+          } finally {
+            await db.pool.query("UPDATE preferences SET rules='' WHERE owner_id=$1", [ownerId]);
+          }
         },
       );
 
@@ -919,6 +1064,7 @@ test(
           assert.deepEqual(await access.authorize(groupResumed, target), {
             ok: true,
             reason: 'allowed',
+            basis: { kind: 'approved' },
           });
           assert.equal(reviews.length, afterGroup);
           const task = await begin('Download my bank statement.');
@@ -931,7 +1077,7 @@ test(
           const resumed = await confirmAccess(task, signIn.args);
           assert.deepEqual(
             await access.authorize(resumed, { origin: site, kind: 'sign_in', itemId: first }),
-            { ok: true, reason: 'allowed' },
+            { ok: true, reason: 'allowed', basis: { kind: 'approved' } },
           );
           for (const other of [
             { origin: site, kind: 'sign_in' as const, itemId: second },
@@ -952,9 +1098,23 @@ test(
             input.action.arguments.website === site &&
             input.userMessages?.at(-1)?.text === 'Download my bank statement now.';
           const requested = await begin('Download my bank statement now.');
+          const download = (
+            await db.pool.query(
+              "SELECT id FROM messages WHERE owner_id=$1 AND role='user' AND text=$2",
+              [ownerId, 'Download my bank statement now.'],
+            )
+          ).rows[0].id;
           assert.deepEqual(
             await access.authorize(requested, { origin: site, kind: 'sign_in', itemId: first }),
-            { ok: true, reason: 'asked' },
+            {
+              ok: true,
+              reason: 'asked',
+              basis: {
+                kind: 'message',
+                messageId: download,
+                quote: 'Download my bank statement now',
+              },
+            },
           );
           aligned = false;
           const background = await begin('Synthetic background work', { source: 'event' });
@@ -965,6 +1125,32 @@ test(
           });
           assert.ok('details' in verdict);
           assert.equal(reviews.at(-1)?.userMessages, undefined);
+          await access.record(requested, {
+            action: 'sign_in',
+            origin: site,
+            reason: 'asked',
+            itemId: first,
+            itemKind: 'login',
+            basis: { kind: 'message', messageId: download, quote: 'Download my bank statement' },
+          });
+          await access.record(requested, {
+            action: 'sign_in',
+            origin: site,
+            reason: 'asked',
+            itemId: second,
+            itemKind: 'login',
+            basis: {
+              kind: 'message',
+              messageId: randomUUID(),
+              quote: 'Download my bank statement',
+            },
+          });
+          const listed = (await access.activity({ origin: site })).entries;
+          assert.deepEqual(listed.find((entry) => entry.itemId === first)?.because, {
+            kind: 'message',
+            text: 'Download my bank statement',
+          });
+          assert.equal(listed.find((entry) => entry.itemId === second)?.because, undefined);
         },
       );
 

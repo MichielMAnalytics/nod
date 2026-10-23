@@ -8,7 +8,7 @@ import { pool } from './db.ts';
 import { transaction } from './transaction.ts';
 import { turnChainSql } from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
-import { delta, refresh } from './events.ts';
+import { delta, refresh, working } from './events.ts';
 import { localArtifacts, type ArtifactService } from './artifacts.ts';
 import type { SpeechService } from './speech.ts';
 import type { Artifact, MessageReaction } from '../shared/contracts.ts';
@@ -44,6 +44,7 @@ const inflight = new Set<Promise<void>>();
 let stopping = false;
 
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
+export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
 export interface TurnRef {
   threadId: string;
   turnId: string;
@@ -103,6 +104,11 @@ export interface ThreadDependencies {
     turnId: string,
     signal: AbortSignal,
   ) => Promise<{ prompt: string } | undefined>;
+  bindVerificationQuestion?: (
+    turnId: string,
+    messageId: string,
+    client: PoolClient,
+  ) => Promise<void>;
   spendingLimitReached?: () => Promise<boolean>;
   checkIn?: (sessionId: string, turnId: string) => Promise<RuntimeContext['checkIn']>;
   skipTurn?: (sourceId: string) => Promise<boolean>;
@@ -779,14 +785,14 @@ async function failTurn(
     const turn = (
       await client.query<{
         thread_id: string;
-        background: boolean;
+        owner_started: boolean;
         task_id: string | null;
         latest_user_message_id: string | null;
       }>(
         `${turnChainSql()}, origin AS (
           SELECT u.created_at,u.id FROM turns u JOIN chain c ON c.id=u.id
           ORDER BY u.created_at,u.id LIMIT 1
-        ) SELECT u.thread_id,u.background,to_jsonb(u)->>'task_id' AS task_id,
+        ) SELECT u.thread_id,${ownerStarted()} AS owner_started,to_jsonb(u)->>'task_id' AS task_id,
          (SELECT m.id FROM messages m LEFT JOIN turns author ON author.id=m.turn_id AND author.owner_id=m.owner_id
           WHERE m.owner_id=$2 AND m.thread_id=u.thread_id AND m.role='user'
             AND (m.turn_id IN (SELECT id FROM chain)
@@ -810,7 +816,7 @@ async function failTurn(
     return { ...turn, taskMessageId: task?.message_id as string | undefined };
   }, pool);
   if (!turn) return false;
-  if (turn.background && !turn.taskMessageId) return true;
+  if (!turn.owner_started && !turn.taskMessageId) return true;
   const presented = await present?.(
     turn.thread_id,
     error === interrupted ? { kind: 'interrupted' } : { kind: 'failed', error },
@@ -943,7 +949,9 @@ async function takeQueuedMessages(turnId: string, sessionId: string, channel: st
 
 async function drainThread(threadId: string, dependencies: ThreadDependencies) {
   if (stopping) return;
-  for (const turn of await claimTurns(threadId)) {
+  const claimed = await claimTurns(threadId);
+  if (claimed.length) refresh();
+  for (const turn of claimed) {
     const execute = () => executeTurn(turn, dependencies);
     const work = (dependencies.observeTurn ? dependencies.observeTurn(turn.id, execute) : execute())
       .catch((error) => console.error(`Turn ${turn.id} did not finish: ${describeFailure(error)}`))
@@ -965,7 +973,7 @@ async function drainNext(threadId: string) {
   console.error('The next turn could not be queued. It runs on the next message or start.');
 }
 
-type StoredAttachment = { id?: string; name?: string; mimeType?: string };
+type StoredAttachment = Partial<Pick<Artifact, 'id' | 'name' | 'mimeType' | 'source'>>;
 
 async function loadMessage(messageId: string | null) {
   const message = messageId
@@ -1033,7 +1041,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId, turn.session_id, turn.id],
     ),
     pool.query(
-      'SELECT time_zone,locale,hour_cycle,notification_rule,quiet_hours_enabled,quiet_start,quiet_end FROM preferences WHERE owner_id=$1',
+      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end FROM preferences WHERE owner_id=$1',
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
@@ -1059,6 +1067,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       locale: preference?.locale || formattingLocale(timeZone ? timeZoneRegion(timeZone) : null),
       hourCycle: preference?.hour_cycle || defaultPreferences.hourCycle,
       notificationRule: preference?.notification_rule ?? defaultPreferences.notificationRule,
+      rules: preference?.rules ?? defaultPreferences.rules,
       quietHours: isQuietTime({
         ...defaultPreferences,
         timeZone: timeZone ?? null,
@@ -1210,10 +1219,12 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           signal,
         );
         stagedFiles.set(upload.id, name);
+        const source = items.find((item) => item.id === upload.id)?.source;
         staged.push({
           path: join(workspacePath, name),
           mimeType: upload.mime_type,
           workspaceFile: `/workspace/${threadId}/${name}`,
+          ...(source ? { source } : {}),
         });
       }
       return staged;
@@ -1227,6 +1238,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             attachments: files.map((file) => ({
               name: String(file?.name ?? ''),
               mimeType: String(file?.mimeType ?? ''),
+              ...(file.source ? { source: file.source } : {}),
               ...(file?.id && stagedFiles.has(file.id)
                 ? { workspaceFile: workspaceReference(stagedFiles.get(file.id)!) }
                 : {}),
@@ -1264,14 +1276,12 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     };
     const emit = async (type: string, summary: string, event?: ExecutionEvent) => {
       await current((client) => insertEvent(client, turnId, type, summary, event));
-      refresh();
+      working();
     };
     const { reactToMessage, connections, browserConnection } = dependencies;
     if (await dependencies.spendingLimitReached?.()) {
       limited = true;
-      await current((client) =>
-        finishTurn(client, turnId, 'failed', { error: spendingLimitReached }),
-      );
+      await failTurn(turnId, undefined, spendingLimitReached);
       return;
     }
     await emit('started', 'Turn started.');
@@ -1445,8 +1455,16 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             : (result.waitingFor ?? 'question'),
         handoffBrowserId: result.handoffBrowserId,
       });
-      if (waiting && result.message)
-        await insertAssistantMessage(client, ref, result.message, shared.splice(0));
+      if (waiting && result.message) {
+        const messageId = await insertAssistantMessage(
+          client,
+          ref,
+          result.message,
+          shared.splice(0),
+        );
+        if (result.status === 'waiting_credentials' || result.waitingFor === 'credentials')
+          await dependencies.bindVerificationQuestion?.(turnId, messageId, client);
+      }
     }).catch((error) => {
       if (!signal.aborted) throw error;
     });
@@ -1462,9 +1480,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     if (signal.aborted) outcome = 'cancelled';
     if (!signal.aborted && error instanceof Error && error.message === spendingLimitReached) {
       limited = true;
-      await current((client) =>
-        finishTurn(client, turnId, 'failed', { error: spendingLimitReached }),
-      );
+      await failTurn(turnId, undefined, spendingLimitReached);
     } else {
       failure = error instanceof ModelRequestError ? 'model' : 'unknown';
       if (await failTurn(turnId, dependencies.present, failureText(error)))

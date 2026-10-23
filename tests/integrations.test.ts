@@ -507,27 +507,19 @@ test(
         },
       );
     }
-    await t.test(
-      'owned app records fence a missing checkpoint without fencing other owners or providers',
-      async () => {
-        await initializeIntegrationSchema(pool);
-        await pool.query(
-          "INSERT INTO app_connections(owner_id,slug,provider_id,account_id,pending_account_id) VALUES ('lost-checkpoint','gmail','composio','synthetic-account',NULL), ('pending-checkpoint','gmail','composio',NULL,'synthetic-pending'), ('abandoned-setup','gmail','composio',NULL,NULL), ('other-provider','fixture','fixture','synthetic-other',NULL)",
-        );
-        for (const owner of ['lost-checkpoint', 'pending-checkpoint']) {
-          const saved = options(owner);
-          const proxy = createComposioProxy(saved);
-          await assert.rejects(proxy.initialize(), /identity is missing/);
-          assert.throws(() => proxy.userId);
-          await assert.rejects(stat(saved.dataRoot), { code: 'ENOENT' });
-        }
-        for (const owner of ['new-owner', 'other-provider', 'abandoned-setup']) {
-          const fresh = createComposioProxy(options(owner));
-          await fresh.initialize();
-          assert.match(fresh.userId, /^nod_[a-f0-9]{64}$/);
-        }
-      },
-    );
+    await t.test('apps connected before app identities existed still start', async () => {
+      await initializeIntegrationSchema(pool);
+      await pool.query(
+        "INSERT INTO app_connections(owner_id,slug,provider_id,account_id,pending_account_id) VALUES ('connected-before','gmail','composio','synthetic-account',NULL), ('pending-before','gmail','composio',NULL,'synthetic-pending')",
+      );
+      for (const owner of ['connected-before', 'pending-before']) {
+        const saved = options(owner);
+        const proxy = createComposioProxy(saved);
+        await proxy.initialize();
+        assert.match(proxy.userId, /^nod_[a-f0-9]{64}$/);
+        assert.ok(await saved.checkpoint.read());
+      }
+    });
   },
 );
 
@@ -7254,12 +7246,13 @@ test(
     const chat = randomUUID(),
       scheduled = randomUUID(),
       foreign = randomUUID(),
-      schedule = randomUUID();
+      schedule = randomUUID(),
+      conversation = randomUUID();
     try {
       await pool.query(`
         CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text NOT NULL,source text NOT NULL,source_id text,
           message_id uuid,prompt text NOT NULL,channel text NOT NULL DEFAULT 'web',status text NOT NULL DEFAULT 'succeeded',
-          error text,created_at timestamptz NOT NULL DEFAULT now());
+          error text,created_at timestamptz NOT NULL DEFAULT now(),thread_id uuid,session_id uuid);
         CREATE TABLE turn_events(id uuid DEFAULT gen_random_uuid(),turn_id uuid,type text,summary text DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
         CREATE TABLE messages(id uuid,owner_id text,role text,text text,turn_id uuid,created_at timestamptz DEFAULT now());
         CREATE TABLE preferences(owner_id text PRIMARY KEY,time_zone text,locale text,hour_cycle text);
@@ -7274,6 +7267,11 @@ test(
           ($3,'other','user',NULL,'Foreign request',now())`,
         [chat, scheduled, foreign, `schedule:${schedule}:1:now`],
       );
+      await pool.query(
+        'UPDATE turns SET thread_id=$1,session_id=CASE WHEN id=$2 THEN id ELSE $1 END WHERE id<>$3',
+        [conversation, scheduled, foreign],
+      );
+      await pool.query('UPDATE turns SET thread_id=id,session_id=id WHERE id=$1', [foreign]);
       await pool.query("INSERT INTO schedules VALUES($1,'owner','Morning brief')", [schedule]);
       await pool.query(
         "INSERT INTO app_actions(owner_id,turn_id,action,effect,created_at) VALUES('owner',$1,'NOTION_UPDATE_PAGE','change',now()-interval '90 minutes')",
@@ -7360,9 +7358,9 @@ test(
           })
           .curate({ task: 'review', instructions: 'Synthetic', input: {} }),
       );
-      await ledger.action(chat, 'GMAIL_FETCH_EMAILS');
-      await ledger.action(chat, 'GMAIL_SEND_EMAIL');
-      await ledger.action(foreign, 'GMAIL_SEND_EMAIL');
+      await ledger.action(chat, 'GMAIL_FETCH_EMAILS', { kind: 'read' });
+      await ledger.action(chat, 'GMAIL_SEND_EMAIL', { kind: 'approved' });
+      await ledger.action(foreign, 'GMAIL_SEND_EMAIL', { kind: 'approved' });
       for (let attempt = 0; attempt < 50; attempt++) {
         const rows = await pool.query('SELECT count(*)::int AS count FROM model_usage');
         if (rows.rows[0].count === 5) break;
@@ -7371,10 +7369,23 @@ test(
       assert.deepEqual((await pool.query('SELECT DISTINCT owner_id FROM model_usage')).rows, [
         { owner_id: 'owner' },
       ]);
-      const costs = await ledger.messageCosts([chat, scheduled, foreign]);
-      assert.deepEqual(costs[chat], { messageId: chatAnswer, costUsd: 0.55 });
-      assert.deepEqual(costs[scheduled], { messageId: scheduledAnswer, costUsd: null });
+      const costs = await ledger.sessionCosts([conversation, scheduled, foreign]);
+      assert.equal(Math.round(costs[conversation]! * 100) / 100, 0.55);
+      assert.equal(costs[scheduled], null);
       assert.equal(Object.hasOwn(costs, foreign), false);
+      await pool.query(
+        `UPDATE app_actions SET basis='{"kind":"approved"}' WHERE action='NOTION_UPDATE_PAGE'`,
+      );
+      assert.deepEqual(await ledger.receipts([chat, scheduled, foreign]), {
+        [scheduledAnswer]: {
+          sessionId: scheduled,
+          actions: [{ label: 'Notion: update page', count: 1 }],
+          costUsd: null,
+        },
+      });
+      await pool.query("UPDATE turns SET status='waiting' WHERE id=$1", [scheduled]);
+      assert.deepEqual(await ledger.receipts([scheduled]), {});
+      await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [scheduled]);
       assert.deepEqual(
         (await pool.query('SELECT action FROM app_actions ORDER BY created_at')).rows,
         [
@@ -7396,6 +7407,53 @@ test(
           ['Tell Sam we take the quote', 'chat', 0.55],
         ],
       );
+      const chatEntry = (entries: TrustEntry[]) =>
+        entries.find((entry) => entry.title === 'Tell Sam we take the quote')!;
+      assert.deepEqual(chatEntry(view.entries).actions, [
+        { label: 'Gmail: fetch emails' },
+        { label: 'Gmail: send email', because: { kind: 'approved' } },
+      ]);
+      const said = randomUUID();
+      const foreignSaid = randomUUID();
+      await pool.query(
+        "INSERT INTO messages(id,owner_id,role,text,turn_id) VALUES($1,'owner','user','Tell Sam we take the quote',$3),($2,'other','user','Foreign words',$4)",
+        [said, foreignSaid, chat, foreign],
+      );
+      await ledger.action(chat, 'SLACK_SEND_MESSAGE', {
+        kind: 'message',
+        messageId: said,
+        quote: 'Tell Sam we take the quote',
+      });
+      await ledger.action(chat, 'SLACK_SEND_MESSAGE', {
+        kind: 'message',
+        messageId: foreignSaid,
+        quote: 'Foreign words',
+      });
+      await ledger.action(scheduled, 'GMAIL_FETCH_EMAILS', { kind: 'read' });
+      assert.deepEqual(
+        chatEntry((await app.inject('/api/trust')).json().entries).actions.slice(-2),
+        [
+          {
+            label: 'Slack: send message',
+            because: { kind: 'message', text: 'Tell Sam we take the quote' },
+          },
+          { label: 'Slack: send message' },
+        ],
+      );
+      assert.deepEqual((await ledger.receipts([scheduled]))[scheduledAnswer]!.actions, [
+        { label: 'Notion: update page', count: 1 },
+      ]);
+      assert.deepEqual(
+        (await app.inject(`/api/trust/entries?session=${scheduled}`))
+          .json()
+          .entries.map((entry: TrustEntry) => entry.id),
+        [scheduled],
+      );
+      await pool.query(
+        "DELETE FROM app_actions WHERE action='SLACK_SEND_MESSAGE' OR (turn_id=$1 AND action='GMAIL_FETCH_EMAILS')",
+        [scheduled],
+      );
+      await pool.query('DELETE FROM messages WHERE id=ANY($1::uuid[])', [[said, foreignSaid]]);
       assert.doesNotMatch(
         usagePdf(await ledger.report(), new Date()).toString('latin1'),
         /Foreign request/,
@@ -7546,13 +7604,64 @@ test(
         recorded.find((item: { runId: string }) => item.runId === chat).details.inputTokens,
         4,
       );
-      assert.equal(Math.round((await ledger.messageCosts([chat]))[chat].costUsd! * 100) / 100, 0.9);
+      assert.equal(
+        Math.round((await ledger.sessionCosts([conversation]))[conversation]! * 100) / 100,
+        0.9,
+      );
+      const imageIds = [randomUUID(), randomUUID()];
+      const imageEvents: AgentEvent[] = [];
+      for (const id of imageIds)
+        await ledger.withExecution(
+          {
+            threadId,
+            sessionId,
+            turnId: chat,
+            runId: chat,
+            browserId: sessionId,
+            onEvent: (event) => imageEvents.push(event),
+          },
+          () =>
+            ledger
+              .curator({
+                id: 'fixture-vision',
+                configured: true,
+                curate: async (_request, _signal, report) => {
+                  report?.({ id, provider: 'openrouter', model: 'fixture-vision', costUsd: 0.03 });
+                  return { description: 'Synthetic label' };
+                },
+              })
+              .curate({ task: 'vision', instructions: 'Synthetic image input', input: {} }),
+        );
+      assert.equal(imageEvents.length, 2);
+      assert.ok(
+        imageEvents.every(
+          (event) =>
+            event.type === 'provider_usage' &&
+            event.usage.category === 'agent' &&
+            event.usage.operation === 'vision',
+        ),
+      );
+      const imageRows = (
+        await pool.query(
+          'SELECT turn_id,run_id,session_id,browser_id FROM model_usage WHERE owner_id=$1 AND id=ANY($2::text[])',
+          ['owner', imageIds],
+        )
+      ).rows;
+      assert.deepEqual(
+        imageRows,
+        imageIds.map(() => ({
+          turn_id: chat,
+          run_id: chat,
+          session_id: sessionId,
+          browser_id: sessionId,
+        })),
+      );
       assert.equal(
         (await pool.query("SELECT count(*)::int AS n FROM model_usage WHERE details ? 'costUsd'"))
           .rows[0].n,
         0,
       );
-      await pool.query('ALTER TABLE turns ADD COLUMN session_id uuid');
+      await pool.query('ALTER TABLE turns ADD COLUMN IF NOT EXISTS session_id uuid');
       const task = randomUUID();
       const [started, answered, resumed] = [randomUUID(), randomUUID(), randomUUID()];
       await pool.query(
@@ -7573,6 +7682,27 @@ test(
       );
       assert.deepEqual(await ledger.checkIn(task, started), { budgetUsd: 5, spentUsd: 4.75 });
       assert.deepEqual(await ledger.checkIn(task, resumed), { budgetUsd: 5, spentUsd: 0.75 });
+      const preprocessing = randomUUID();
+      await pool.query(
+        `INSERT INTO model_usage(id,owner_id,cost_usd,details,created_at)
+         VALUES($1,'owner',0.4,'{"operation":"transcribe"}',now()-interval '31 minutes')`,
+        [preprocessing],
+      );
+      const attribution = await pool.connect();
+      try {
+        await ledger.attributeMediaUsage(attribution, [preprocessing], started);
+        await ledger.attributeMediaUsage(attribution, [preprocessing], resumed);
+      } finally {
+        attribution.release();
+      }
+      assert.deepEqual(await ledger.checkIn(task, started), { budgetUsd: 5, spentUsd: 5.15 });
+      assert.equal(
+        (await pool.query('SELECT turn_id FROM model_usage WHERE id=$1', [preprocessing])).rows[0]
+          .turn_id,
+        started,
+      );
+      assert.deepEqual(await ledger.checkIn(task, resumed), { budgetUsd: 5, spentUsd: 0.75 });
+
       await pool.query(
         `INSERT INTO turns(id,owner_id,source,prompt,session_id,created_at)
          VALUES($1,'owner','task','Also compare buses',$2,now()-interval '6 minutes')`,
@@ -7588,6 +7718,63 @@ test(
         taskUsd: null,
       });
       assert.equal(await ledger.checkIn(task, resumed), undefined);
+      const speechLedger = createLedger({ pool, ownerId: 'speech-owner' });
+      await pool.query(
+        "INSERT INTO spending_limits(owner_id,monthly_usd) VALUES('speech-owner',1)",
+      );
+      let transcriptionRequests = 0;
+      let speechReady = false;
+      const speech = speechLedger.speech({
+        id: 'fixture',
+        configured: false,
+        get transcriptionConfigured() {
+          return speechReady;
+        },
+        async synthesize() {
+          throw new Error('Not used.');
+        },
+        async transcribe(_audio, _signal, report) {
+          transcriptionRequests++;
+          const usage = {
+            id: randomUUID(),
+            provider: 'fixture',
+            category: 'agent' as const,
+            operation: 'transcribe',
+            model: 'fixture',
+            status: 'succeeded' as const,
+            durationMs: 1,
+            costUsd: 0.6,
+          };
+          report?.(usage);
+          report?.(usage);
+          return 'Synthetic transcript';
+        },
+      });
+      const { createSpeech } = await import('../src/server/speech.ts');
+      const service = createSpeech(speech);
+      const audio = { bytes: new Uint8Array([1]), mimeType: 'audio/ogg', name: 'voice.ogg' };
+      await assert.rejects(service.transcribe(audio));
+      speechReady = true;
+      await speechLedger.withTurn(chat, () => service.transcribe(audio));
+      speechReady = false;
+      await assert.rejects(service.transcribe(audio));
+      assert.equal(transcriptionRequests, 1);
+      speechReady = true;
+      await service.transcribe(audio);
+      await assert.rejects(service.transcribe(audio), /spending limit was reached/);
+      assert.equal(transcriptionRequests, 2);
+      const billedSpeech = await pool.query(
+        "SELECT count(*)::int AS n,sum(cost_usd)::float8 AS spent FROM model_usage WHERE owner_id='speech-owner'",
+      );
+      assert.deepEqual(billedSpeech.rows[0], { n: 2, spent: 1.2 });
+      assert.equal(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS n FROM model_usage WHERE owner_id='speech-owner' AND turn_id IS NOT NULL",
+          )
+        ).rows[0].n,
+        0,
+      );
     } finally {
       await app.close();
       await pool.end();

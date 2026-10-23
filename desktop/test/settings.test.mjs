@@ -347,6 +347,7 @@ async function runningDesktop(
     argv = [],
     prompt = () => assert.fail('No restart prompt is needed.'),
     reveal = () => assert.fail('No file should be revealed.'),
+    openExternal,
   } = {},
 ) {
   const storage = storedProfile
@@ -362,6 +363,7 @@ async function runningDesktop(
   }
   const windows = [];
   const children = [];
+  const helpers = [];
   const paths = new Map();
   const handlers = new Map();
   const rendererReady = (window) =>
@@ -427,7 +429,13 @@ async function runningDesktop(
     session: { fromPartition: () => appSession },
     dialog: { showMessageBox: async (options) => prompt(options) },
     Menu: { getApplicationMenu: () => ({ getMenuItemById: () => updateMenu }) },
-    shell: { showItemInFolder: reveal, openExternal: async (url) => externalURLs.push(url) },
+    shell: {
+      showItemInFolder: reveal,
+      openExternal: async (url) => {
+        externalURLs.push(url);
+        await openExternal?.(url);
+      },
+    },
     URL,
     dirname,
     isAbsolute,
@@ -487,15 +495,32 @@ async function runningDesktop(
         notifications.push(this);
       }
     },
+    MessageChannelMain: class {
+      port1 = { end: 'engine' };
+      port2 = { end: 'helper' };
+    },
     utilityProcess: {
-      fork(file, _args, options) {
+      fork(file, args, options) {
+        if (/[\\/]onepassword\.mjs$/.test(file)) {
+          const helper = Object.assign(new EventEmitter(), { file, args, options, sent: [] });
+          helper.postMessage = (message, transfer) => helper.sent.push({ message, transfer });
+          helper.kill = () => {
+            helper.killed = true;
+          };
+          helpers.push(helper);
+          return helper;
+        }
         assert.ok(allowStart, 'The healthy engine must not restart.');
         assert.ok(Object.values(options.env).every((value) => typeof value === 'string'));
         const child = new EventEmitter();
         assert.ok(file.endsWith('/engine.mjs') || file.endsWith('\\engine.mjs'));
         child.kind = 'engine';
         child.sent = [];
-        child.postMessage = (message) => child.sent.push(message);
+        child.transfers = [];
+        child.postMessage = (message, transfer) => {
+          child.sent.push(message);
+          if (transfer) child.transfers.push({ message, transfer });
+        };
         child.environment = options.env;
         child.port = options.env.PORT;
         child.stdout = { resume() {} };
@@ -661,6 +686,7 @@ async function runningDesktop(
     ...context.running,
     windows,
     children,
+    helpers,
     storage,
     handlers,
     notifications,
@@ -2191,6 +2217,39 @@ test('native artifact saving requires an owned main frame on the current trusted
   assert.equal(retired.savedPath, undefined);
 });
 
+test('Telegram pairing opens the native app with the exact nonce and falls back to HTTPS', async (t) => {
+  let rejectNative = false;
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    openExternal: async (url) => {
+      if (rejectNative && url.startsWith('tg:')) throw new Error('No Telegram app.');
+    },
+  });
+  f.showEngine();
+  const sender = f.windows.at(-1).webContents;
+  const event = { sender, senderFrame: sender.mainFrame };
+  const invoke = (url) => f.handlers.get('nod:external')(event, url);
+  const nonce = 'Abcd1234_-'.repeat(3) + 'AB';
+  const url = `https://t.me/fixture_bot?start=${nonce}`;
+  await invoke(url);
+  const native = `tg://resolve?domain=fixture_bot&start=${nonce}`;
+  assert.deepEqual(f.externalURLs, [native]);
+  rejectNative = true;
+  await invoke(url);
+  assert.deepEqual(f.externalURLs.slice(-2), [native, url]);
+  for (const value of [
+    url + '&extra=yes',
+    url + '&start=' + nonce,
+    url + '#fragment',
+    url.replace('t.me', 'example.test'),
+    url.replace(nonce, 'short'),
+    url.replace('https:', 'http:'),
+  ]) {
+    await invoke(value);
+    assert.equal(f.externalURLs.at(-1), value);
+  }
+  await assert.rejects(invoke(native), /unavailable/);
+});
+
 test('native settings reject foreign windows, subframes, AI credentials, and web onboarding writes', async (t) => {
   const f = await runningDesktop(
     t,
@@ -2225,7 +2284,12 @@ test('native settings reject foreign windows, subframes, AI credentials, and web
     await assert.rejects(get(rejected));
     await assert.rejects(save({ composioApiKey: 'synthetic-injected-key' }, rejected));
   }
-  for (const url of ['https://example.test/', 'http://127.0.0.1:4310/api/files/synthetic']) {
+  for (const url of [
+    'https://example.test/',
+    'https://example.test/settings',
+    'http://127.0.0.1:4310/api/files/synthetic',
+    'http://127.0.0.1:4310/settings/foreign',
+  ]) {
     frame.url = url;
     await assert.rejects(get());
     await assert.rejects(save({ theme: 'dark' }));
@@ -2259,6 +2323,15 @@ test('native settings reject foreign windows, subframes, AI credentials, and web
   assert.ok(
     window.sent.some(([channel, value]) => channel === 'nod:settings:focus' && value === 'models'),
   );
+  for (const path of ['/settings', '/settings/models', '/settings/memory']) {
+    frame.url = `http://127.0.0.1:4310${path}`;
+    assert.equal((await get()).theme, 'light');
+    assert.equal((await invoke('nod:preferences:get', event)).theme, 'light');
+    await save({ theme: 'dark' });
+    assert.equal((await invoke('nod:preferences:get', event)).theme, 'dark');
+    await invoke('nod:preferences:theme', event, 'light');
+    await assert.rejects(get({ sender: window.webContents, senderFrame: { url: frame.url } }));
+  }
   window.destroy();
   await assert.rejects(save({ theme: 'light' }));
   f.setReady(false);
@@ -2329,6 +2402,43 @@ test('the engine token waits for the engine nod started to report its port', asy
   f.children[0].emit('exit', 1);
   assert.equal((await prepared).phase, 'error');
   assert.deepEqual(requests, []);
+});
+
+test('the engine reaches 1Password only through a separate helper that may load its library', async (t) => {
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    allowStart: true,
+    environment: { HOME: '/Users/synthetic', OPENAI_API_KEY: 'sk-synthetic-provider-key' },
+  });
+  f.crash();
+  assert.equal((await f.prepare()).phase, 'ready');
+  const [engine] = f.children;
+  assert.equal(f.helpers.length, 0);
+  engine.emit('message', { type: 'nod-1password-open' });
+  assert.equal(f.helpers.length, 1);
+  const [helper] = f.helpers;
+  assert.match(helper.file, /[\\/]desktop[\\/]main[\\/]onepassword\.mjs$/);
+  assert.equal(helper.options.allowLoadingUnsignedLibraries, true);
+  assert.equal(helper.options.serviceName, 'nod 1Password');
+  assert.deepEqual(JSON.parse(JSON.stringify(helper.options.env)), { HOME: '/Users/synthetic' });
+  assert.deepEqual(JSON.parse(JSON.stringify(helper.args)), ['0.0.0-test']);
+  assert.deepEqual(JSON.parse(JSON.stringify(helper.sent)), [
+    { message: { type: 'nod-1password-port' }, transfer: [{ end: 'helper' }] },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(engine.transfers)), [
+    { message: { type: 'nod-1password-port' }, transfer: [{ end: 'engine' }] },
+  ]);
+  engine.emit('exit', 1);
+  assert.equal(helper.killed, true);
+});
+
+test('a stale engine cannot open a 1Password helper', async (t) => {
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), { allowStart: true });
+  f.crash();
+  assert.equal((await f.prepare()).phase, 'ready');
+  const [stale] = f.children;
+  stale.emit('exit', 1);
+  stale.emit('message', { type: 'nod-1password-open' });
+  assert.equal(f.helpers.length, 0);
 });
 
 async function fixture(t, platform = 'win32') {

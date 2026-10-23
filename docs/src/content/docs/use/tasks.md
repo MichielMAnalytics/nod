@@ -34,7 +34,7 @@ Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and own
 | **Next check** | When nod will look again                                                                   |
 | **Done when**  | What finished looks like                                                                   |
 
-The same compact task preview appears in chat and on the Tasks page. It shows the title, status, current activity and, when steps are available, a segmented step bar. Select the preview to open its available steps and controls in place. Select it again to close the details. While a task works, its card says what it's doing and, while it browses, the website it's on, and the task posts a short update in chat when a new step adds real value. Inside the details, select **Show activity** to read what it said, with the steps in between grouped under each update. This view does not show private model reasoning.
+The same compact task preview appears in chat and on the Tasks page. It shows the title, status, current activity and, when steps are available, a segmented step bar. Select the preview to open its available steps and controls in place. Select it again to close the details. While a task works, its card and a bubble at the bottom of the chat show what it's doing and, while it browses, the website it's on, without posting messages. Inside the details, select **Show activity** to read nod's steps and messages, with its tool steps in between. This view does not show private model reasoning.
 
 ![Two compact task previews in chat, one Working and one Needs you.](../../../assets/screens/task-sessions-chat.png)
 
@@ -50,7 +50,7 @@ A task checks in when its spending since your last message to it passes the amou
 
 ## Inspect task activity
 
-On the **Tasks** page, open a preview and select **Show activity**. The details show planned steps, nod's updates, and the tool and helper steps between them. Select **Show in chat** to return to the task's message.
+On the **Tasks** page, open a preview and select **Show activity**. The details show planned steps, nod's steps and messages, and the tool and helper steps between them, such as _Searched the web_ or _Gmail: send email_. Select **Show in chat** to return to the task's message.
 
 ![An expanded task with steps, activity from tools and helpers, and task controls.](../../../assets/screens/task-sessions-activity.png)
 
@@ -66,7 +66,7 @@ nod previews Markdown files up to 4 MB. For a larger file, select **Download**.
 
 ![A task result open in the panel next to the chat, showing a Markdown document with a comparison table and assumptions.](../../../assets/screens/task-sessions-document.png)
 
-A finished card has **Schedule task**, which turns the same work into a [schedule](/use/schedules/).
+A finished card has **Schedule task**, which turns the same work into a [schedule](/use/schedules/). The task's last message carries a receipt of what it did and cost; select it to open that task in [Usage](/use/spending/).
 
 ## Use tasks on mobile
 
@@ -74,11 +74,11 @@ Mobile web uses the same compact previews. Open a preview to read the steps, rep
 
 ![Compact task previews in mobile web chat.](../../../assets/screens/task-sessions-mobile.png)
 
-## Telegram without a task page
+## Telegram and WhatsApp without a task page
 
-Telegram shows each task as messages nod writes in your language. The first one says what it is starting. Questions, approval requests and the result reply to that message, so they stay linked to the task.
+Telegram and WhatsApp show each task as messages nod writes in your language. The first one says what it is starting. Questions, approval requests and the result reply to that message, so they stay linked to the task.
 
-Use Telegram's **Reply** control to send an update or answer to a task. Other messages go to the main chat. These commands answer from nod's task records, and nod words the reply:
+Use the chat app's **Reply** control to send an update or answer to a task. Other messages go to the main chat. These commands answer from nod's task records, and nod words the reply:
 
 | Command   | Result                                                                                                  |
 | --------- | ------------------------------------------------------------------------------------------------------- |
@@ -86,11 +86,11 @@ Use Telegram's **Reply** control to send an update or answer to a task. Other me
 | `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.     |
 | `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task. |
 
-The task list sends one message per task. You can reply to that message, the task's first message, a progress message, a question, a file, a result or a status response. If nod cannot match a reply to a task, `/stop` asks you to select a task. It does not stop all work.
+The task list sends one message per task. You can reply to that message, the task's first message, a question, a file, a result or a status response. If nod cannot match a reply to a task, `/stop` asks you to select a task. It does not stop all work.
 
 A status message that shows a pending question keeps a link to that exact question. Your approval applies only to the saved action it shows. An old status message cannot approve a later action.
 
-Telegram and web use the same task record and saved session. Task commands do not grant permission for an outside action. Private sign-in and payment steps still use nod's private forms.
+Telegram, WhatsApp and web use the same task record and saved session. Task commands do not grant permission for an outside action. Private sign-in and payment steps still use nod's private forms.
 
 ## Statuses
 

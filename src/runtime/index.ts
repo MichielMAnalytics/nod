@@ -21,6 +21,7 @@ import type { Computer, Workspace } from '../ports/computer.ts';
 import { BrowserActionError } from '../ports/computer.ts';
 import { threadIdentity } from '../ports/thread-identity.ts';
 import { firstInstruction, ownerContext, steeredInstruction, systemPrompt } from './prompt.ts';
+import { untrustedBlock } from '../shared/untrusted.ts';
 import { currentUserTime } from './time-context.ts';
 import { connectedTools, nodTools } from './tools.ts';
 import type { Turn } from './turn.ts';
@@ -115,6 +116,12 @@ export function createAgentRuntime(dependencies: {
   redactError?(text: string): string;
   observe?(turnId: string, event: RuntimeObservation): void;
   pageVisited?(url: string, subagent: boolean): void;
+  analyzeImages?(
+    images: AgentImage[],
+    request: string,
+    signal: AbortSignal,
+    execution: ExecutionScope & { onEvent(event: AgentEvent): void },
+  ): Promise<string | undefined>;
 }) {
   const { agent, computer, skills } = dependencies;
   const activeTurns = new Map<string, { abort(): void; done: Promise<void> }>();
@@ -175,8 +182,8 @@ export function createAgentRuntime(dependencies: {
     let bufferedText = '';
     let streamedText = '';
     let streamSubmitted = false;
-    let firstMessage = true;
-    let lastSpoke = Date.now();
+    let speakNext = !context.taskContext;
+    let replyOwed = false;
     let answered = false;
     let lastNote = '';
     let reported = false;
@@ -211,7 +218,7 @@ export function createAgentRuntime(dependencies: {
       await context.reply(trimmed, id, replyToMessageId);
       if (id) persistedStreams.add(id);
       lastReply = trimmed;
-      lastSpoke = Date.now();
+      replyOwed = false;
     };
     const reply = deliverReply;
     const pause = async (reason: 'question' | 'approval' | 'credentials', message?: string) => {
@@ -232,7 +239,7 @@ export function createAgentRuntime(dependencies: {
 
     const flushText = () => {
       if (bufferedText && !stopped && speaks) {
-        if (firstMessage) context.delta(bufferedText, (streamId ??= randomUUID()));
+        if (speakNext || replyOwed) context.delta(bufferedText, (streamId ??= randomUUID()));
         streamedText += bufferedText;
       }
       bufferedText = '';
@@ -578,9 +585,11 @@ export function createAgentRuntime(dependencies: {
       const root = resolve(context.workspacePath);
       const inline = async (
         attachments: RuntimeContext['attachments'],
+        request: string,
         budget = { left: imageBudget },
       ) => {
         const images: AgentImage[] = [];
+        const paths: string[] = [];
         const omitted = new Set<string>();
         for (const attachment of attachments) {
           if (!imageTypes.has(attachment.mimeType)) continue;
@@ -589,7 +598,7 @@ export function createAgentRuntime(dependencies: {
           const limit = Math.min(imageBytes, budget.left);
           try {
             const bytes =
-              session?.readsImages !== false && limit > 0
+              (session?.readsImages !== false || dependencies.analyzeImages) && limit > 0
                 ? Buffer.from(
                     await dependencies.workspace.readArtifact(
                       threadId,
@@ -603,6 +612,7 @@ export function createAgentRuntime(dependencies: {
             if (!bytes || bytes.length > limit) omitted.add(attachment.path);
             else {
               budget.left -= bytes.length;
+              paths.push(attachment.path);
               images.push({
                 type: 'image',
                 data: bytes.toString('base64'),
@@ -613,6 +623,33 @@ export function createAgentRuntime(dependencies: {
             signal.throwIfAborted();
             omitted.add(attachment.path);
           }
+        }
+        if (session?.readsImages === false) {
+          let description: string | undefined;
+          if (images.length && dependencies.analyzeImages && !overBudget()) {
+            try {
+              description = await untilAborted(
+                dependencies.analyzeImages(images, request, signal, {
+                  ...execution,
+                  onEvent: countUsage,
+                }),
+                signal,
+              );
+            } catch {
+              signal.throwIfAborted();
+            }
+          }
+          for (const path of paths) omitted.add(path);
+          return {
+            images: [],
+            omitted,
+            analysis: description
+              ? untrustedBlock(
+                  'image analysis',
+                  JSON.stringify({ files: paths.map((path) => relative(root, path)), description }),
+                )
+              : undefined,
+          };
         }
         return { images, omitted };
       };
@@ -636,11 +673,28 @@ export function createAgentRuntime(dependencies: {
           (async () => {
             const budget = { left: imageBudget };
             const messages = [];
-            for (const message of await takeMessages()) {
-              const { images, omitted } = await inline(message.attachments, budget);
-              messages.push({ text: instruct(steeredInstruction(message, omitted)), images });
+            const incoming = await takeMessages();
+            if (incoming.length) {
+              checkInSpent = checkInStrikes = 0;
+              replyOwed = true;
             }
-            if (messages.length) checkInSpent = checkInStrikes = 0;
+            for (const message of incoming) {
+              const { images, omitted, analysis } = await inline(
+                message.attachments,
+                message.text,
+                budget,
+              );
+              messages.push({
+                text: instruct(steeredInstruction(message, omitted, analysis)),
+                images,
+              });
+            }
+            if (messages.length) {
+              pendingReplies = pendingReplies.then(() =>
+                context.emit('steered', '', { execution }).catch(() => {}),
+              );
+              void pendingReplies.catch(() => {});
+            }
             return messages;
           }),
         onEvent: (event) => {
@@ -662,18 +716,23 @@ export function createAgentRuntime(dependencies: {
               !modelError &&
               (event.status === undefined || event.status === 'succeeded')
             ) {
-              if (
-                !context.taskContext &&
-                (firstMessage ||
-                  Date.now() - lastSpoke >=
-                    (!context.channel || context.channel === 'web' ? 30_000 : 180_000))
-              ) {
+              if (speakNext || replyOwed) {
                 queueStreamReply(text, streamId ?? randomUUID());
-                lastSpoke = Date.now();
                 lastNote = '';
-              } else lastNote = text;
+                replyOwed = false;
+              } else {
+                lastNote = text;
+                const step = (dependencies.redactError ?? String)(text.split('\n')[0]!).replace(
+                  /\s+/g,
+                  ' ',
+                );
+                pendingReplies = pendingReplies.then(() =>
+                  context.emit('step', step, { execution }).catch(() => {}),
+                );
+                void pendingReplies.catch(() => {});
+              }
             }
-            firstMessage = false;
+            speakNext = false;
             completeStream();
           }
           if (event.type === 'error') modelError = event.message;
@@ -689,14 +748,22 @@ export function createAgentRuntime(dependencies: {
             bufferedText += event.text;
             if (/[.!?\n]\s*$/.test(bufferedText)) flushText();
           }
-          if (event.type === 'final') queueStreamReply(event.text, streamId ?? randomUUID());
+          if (event.type === 'final') {
+            pendingReplies = pendingReplies.then(() =>
+              context.emit('final', '', { execution }).catch(() => {}),
+            );
+            queueStreamReply(event.text, streamId ?? randomUUID());
+          }
         },
       });
       session = await opening;
       signal.throwIfAborted();
       const resumed = session.resumed;
-      const { images, omitted } = await inline(context.attachments);
-      await session!.prompt(instruct(firstInstruction(context, resumed, omitted)), images);
+      const { images, omitted, analysis } = await inline(context.attachments, context.prompt);
+      await session!.prompt(
+        instruct(firstInstruction(context, resumed, omitted, analysis)),
+        images,
+      );
       await pendingReplies;
       signal.throwIfAborted();
       if (checkInStopped && status === 'succeeded')

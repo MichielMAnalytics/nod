@@ -12,6 +12,7 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import {
   createAgentSession,
   SessionManager,
+  ModelRuntime,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -1351,9 +1352,10 @@ test('a previous turn error reaches the next turn only as neutralised untrusted 
   }
 });
 
-test('a turn posts its opening line, an update after a quiet stretch and its final reply, never other narration', async (t) => {
+test('a turn posts its opening line and final reply, shows the lines between as live steps and answers a message sent mid-turn', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-narration-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
+  let continued: string[] = [];
   const runtime = createAgentRuntime({
     agent: {
       open: async (input) => ({
@@ -1363,15 +1365,21 @@ test('a turn posts its opening line, an update after a quiet stretch and its fin
         prompt: async (text) => {
           for (const words of [
             'Reading the synthetic comments.',
-            'Found three synthetic threads.',
+            ...(/quietly|directly/.test(text) ? [''] : []),
+            'Found three synthetic threads.\nAll of them mention pricing.',
           ]) {
             input.onEvent({ type: 'message_start' });
-            input.onEvent({ type: 'text_delta', text: words });
+            if (words) input.onEvent({ type: 'text_delta', text: words });
             input.onEvent({ type: 'message_end', status: 'succeeded' });
-            await input.tools
-              .find((item) => item.name === 'manage_personal_context')!
-              .execute({ action: 'memory_find', args: { query: 'synthetic' } });
-            if (/after a quiet stretch/.test(text)) t.mock.timers.tick(31_000);
+            if (!words && /directly/.test(text))
+              await input.tools
+                .find((item) => item.name === 'send_message')!
+                .execute({ text: 'There are three.' });
+            else
+              await input.tools
+                .find((item) => item.name === 'manage_personal_context')!
+                .execute({ action: 'memory_find', args: { query: 'synthetic' } });
+            continued.push(...((await input.nextMessages?.()) ?? []).map((item) => item.text));
           }
           const answer = /without an answer/.test(text) ? '' : 'The synthetic summary is ready.';
           input.onEvent({ type: 'message_start' });
@@ -1392,48 +1400,98 @@ test('a turn posts its opening line, an update after a quiet stretch and its fin
     doneWhen: 'The summary is delivered.',
     revision: 1,
   };
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   try {
-    for (const [prompt, taskContext, expected] of [
+    for (const [prompt, taskContext, replies, steps] of [
       [
         'Summarize the synthetic comments',
         undefined,
         ['Reading the synthetic comments.', 'The synthetic summary is ready.'],
+        ['Found three synthetic threads.'],
       ],
       [
         'Summarize the synthetic comments without an answer',
         undefined,
-        ['Reading the synthetic comments.', 'Found three synthetic threads.'],
-      ],
-      ['Summarize the synthetic comments', task, ['The synthetic summary is ready.']],
-      [
-        'Summarize the synthetic comments after a quiet stretch',
-        undefined,
         [
           'Reading the synthetic comments.',
-          'Found three synthetic threads.',
-          'The synthetic summary is ready.',
+          'Found three synthetic threads.\nAll of them mention pricing.',
         ],
+        ['Found three synthetic threads.'],
       ],
       [
-        'Summarize the synthetic comments after a quiet stretch on telegram',
-        undefined,
-        ['Reading the synthetic comments.', 'The synthetic summary is ready.'],
+        'Summarize the synthetic comments',
+        task,
+        ['The synthetic summary is ready.'],
+        ['Reading the synthetic comments.', 'Found three synthetic threads.'],
+      ],
+      [
+        'Summarize the synthetic comments while the owner steers',
+        task,
+        [
+          'Found three synthetic threads.\nAll of them mention pricing.',
+          'The synthetic summary is ready.',
+        ],
+        ['Reading the synthetic comments.'],
+      ],
+      [
+        'Summarize the synthetic comments while the owner steers quietly',
+        task,
+        [
+          'Found three synthetic threads.\nAll of them mention pricing.',
+          'The synthetic summary is ready.',
+        ],
+        ['Reading the synthetic comments.'],
+      ],
+      [
+        'Summarize the synthetic comments while the owner steers directly',
+        task,
+        ['There are three.', 'The synthetic summary is ready.'],
+        ['Reading the synthetic comments.', 'Found three synthetic threads.'],
       ],
     ] as const) {
-      const replies: string[] = [];
+      const posted: string[] = [];
+      const events: Array<[string, string]> = [];
+      let steered = false;
+      continued = [];
       const result = await runtime.runTurn({
         ...context(directory),
         turnId: randomUUID(),
         prompt,
         ...(taskContext ? { taskContext, background: true } : {}),
-        ...(prompt.endsWith('on telegram') ? { channel: 'telegram' } : {}),
+        ...(/steers/.test(prompt)
+          ? {
+              takeMessages: async () =>
+                steered
+                  ? []
+                  : ((steered = true),
+                    [{ id: randomUUID(), text: 'Also count them', attachments: [] }]),
+            }
+          : {}),
+        emit: async (type, summary) => {
+          events.push([type, summary]);
+        },
         reply: async (text) => {
-          replies.push(text);
+          posted.push(text);
         },
       });
       assert.equal(result.status, 'succeeded');
-      assert.deepEqual(replies, expected);
+      assert.deepEqual(posted, replies);
+      assert.deepEqual(
+        events.filter(([type]) => type === 'step').map(([, summary]) => summary),
+        steps,
+      );
+      assert.equal(
+        continued.some((text) => text.includes('Also count them')),
+        /steers/.test(prompt),
+      );
+      assert.equal(
+        events.some(([type]) => type === 'steered'),
+        /steers/.test(prompt),
+      );
+      assert.equal(events.filter(([type]) => type === 'final').length, 1);
+      assert.ok(
+        events.findIndex(([type]) => type === 'final') <
+          events.findIndex(([type]) => type === 'agent_complete'),
+      );
     }
   } finally {
     await runtime.dispose();
@@ -3069,6 +3127,227 @@ test('LM Studio servers list tool-trained chat models with their loaded context 
   );
 });
 
+test('cloud connections list only the account’s models and send each key only to its service', async () => {
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const requests: string[] = [];
+  const backend = createPiModelBackend({
+    fetch: async (input, init) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      requests.push(url);
+      assert.equal(init?.redirect, 'error');
+      if (url.startsWith('https://bedrock.eu-west-1.amazonaws.com/')) {
+        if (headers.get('authorization') !== 'Bearer fixture-bedrock-key')
+          return Response.json({ message: 'Synthetic denial' }, { status: 403 });
+        if (url.includes('/foundation-models?'))
+          return Response.json({
+            modelSummaries: [{ modelId: 'amazon.nova-pro-v1:0' }, { modelId: 'fixture.v1:0' }],
+          });
+        assert.match(url, /\/inference-profiles\?type=SYSTEM_DEFINED&maxResults=1000/);
+        return Response.json(
+          url.includes('nextToken=fixture-page')
+            ? {
+                inferenceProfileSummaries: [
+                  { inferenceProfileId: 'eu.anthropic.claude-opus-5-5', status: 'ACTIVE' },
+                ],
+              }
+            : {
+                inferenceProfileSummaries: [
+                  { inferenceProfileId: 'fixture.profile', status: 'ACTIVE' },
+                ],
+                nextToken: 'fixture-page',
+              },
+        );
+      }
+      if (url === 'https://down.openai.azure.com/openai/v1/models')
+        return Response.json({ error: { message: 'Synthetic outage' } }, { status: 503 });
+      if (url.startsWith('https://aiplatform.googleapis.com/v1/publishers/google/models/'))
+        return new Response(null, {
+          status: headers.get('x-goog-api-key') === 'fixture-vertex-key' ? 200 : 400,
+        });
+      if (url === 'https://fixture.openai.azure.com/openai/v1/models') {
+        assert.equal(headers.get('api-key'), 'fixture-azure-key');
+        return Response.json({ data: [] });
+      }
+      throw new Error('Unexpected model service request.');
+    },
+  });
+  const bedrock = await backend.catalog('amazon-bedrock', 'api_key', {
+    type: 'bedrock',
+    key: 'fixture-bedrock-key',
+    region: 'eu-west-1',
+  });
+  assert.deepEqual(bedrock.map(({ choice }) => choice.id).sort(), [
+    'amazon.nova-pro-v1:0',
+    'eu.anthropic.claude-opus-5-5',
+  ]);
+  await assert.rejects(
+    backend.catalog('amazon-bedrock', 'api_key', {
+      type: 'bedrock',
+      key: 'fixture-wrong-key',
+      region: 'eu-west-1',
+    }),
+    /didn’t accept this key/,
+  );
+  const sent = requests.length;
+  await assert.rejects(
+    backend.catalog('amazon-bedrock', 'api_key', {
+      type: 'bedrock',
+      key: 'fixture-bedrock-key',
+      region: 'example.test/#',
+    }),
+  );
+  assert.equal(requests.length, sent);
+  const vertex = await backend.catalog('google-vertex', 'api_key', {
+    type: 'api_key',
+    key: 'fixture-vertex-key',
+  });
+  assert.ok(vertex.length > 1);
+  await assert.rejects(
+    backend.catalog('google-vertex', 'api_key', { type: 'api_key', key: 'fixture-wrong-key' }),
+    /didn’t accept this API key/,
+  );
+  const azure = await backend.catalog('azure', 'api_key', {
+    type: 'azure',
+    url: 'https://fixture.openai.azure.com/openai/v1',
+    key: 'fixture-azure-key',
+    model: 'gpt-6.1-sol',
+    deployment: 'fixture-deployment',
+  });
+  assert.deepEqual(
+    azure.map(({ choice }) => choice.id),
+    ['gpt-6.1-sol'],
+  );
+  await assert.rejects(
+    backend.catalog('azure', 'api_key', {
+      type: 'azure',
+      url: 'https://down.openai.azure.com/openai/v1',
+      key: 'fixture-azure-key',
+      model: 'gpt-6.1-sol',
+      deployment: 'fixture-deployment',
+    }),
+    (error: Error) => !error.message.includes('didn’t accept'),
+  );
+});
+
+test('cloud model requests use the connection’s Region, API key and Azure deployment, once and without leaking the key', async (t) => {
+  const { createServer } = await import('node:http');
+  const { createPiModelBackend, createPiModelRuntime } =
+    await import('../src/providers/pi/models.ts');
+  const received: { url?: string; key?: string; model?: unknown }[] = [];
+  const tunnels = new Set<string>();
+  const server = createServer((request, response) => {
+    let text = '';
+    request.on('data', (chunk) => (text += chunk));
+    request.on('end', () => {
+      if (request.url?.startsWith('/moved/')) {
+        response.writeHead(307, { location: '/openai/v1/responses' });
+        return response.end();
+      }
+      received.push({
+        url: request.url,
+        key: request.headers['api-key'] as string | undefined,
+        model: JSON.parse(text || '{}').model,
+      });
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'Synthetic failure fixture-azure-key' } }));
+    });
+  });
+  server.on('connect', (request, socket) => {
+    tunnels.add(request.url ?? '');
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const { port } = server.address() as import('node:net').AddressInfo;
+  const prompt = {
+    messages: [{ role: 'user' as const, content: 'Synthetic fixture', timestamp: 1 }],
+  };
+  const credential = {
+    type: 'azure' as const,
+    url: `http://127.0.0.1:${port}/openai/v1`,
+    key: 'fixture-azure-key',
+    model: 'gpt-6.1-sol',
+    deployment: 'fixture-deployment',
+  };
+  const backend = createPiModelBackend({ fetch: async () => Response.json({ data: [] }) });
+  const [azureDefinition] = await backend.catalog('azure', 'api_key', credential);
+  for (const url of [credential.url, `http://127.0.0.1:${port}/moved/openai/v1`]) {
+    const { runtime, model } = await createPiModelRuntime({
+      provider: 'azure',
+      method: 'api_key',
+      definition: azureDefinition,
+      effort: 'low',
+      read: async () => ({ ...credential, url }),
+    });
+    const failed = await runtime.completeSimple(model, prompt, { maxRetries: 5 });
+    assert.equal(failed.stopReason, 'error');
+    assert.ok(!JSON.stringify(failed).includes('fixture-azure-key'));
+  }
+  assert.deepEqual(received, [
+    {
+      url: '/openai/v1/responses?api-version=v1',
+      key: 'fixture-azure-key',
+      model: 'fixture-deployment',
+    },
+  ]);
+
+  const vertexCalls: { url: string; key: string | null }[] = [];
+  const send = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    vertexCalls.push({
+      url: String(input instanceof Request ? input.url : input),
+      key: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get(
+        'x-goog-api-key',
+      ),
+    });
+    return Response.json(
+      { error: { code: 503, message: 'Synthetic fixture-vertex-key', status: 'UNAVAILABLE' } },
+      { status: 503 },
+    );
+  }) as typeof fetch;
+  try {
+    const [vertexDefinition] = await backend.catalog('google-vertex', 'api_key');
+    const { runtime, model } = await createPiModelRuntime({
+      provider: 'google-vertex',
+      method: 'api_key',
+      definition: vertexDefinition,
+      effort: 'low',
+      read: async () => ({ type: 'api_key', key: 'fixture-vertex-key' }),
+    });
+    const failed = await runtime.completeSimple(model, prompt, { maxRetries: 5 });
+    assert.equal(failed.stopReason, 'error');
+    assert.ok(!JSON.stringify(failed).includes('fixture-vertex-key'));
+  } finally {
+    globalThis.fetch = send;
+  }
+  assert.equal(vertexCalls.length, 1);
+  assert.ok(vertexCalls[0].url.startsWith('https://aiplatform.googleapis.com/'));
+  assert.equal(vertexCalls[0].key, 'fixture-vertex-key');
+
+  const proxy = process.env.HTTPS_PROXY;
+  process.env.HTTPS_PROXY = `http://127.0.0.1:${port}`;
+  try {
+    const bedrockDefinition = (await backend.catalog('amazon-bedrock', 'api_key')).find(
+      ({ choice }) => choice.id === 'eu.anthropic.claude-opus-5-5',
+    )!;
+    const { runtime, model } = await createPiModelRuntime({
+      provider: 'amazon-bedrock',
+      method: 'api_key',
+      definition: bedrockDefinition,
+      effort: 'low',
+      read: async () => ({ type: 'bedrock', key: 'fixture-bedrock-key', region: 'eu-west-1' }),
+    });
+    const failed = await runtime.completeSimple(model, prompt, {});
+    assert.equal(failed.stopReason, 'error');
+    assert.ok(!JSON.stringify(failed).includes('fixture-bedrock-key'));
+  } finally {
+    if (proxy === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = proxy;
+  }
+  assert.deepEqual([...tunnels], ['bedrock-runtime.eu-west-1.amazonaws.com:443']);
+});
+
 test('the Pi transcript keeps model changes for the next turn and leaves background turns out', async () => {
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
   const backend = createPiModelBackend({
@@ -3177,6 +3456,95 @@ test('the Pi transcript keeps model changes for the next turn and leaves backgro
     await agent.dispose();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('image analysis passes image blocks to Pi and does not retry a failed charged request', async () => {
+  const image = {
+    type: 'image' as const,
+    data: Buffer.from('synthetic pixels').toString('base64'),
+    mimeType: 'image/png',
+  };
+  let calls = 0;
+  let failed = false;
+  const runtime = {
+    setRuntimeApiKey: async () => {},
+    getModel: () => ({ provider: 'anthropic', id: 'claude-haiku-4-5' }),
+    completeSimple: async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+      calls++;
+      assert.deepEqual(context.messages[0].content, [
+        { type: 'text', text: '{"request":"Read the label"}' },
+        image,
+      ]);
+      const reply = fauxAssistantMessage('{"description":"Synthetic label"}');
+      if (failed) reply.stopReason = 'error';
+      return reply;
+    },
+  };
+  const curator = createPiMemoryCurator({
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    apiKey: 'fixture',
+    runtime: runtime as never,
+  });
+  const request = {
+    task: 'vision' as const,
+    instructions: 'Read images',
+    input: { request: 'Read the label' },
+    images: [image],
+  };
+  assert.deepEqual(await curator.curate(request), { description: 'Synthetic label' });
+  failed = true;
+  await assert.rejects(curator.curate(request), /image model is unavailable/);
+  assert.equal(calls, 2);
+});
+
+test('subscription image analysis retains an API-price estimate for the task check-in', async (t) => {
+  t.mock.method(ModelRuntime, 'create', async () => ({
+    registerProvider() {},
+    refresh: async () => {},
+    streamSimple() {},
+    getModel: () => ({ provider: 'openai', id: 'fixture-vision' }),
+    completeSimple: async () => ({
+      ...fauxAssistantMessage('{"description":"Synthetic label"}'),
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 15,
+        cost: { input: 0.2, output: 0.1, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+      },
+    }),
+  }));
+  const curator = createPiMemoryCurator({
+    provider: 'openai',
+    configured: () => true,
+    resolve: async () => ({
+      provider: 'openai',
+      method: 'subscription',
+      effort: 'off',
+      definition: {
+        choice: {
+          id: 'fixture-vision',
+          name: 'Fixture',
+          images: true,
+          efforts: ['off'],
+          contextWindow: 32_000,
+        },
+        spec: { provider: 'openai', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1' },
+      },
+      read: async () => chatgptFixtureCredential(),
+    }),
+  });
+  const usage: Array<Partial<ProviderUsageEvent>> = [];
+  await curator.curate(
+    { task: 'vision', instructions: 'Read images', input: {} },
+    undefined,
+    (value) => usage.push(value),
+  );
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].costUsd, null);
+  assert.equal(usage[0].estimateUsd, 0.3);
 });
 
 test('the memory model reply is read whole when a skill body holds its own code block', async () => {

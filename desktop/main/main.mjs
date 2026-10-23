@@ -5,6 +5,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  MessageChannelMain,
   nativeImage,
   nativeTheme,
   Notification,
@@ -388,6 +389,9 @@ function trustedAppURL(value) {
         '/onboarding',
         '/apps',
         '/channels',
+        '/settings',
+        '/settings/models',
+        '/settings/memory',
         '/you',
         '/tasks',
         '/memory',
@@ -420,6 +424,26 @@ async function openExternal(value) {
   }
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password)
     throw new Error('This link is unavailable.');
+  const bot = /^\/([A-Za-z0-9_]{1,64})$/.exec(url.pathname)?.[1];
+  const start = url.searchParams.get('start');
+  if (
+    url.protocol === 'https:' &&
+    url.hostname === 't.me' &&
+    !url.port &&
+    !url.hash &&
+    bot &&
+    start &&
+    /^[A-Za-z0-9_-]{32}$/.test(start) &&
+    [...url.searchParams].length === 1
+  ) {
+    const native = new URL('tg://resolve');
+    native.searchParams.set('domain', bot);
+    native.searchParams.set('start', start);
+    try {
+      await shell.openExternal(native.href);
+      return;
+    } catch {}
+  }
   await shell.openExternal(url.href);
 }
 
@@ -779,6 +803,29 @@ function baseEnvironment() {
   );
 }
 
+function openOnePassword(owner) {
+  const helper = utilityProcess.fork(
+    join(engineRoot, 'desktop', 'main', 'onepassword.mjs'),
+    [app.getVersion()],
+    {
+      cwd: engineRoot,
+      env: Object.fromEntries(
+        ['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'SYSTEMROOT', 'TMPDIR', 'TEMP', 'TMP']
+          .concat(['PATH', 'LANG'])
+          .filter((key) => typeof process.env[key] === 'string')
+          .map((key) => [key, process.env[key]]),
+      ),
+      stdio: 'ignore',
+      serviceName: 'nod 1Password',
+      allowLoadingUnsignedLibraries: true,
+    },
+  );
+  const { port1, port2 } = new MessageChannelMain();
+  helper.postMessage({ type: 'nod-1password-port' }, [port2]);
+  owner.postMessage({ type: 'nod-1password-port' }, [port1]);
+  owner.once('exit', () => helper.kill());
+}
+
 async function profileOwner() {
   const path = join(profileRoot, 'profile.json');
   async function published() {
@@ -1099,11 +1146,13 @@ async function confirmRestart() {
     ? [
         ...new Set(
           running.map((turn) =>
-            turn?.visible
-              ? 'a reply in your chat'
-              : turn?.source === 'schedule'
-                ? 'a scheduled task'
-                : 'a background check',
+            turn?.task
+              ? 'a task'
+              : turn?.visible
+                ? 'a reply in your chat'
+                : turn?.source === 'schedule'
+                  ? 'a scheduled task'
+                  : 'a background check',
           ),
         ),
       ]
@@ -1300,9 +1349,11 @@ async function startEngine({ runtime, signal, pending = false }) {
     if (engine === child && message?.type === 'nod-ready' && message.port === port) {
       engineBound = true;
     }
+    if (engine === child && message?.type === 'nod-1password-open') openOnePassword(child);
   });
   child.stdout?.resume();
   let diagnostics = '';
+  let failure = '';
   child.stderr?.on('data', (chunk) => {
     if (status.phase !== 'starting') return;
     diagnostics = (diagnostics + chunk.toString()).slice(-4000);
@@ -1312,8 +1363,10 @@ async function startEngine({ runtime, signal, pending = false }) {
       if (
         /^(?:Error|TypeError|SyntaxError|ReferenceError|RangeError)(?::| \[)/.test(line) &&
         !line.includes('{')
-      )
+      ) {
+        failure = line.replace(/^\w+(?: \[[^\]]*\])?: /, '').replace(/https?:\/\/\S+/g, '<url>');
         void writeDiagnostic(line).catch(() => {});
+      }
   });
   child.on('exit', (code) => {
     if (engine !== child) return;
@@ -1352,7 +1405,7 @@ async function startEngine({ runtime, signal, pending = false }) {
   }
   if (!ready) {
     await stopEngine();
-    throw new Error('nod could not start. Check your settings and try again.');
+    throw new Error(failure || 'nod could not start. Check your settings and try again.');
   }
   enginePreferencesReady = true;
   return finishEnginePreparation(pending);

@@ -10,6 +10,7 @@ import { artifactView, localArtifacts, type ArtifactService } from './artifacts.
 import {
   activeHandoffSql,
   activeThread,
+  ownerStarted,
   reactToAssistantMessage,
   resetThread,
   resumeAfterHandoff,
@@ -24,10 +25,12 @@ import { BrowserActionError, type Computer } from '../ports/computer.ts';
 import { browserErrorMessage } from '../shared/browser-errors.ts';
 import { browserHandoffInputs } from '../shared/browser-handoff.ts';
 import type {
+  Activity,
   Configuration,
   Message,
   MessageHistoryPage,
   MessageReaction,
+  MessageReceipt,
   Turn,
 } from '../shared/contracts.ts';
 import type { createChatVerification } from './chat-verification.ts';
@@ -38,12 +41,12 @@ const messageFields = `m.id,m.role,m.text,m.turn_id AS "turnId",m.created_at AS 
  CASE WHEN target.id IS NULL THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',left(target.text,1000)) END AS "replyTo"`;
 function messageView(
   row: Message & { assistantReaction?: MessageReaction | null },
-  modelCostUsd?: number | null,
+  receipt?: MessageReceipt,
 ): Message {
   const { assistantReaction, ...message } = row;
   return {
     ...message,
-    ...(modelCostUsd !== undefined ? { modelCostUsd } : {}),
+    ...(receipt ? { receipt } : {}),
     reactions: [
       ...(message.reaction ? [{ actor: 'user' as const, reaction: message.reaction }] : []),
       ...(assistantReaction ? [{ actor: 'assistant' as const, reaction: assistantReaction }] : []),
@@ -65,10 +68,9 @@ export interface AppDependencies {
   configuration?: () => Configuration;
   onboard?: (timeZone?: string, threadId?: string) => Promise<unknown>;
   taskLedger?: () => Promise<import('../shared/contracts.ts').Task[]>;
+  activity?: () => Promise<Activity[]>;
   planningTasks?: () => boolean;
-  messageCosts?: (
-    turnIds: string[],
-  ) => Promise<Record<string, { messageId: string | null; costUsd: number | null }>>;
+  receipts?: (turnIds: string[]) => Promise<Record<string, MessageReceipt>>;
 }
 
 export async function createApp(dependencies: AppDependencies = {}) {
@@ -114,13 +116,14 @@ export async function createApp(dependencies: AppDependencies = {}) {
   });
   if (desktopAccess)
     app.get('/api/desktop/status', async () => {
-      const result = await pool.query<{ source: string; visible: boolean }>(
-        "SELECT source,NOT background AS visible FROM turns WHERE owner_id=$1 AND status='running'",
+      const result = await pool.query<{ source: string; visible: boolean; task: boolean }>(
+        `SELECT u.source,${ownerStarted()} AS visible,to_jsonb(u)->>'task_id' IS NOT NULL AS task
+         FROM turns u WHERE u.owner_id=$1 AND u.status='running'`,
         [ownerId],
       );
       return { running: result.rows };
     });
-  const turnFields = `u.id,u.status,u.source,u.error,u.created_at AS "createdAt",u.finished_at AS "finishedAt",(NOT u.background OR u.source='user') AS "showTyping",
+  const turnFields = `u.id,u.status,u.source,u.error,u.created_at AS "createdAt",u.finished_at AS "finishedAt",
     CASE WHEN ${activeHandoffSql}
       THEN (SELECT m.id FROM messages m WHERE m.turn_id=u.id AND m.owner_id=u.owner_id AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1) END AS "handoffMessageId"`;
   async function messageTurns(threadId: string, ids: string[]): Promise<Turn[]> {
@@ -134,7 +137,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
   app.get('/api/configuration', async () => publicConfiguration());
   app.get('/api/state', async () => {
     const thread = await activeThread(pool);
-    const [messages, turns, verificationRequests] = await Promise.all([
+    const [messages, turns, verificationRequests, activity] = await Promise.all([
       pool.query(
         `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
          LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id ORDER BY date_trunc('milliseconds',m.created_at),m.id`,
@@ -145,11 +148,12 @@ export async function createApp(dependencies: AppDependencies = {}) {
         [ownerId, thread.id],
       ),
       dependencies.verification?.pending() ?? [],
+      dependencies.activity?.() ?? [],
     ]);
     const hasEarlierMessages = messages.rows.length > 150;
     const visibleMessages = messages.rows.slice(hasEarlierMessages ? 1 : 0);
-    const modelCosts = await dependencies
-      .messageCosts?.(
+    const receipts = await dependencies
+      .receipts?.(
         visibleMessages.map((message) => message.turnId).filter((id): id is string => !!id),
       )
       .catch(() => undefined);
@@ -162,14 +166,9 @@ export async function createApp(dependencies: AppDependencies = {}) {
       threadId: thread.id,
       tasks: await dependencies.taskLedger?.(),
       hasEarlierMessages,
-      messages: visibleMessages.map((message) => {
-        const cost = message.turnId ? modelCosts?.[message.turnId] : undefined;
-        return messageView(
-          message,
-          cost && cost.messageId === message.id ? cost.costUsd : undefined,
-        );
-      }),
+      messages: visibleMessages.map((message) => messageView(message, receipts?.[message.id])),
       turns: [...turns.rows, ...olderTurns],
+      activity,
       verificationRequests,
       planningTasks: dependencies.planningTasks?.() ?? false,
       configuration: publicConfiguration(),
@@ -197,17 +196,11 @@ export async function createApp(dependencies: AppDependencies = {}) {
       [ownerId, query.before ?? null, query.beforeId ?? null, thread.id],
     );
     const page = rows.rows.slice(0, 60);
-    const modelCosts = await dependencies
-      .messageCosts?.(page.map((message) => message.turnId).filter((id): id is string => !!id))
+    const receipts = await dependencies
+      .receipts?.(page.map((message) => message.turnId).filter((id): id is string => !!id))
       .catch(() => undefined);
     return {
-      messages: page.reverse().map((message) => {
-        const cost = message.turnId ? modelCosts?.[message.turnId] : undefined;
-        return messageView(
-          message,
-          cost && cost.messageId === message.id ? cost.costUsd : undefined,
-        );
-      }),
+      messages: page.reverse().map((message) => messageView(message, receipts?.[message.id])),
       hasMore: rows.rows.length > 60,
     } satisfies MessageHistoryPage;
   });
@@ -267,10 +260,8 @@ export async function createApp(dependencies: AppDependencies = {}) {
     );
     if (result.rowCount !== input.attachmentIds.length)
       throw Object.assign(new Error('An attachment is unavailable.'), { statusCode: 400 });
-    const prompt =
-      input.text || 'Review the attached files and briefly describe what they contain.';
     const submitted = await (dependencies.submitMessage ?? submitUserMessage)(
-      prompt,
+      input.text,
       input.attachmentIds.map((id) =>
         artifactView(result.rows.find((artifact) => artifact.id === id)!),
       ),
@@ -304,16 +295,18 @@ export async function createApp(dependencies: AppDependencies = {}) {
       const payload =
         event.type === 'refresh'
           ? { type: 'refresh' }
-          : event.type === 'delta' && event.ownerId === ownerId && event.channel === 'web'
-            ? {
-                type: 'delta',
-                threadId: event.threadId,
-                turnId: event.turnId,
-                text: event.text,
-                streamId: event.streamId,
-                done: event.done,
-              }
-            : undefined;
+          : event.type === 'activity' && event.ownerId === ownerId
+            ? { type: 'activity', items: event.items }
+            : event.type === 'delta' && event.ownerId === ownerId && event.channel === 'web'
+              ? {
+                  type: 'delta',
+                  threadId: event.threadId,
+                  turnId: event.turnId,
+                  text: event.text,
+                  streamId: event.streamId,
+                  done: event.done,
+                }
+              : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
     send({ type: 'refresh' });

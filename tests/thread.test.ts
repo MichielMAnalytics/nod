@@ -116,6 +116,15 @@ test(
       resume: thread.resumeAfterCredentials,
       retry: thread.retryCredentials,
     });
+    const { createChatVerification } = await import('../src/server/chat-verification.ts');
+    const verification = await createChatVerification(db.pool, {
+      ownerId,
+      keyStore: { getKey: async () => fixtureKey },
+      refresh() {},
+      submitCode: async () => {
+        throw new Error('Unused fixture capability.');
+      },
+    });
     const approvals = await createApprovals(
       async () => {
         executed++;
@@ -173,7 +182,7 @@ test(
       submitMessage: userMessages.submit,
       configuration: () => ({ ...configuration(), llmReady: true }),
       planningTasks: onboarding.planning,
-      messageCosts: async () => ({}),
+      receipts: async () => ({}),
     });
     onboarding.registerRoutes(app);
     const tasks = createTasks({ pool: db.pool, ownerId });
@@ -266,6 +275,7 @@ test(
       present: (...input) => presentInterruption(...input),
       observeTurn: (_turnId, operation) => analytics.withRun(ownerId, operation),
       executeConfirmation: async () => undefined,
+      bindVerificationQuestion: verification.bindQuestion,
       connectedApps: readConnectedApps,
       spendingLimitReached: async () => limitReached,
       speech: {
@@ -417,12 +427,19 @@ test(
           return { status: 'waiting_user', message: 'Which account should I use?' };
         if (context.prompt === 'ask-approval')
           return { status: 'waiting_user', waitingFor: 'approval' };
-        if (context.prompt === 'ask-credentials')
+        if (context.prompt === 'ask-credentials') {
+          const request = randomUUID();
+          await db.pool.query(
+            `INSERT INTO credential_requests(id,token_hash,owner_id,thread_id,turn_id,root_turn_id,origin,label,kind,selectors,inspection)
+             VALUES($1,$2,$3,$4,$5,$5,'https://fixture.test','Synthetic code','otp','{}','{}')`,
+            [request, `synthetic-${request}`, ownerId, context.threadId, context.turnId],
+          );
           return {
             status: 'waiting_credentials',
             waitingFor: 'credentials',
             message: 'Enter the synthetic password. [Sign in](/vault/fixture)',
           };
+        }
         await context.reply(`done: ${context.prompt}`);
         return { status: 'succeeded' };
       },
@@ -907,6 +924,123 @@ test(
         },
       );
 
+      await t.test(
+        'live activity shows owner-started work with its latest step and site, never background runs or finished work',
+        async (t) => {
+          const { createActivity } = await import('../src/server/activity.ts');
+          const activity = createActivity({ pool: db.pool, ownerId });
+          const threadId = (await thread.activeThread(db.pool)).id;
+          const ids: string[] = [];
+          const sessions: string[] = [];
+          t.after(async () => {
+            activity.close();
+            await db.pool.query('DELETE FROM turn_events WHERE turn_id=ANY($1::uuid[])', [ids]);
+            await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [ids]);
+            await db.pool.query('DELETE FROM tasks WHERE session_id=ANY($1::uuid[])', [sessions]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [ids]);
+          });
+          const start = Date.now() - 60_000;
+          const at = (seconds: number) => new Date(start + seconds * 1000);
+          const turn = async (source: string, session = randomUUID()) => {
+            const id = randomUUID();
+            ids.push(id);
+            await db.pool.query(
+              `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,started_at)
+               VALUES($1,$2,$3,$4,$5,'activity fixture','running',$6,$7)`,
+              [id, ownerId, threadId, session, source, source !== 'user', at(0)],
+            );
+            return id;
+          };
+          const event = (
+            turnId: string,
+            type: string,
+            seconds: number,
+            summary = '',
+            site: string | null = null,
+          ) =>
+            db.pool.query(
+              'INSERT INTO turn_events(id,turn_id,type,summary,site,created_at) VALUES($1,$2,$3,$4,$5,$6)',
+              [randomUUID(), turnId, type, summary, site, at(seconds)],
+            );
+          const chat = await turn('user');
+          await event(chat, 'started', 1);
+          await event(chat, 'step', 2, 'Reading the synthetic page.');
+          await event(chat, 'tool_start', 3, 'apps');
+          await event(chat, 'tool_start', 4, 'browser', 'example.com');
+          await event(chat, 'step', 5, 'Comparing two synthetic prices.');
+          const session = randomUUID();
+          const taskId = randomUUID();
+          sessions.push(session);
+          await db.pool.query(
+            `INSERT INTO tasks(id,owner_id,title,done_when,now_text,session_id)
+             VALUES($1,$2,'Synthetic task','Done','Starting',$3)`,
+            [taskId, ownerId, session],
+          );
+          const resumed = await turn('resume', session);
+          await event(resumed, 'step', 1, 'Checking synthetic seats.');
+          const quietSession = randomUUID();
+          sessions.push(quietSession);
+          await db.pool.query(
+            `INSERT INTO tasks(id,owner_id,title,done_when,now_text,session_id)
+             VALUES($1,$2,'Quiet synthetic task','Done','Reading the synthetic page.',$3)`,
+            [randomUUID(), ownerId, quietSession],
+          );
+          const quiet = await turn('task', quietSession);
+          await event(quiet, 'tool_start', 1, 'browser', 'example.com');
+          const schedule = await turn('schedule');
+          await event(schedule, 'step', 1, 'A scheduled synthetic step.');
+          const background = await turn('event');
+          await event(background, 'tool_start', 1, 'apps');
+          const finished = await turn('user');
+          await event(finished, 'step', 1, 'Writing the synthetic answer.');
+          await event(finished, 'final', 2);
+          const spoke = await turn('user');
+          await event(spoke, 'step', 1, 'Before the synthetic update.');
+          await transaction(async (client) => {
+            const message = await thread.insertAssistantMessage(
+              client,
+              { threadId, turnId: spoke },
+              'A synthetic update.',
+            );
+            await client.query('UPDATE messages SET created_at=$2 WHERE id=$1', [message, at(2)]);
+          }, db.pool);
+          await event(spoke, 'tool_start', 3, 'apps');
+          const live = new Map((await activity.current()).map((item) => [item.turnId, item]));
+          assert.deepEqual(
+            [live.get(chat)?.step, live.get(chat)?.site, live.get(chat)?.taskId],
+            ['Comparing two synthetic prices.', 'example.com', null],
+          );
+          assert.deepEqual(
+            [live.get(resumed)?.title, live.get(resumed)?.step, live.get(resumed)?.taskId],
+            ['Synthetic task', 'Checking synthetic seats.', taskId],
+          );
+          assert.deepEqual([live.get(spoke)?.step, live.get(spoke)?.site], [null, null]);
+          assert.deepEqual(
+            [live.get(quiet)?.title, live.get(quiet)?.step, live.get(quiet)?.site],
+            ['Quiet synthetic task', 'Reading the synthetic page.', 'example.com'],
+          );
+          for (const turnId of [schedule, background, finished])
+            assert.equal(live.has(turnId), false, turnId);
+          await event(finished, 'steered', 3);
+          assert.ok((await activity.current()).some((item) => item.turnId === finished));
+          const otherThread = randomUUID();
+          await db.pool.query("INSERT INTO threads(id,owner_id) VALUES($1,'another-owner')", [
+            otherThread,
+          ]);
+          const other = randomUUID();
+          await db.pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,started_at)
+             VALUES($1,'another-owner',$2,$2,'user','activity fixture','running',now())`,
+            [other, otherThread],
+          );
+          t.after(async () => {
+            await db.pool.query('DELETE FROM turns WHERE id=$1', [other]);
+            await db.pool.query('DELETE FROM threads WHERE id=$1', [otherThread]);
+          });
+          assert.ok(!(await activity.current()).some((item) => item.turnId === other));
+        },
+      );
+
       await t.test('a reached spending limit pauses chat and background turns', async (t) => {
         const raced = await thread.submitUserMessage('limit race fixture');
         await waitFor(settled(raced.turnId));
@@ -951,6 +1085,46 @@ test(
           assert.equal(row.status, 'failed');
           assert.match(row.error, /spending limit was reached/);
         }
+        const notices = async (turnId: string) =>
+          (
+            await db.pool.query(
+              "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
+              [turnId, `failure:${turnId}`],
+            )
+          ).rows.map((row) => row.text);
+        for (const turnId of [chat.turnId, background[2]!]) {
+          await waitFor(async () => (await notices(turnId)).length === 1);
+          assert.deepEqual(await notices(turnId), [
+            `I couldn't finish this. ${spendingLimitReached}`,
+          ]);
+        }
+        for (const turnId of background.slice(0, 2)) assert.deepEqual(await notices(turnId), []);
+        const taskSession = randomUUID();
+        const taskMessage = await transaction(
+          (client) =>
+            thread.insertAssistantMessage(
+              client,
+              { threadId: chat.threadId, turnId: chat.turnId },
+              'Synthetic check-in task.',
+            ),
+          db.pool,
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,title,done_when,now_text,session_id,message_id)
+           VALUES($1,$2,'Synthetic check-in','Done','Checking',$3,$4)`,
+          [randomUUID(), ownerId, taskSession, taskMessage],
+        );
+        const checkIn = await thread.enqueueTurn('limit task check-in fixture', {
+          source: 'schedule',
+          sourceId: `schedule:limit:${randomUUID()}:2`,
+          sessionId: taskSession,
+          background: true,
+        });
+        await waitFor(settled(checkIn));
+        await waitFor(async () => (await notices(checkIn)).length === 1);
+        assert.deepEqual(await notices(checkIn), [
+          `I couldn't finish this. ${spendingLimitReached}`,
+        ]);
       });
 
       await t.test(
@@ -1046,6 +1220,33 @@ test(
           assert.equal(ran(first.turnId)?.workspacePath, workspace);
           assert.equal(ran(first.turnId)?.attachments[0]?.path, join(workspace, staged));
           assert.equal(stagedReads.get('read attachment'), 'synthetic attachment bytes');
+          const sticker = await storeArtifact(
+            Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5ZkAAAAASUVORK5CYII=',
+              'base64',
+            ),
+            'sticker.png',
+            'image/png',
+          );
+          const stickerTurn = await thread.submitUserMessage('', [
+            { ...sticker, source: 'sticker' },
+          ]);
+          await waitFor(settled(stickerTurn.turnId));
+          assert.equal(ran(stickerTurn.turnId)?.prompt, '');
+          assert.equal(ran(stickerTurn.turnId)?.attachments[0]?.source, 'sticker');
+          const photo = await sendJson({ text: '', attachmentIds: [sticker.id] });
+          assert.equal(photo.statusCode, 200);
+          const photoTurn = photo.json();
+          await waitFor(settled(photoTurn.turnId));
+          assert.equal(ran(photoTurn.turnId)?.prompt, '');
+          assert.equal(ran(photoTurn.turnId)?.attachments[0]?.mimeType, 'image/png');
+          const storedPhoto = (
+            await db.pool.query('SELECT text,attachments FROM messages WHERE id=$1', [
+              photoTurn.messageId,
+            ])
+          ).rows[0];
+          assert.equal(storedPhoto.text, '');
+          assert.equal(storedPhoto.attachments[0].id, sticker.id);
           const second = await thread.submitUserMessage('use attachment again', [], {
             channel: 'web',
           });
@@ -1189,10 +1390,27 @@ test(
               ).rows[0],
               { status: 'waiting', waiting_reason: reason },
             );
-            if (reason === 'credentials')
+            if (reason === 'credentials') {
               assert.deepEqual(await postedWithWaitingState(waiting.turnId), [
                 { text: 'Enter the synthetic password. [Sign in](/vault/fixture)', together: true },
               ]);
+              assert.deepEqual(
+                (
+                  await db.pool.query(
+                    `SELECT q.xmin=m.xmin AND m.xmin=u.xmin AS together
+                   FROM chat_verification_questions q JOIN messages m ON m.id=q.message_id
+                   JOIN credential_requests r ON r.id=q.request_id AND r.turn_id=m.turn_id AND r.owner_id=m.owner_id
+                   JOIN turns u ON u.id=m.turn_id WHERE u.id=$1`,
+                    [waiting.turnId],
+                  )
+                ).rows,
+                [{ together: true }],
+              );
+              await db.pool.query(
+                "UPDATE credential_requests SET status='superseded' WHERE turn_id=$1",
+                [waiting.turnId],
+              );
+            }
           }
           await waitFor(settledThread);
           const answer = await thread.submitUserMessage('the work account', [], { channel: 'web' });

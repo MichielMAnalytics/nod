@@ -14,6 +14,7 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -480,12 +481,14 @@ if (args[1] === 'create') {
     if (args.includes('--prerelease=false')) release.prerelease = false;
     if (args.includes('--notes-file')) release.body = readFileSync(flag('--notes-file'), 'utf8');
   } else if (args[1] === 'upload') {
-    const bytes = readFileSync(args[3]);
-    const name = basename(args[3]);
-    release.assets = release.assets.filter(asset => asset.name !== name);
-    state.assetIds = (state.assetIds || 0) + 1;
-    release.assets.push({ id: state.assetIds, name, size: bytes.length, digest: 'sha256:' + createHash('sha256').update(bytes).digest('hex'), state: 'uploaded' });
-    state.contents[tag + '/' + name] = bytes.toString('base64');
+    for (const file of args.slice(3, args.indexOf('--repo'))) {
+      const bytes = readFileSync(file);
+      const name = basename(file);
+      release.assets = release.assets.filter(asset => asset.name !== name);
+      state.assetIds = (state.assetIds || 0) + 1;
+      release.assets.push({ id: state.assetIds, name, size: bytes.length, digest: 'sha256:' + createHash('sha256').update(bytes).digest('hex'), state: 'uploaded' });
+      state.contents[tag + '/' + name] = bytes.toString('base64');
+    }
   } else if (args[1] === 'download') {
     const name = flag('--pattern');
     if (!state.contents[tag + '/' + name]) missing();
@@ -1000,7 +1003,10 @@ test('engine source imports only production dependencies outside the development
   const repository = fileURLToPath(new URL('../../', import.meta.url));
   const manifest = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
   const allowed = new Set([...Object.keys(manifest.dependencies), ...builtinModules]);
-  const files = [join(repository, 'desktop/main/engine.mjs')];
+  const files = [
+    join(repository, 'desktop/main/engine.mjs'),
+    join(repository, 'desktop/main/onepassword.mjs'),
+  ];
   const walk = async (directory) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
@@ -1839,7 +1845,7 @@ test('native runtime wrapper preserves handed-off storage through failed prepara
   }
 });
 
-test('database readiness failure replaces retained PostgreSQL only on the next explicit retry', async () => {
+test('Windows storage starts on a free port, and a readiness failure names its cause and replaces retained PostgreSQL on that port only on the next explicit retry', async (t) => {
   const source = await readFile(new URL('../runtime/index.mjs', import.meta.url), 'utf8');
   const functions = source
     .slice(
@@ -1848,10 +1854,14 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
     )
     .replaceAll('export ', '')
     .replace("const { default: pg } = await import('pg');", '');
-  const { replaceContainer } = await import('../runtime/index.mjs');
+  const { availablePort, replaceContainer } = await import('../runtime/index.mjs');
+  const taken = createServer();
+  await new Promise((listening) => taken.listen(0, '127.0.0.1', listening));
+  t.after(() => taken.close());
   for (const failure of ['pg_isready', 'connect', 'query']) {
     const containers = new Map();
     const commands = [];
+    const connections = [];
     let fault = 'workspace';
     let created = 0;
     let stopped = 0;
@@ -1864,14 +1874,18 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
         preparing: new Map(),
         storageReady: new Map(),
         replaceContainer,
+        availablePort,
         ensureNetwork: async () => {},
         protectNetworks: '',
         waitFor: async (operation) => operation(),
         removeStaleImages: async () => {},
         pg: {
           Client: class {
+            constructor({ connectionString }) {
+              connections.push(new URL(connectionString).port);
+            }
             async connect() {
-              if (fault === 'connect') throw new Error('Synthetic connection failure');
+              if (fault === 'connect') throw new Error('Synthetic connect failure');
             }
             async query() {
               if (fault === 'query') throw new Error('Synthetic query failure');
@@ -1892,7 +1906,7 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
                 id: `sha256:${name}`,
               })),
             },
-            saved: { port: 54329, password: 'synthetic-fixture-password' },
+            saved: { port: taken.address().port, password: 'synthetic-fixture-password' },
             controlRoot: 'synthetic-control',
             path: 'synthetic-path',
             dockerEnvironment: {},
@@ -1922,7 +1936,7 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
                 });
               }
               if (args[0] === 'exec' && args[2] === 'pg_isready' && fault === 'pg_isready')
-                throw new Error('Synthetic PostgreSQL readiness failure');
+                throw new Error('Synthetic pg_isready failure');
               if (args[0] === 'inspect') return 'true';
               return '';
             },
@@ -1949,7 +1963,10 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
       await assert.rejects(lifecycle.start({ retry: true }), /Synthetic browser startup failure/);
       assert.equal(postgres(), original);
       fault = failure;
-      await assert.rejects(lifecycle.start({ retry: true }));
+      await assert.rejects(
+        lifecycle.start({ retry: true }),
+        new RegExp(`Synthetic ${failure} failure`),
+      );
       assert.equal(postgres(), original);
       assert.equal(stopped, 0);
       const attempted = commands.length;
@@ -1967,6 +1984,9 @@ test('database readiness failure replaces retained PostgreSQL only on the next e
       );
       assert.equal(launches.length, 2);
       assert.deepEqual(launches[1], launches[0]);
+      const published = launches[0][launches[0].indexOf('--publish') + 1];
+      assert.notEqual(published, `127.0.0.1:${taken.address().port}:5432`);
+      assert.deepEqual(new Set(connections), new Set([published.split(':')[1]]));
       assert.equal(stopped, 0);
     } finally {
       await lifecycle.close();
@@ -2407,7 +2427,12 @@ test('runtime fingerprints cover dependencies and every source the images use, a
   await writeFile(lockPath, `${lockSource}\nsyntheticDependencyChange: true\n`);
   assert.notEqual(JSON.parse((await run()).stdout).fingerprint, before);
   await writeFile(lockPath, lockSource);
-  for (const path of ['src/shared/public-address.ts', 'src/providers/docker/save-video.py']) {
+  for (const path of [
+    'src/shared/public-address.ts',
+    'src/providers/docker/save-video.py',
+    'patches/libsignal@6.0.0.patch',
+    'patches/@whiskeysockets__baileys@7.0.0-rc14.patch',
+  ]) {
     const file = join(root, path);
     const source = await readFile(file, 'utf8');
     await writeFile(file, `${source}\n// synthetic runtime change\n`);
