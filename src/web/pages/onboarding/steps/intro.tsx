@@ -17,7 +17,12 @@ const sequence: RevealStep[] = [
   { wait: 160 },
 ];
 
-export function Introduction({ arrived, onNext, usage }: StepProps) {
+export function Introduction({
+  arrived,
+  onNext,
+  usage,
+  continuing = false,
+}: StepProps & { continuing?: boolean }) {
   const [saving, setSaving] = useState<boolean | null>(null);
   const pending = useRef<Promise<boolean> | null>(null);
   const [error, setError] = useState('');
@@ -45,7 +50,7 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
     };
     window.addEventListener('keydown', press);
     return () => window.removeEventListener('keydown', press);
-  }, [done, onNext]);
+  }, [done, onNext, continuing]);
   async function change(value: boolean) {
     if (!usage || saving !== null) return;
     setSaving(value);
@@ -64,6 +69,7 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
     setSaving(null);
   }
   async function next() {
+    if (continuing) return;
     if (pending.current && !(await pending.current)) return;
     onNext();
   }
@@ -110,12 +116,16 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
               style={avatar}
               title="Say hi again"
               aria-label="Say hi again"
+              disabled={continuing}
               onClick={(event) => {
                 event.stopPropagation();
                 replay();
               }}
             >
-              <NodGlyph mode={typing ? 'thinking' : 'idle'} reaction={reaction} />
+              <NodGlyph
+                mode={continuing ? 'bounce' : typing ? 'thinking' : 'idle'}
+                reaction={reaction}
+              />
             </button>
           </span>
         }
@@ -154,6 +164,7 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
                   }
                   checked={enabled}
                   saving={saving !== null}
+                  disabled={continuing}
                   error={error}
                   onChange={(value) => void change(value)}
                 >
@@ -164,8 +175,13 @@ export function Introduction({ arrived, onNext, usage }: StepProps) {
         ]}
       />
       <Rise show={done} className="ob-introduction-cta">
-        <Button className="ob-next" onClick={() => void next()}>
-          Let’s go
+        <Button
+          className="ob-next"
+          disabled={continuing}
+          aria-busy={continuing}
+          onClick={() => void next()}
+        >
+          {continuing ? 'Opening…' : 'Let’s go'}
         </Button>
         <p className="ob-introduction-reassurance">
           You can change your choices later in Settings.

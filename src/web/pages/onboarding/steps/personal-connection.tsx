@@ -246,11 +246,11 @@ export function PersonalConnection({
   const managed = connectionGroups(apps.data ?? []).find((group) => group.key === manageService);
   const loading = (!configuration.data && !configuration.error) || (!apps.data && !apps.error);
   useEffect(() => {
-    if (!readyReported.current && !loading && revealed >= 2 && onReady) {
+    if (!readyReported.current && !loading && onReady) {
       readyReported.current = true;
       onReady();
     }
-  }, [loading, revealed, onReady]);
+  }, [loading, onReady]);
   const unavailable = loading
     ? ''
     : !configuration.data || !apps.data

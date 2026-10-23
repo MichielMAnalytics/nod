@@ -196,7 +196,7 @@ function Startup() {
       <>
         <div className="titlebar" aria-hidden="true" />
         <OnboardingFrame step={welcomeStep}>
-          <div className="ob-screen" inert={busy || handingOff} aria-busy={busy || handingOff}>
+          <div className="ob-screen" inert={busy && !handingOff} aria-busy={busy || handingOff}>
             {welcomeStep === 'welcome' ? (
               <Welcome
                 arrived="forward"
@@ -206,6 +206,7 @@ function Startup() {
             ) : (
               <Introduction
                 arrived="forward"
+                continuing={handingOff}
                 onBack={() => setWelcomeStep('welcome')}
                 onNext={() => {
                   if (currentWelcome.current)
