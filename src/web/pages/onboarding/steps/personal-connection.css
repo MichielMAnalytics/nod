@@ -47,6 +47,7 @@
   color: var(--muted-foreground);
 }
 .ob-personal-retry,
+.ob-personal-actions,
 .ob-personal-waiting {
   display: flex;
   flex-wrap: wrap;
@@ -58,10 +59,15 @@
   flex-basis: 100%;
 }
 .ob-personal-waiting {
+  flex-wrap: nowrap;
+  gap: 6px;
   color: var(--muted-foreground);
 }
-.ob-personal-waiting > p {
-  flex: 1 1 200px;
+.ob-personal-waiting > svg {
+  flex-shrink: 0;
+}
+.ob-personal-actions {
+  gap: 4px;
 }
 .ob-personal-error {
   color: var(--error);
@@ -70,5 +76,9 @@
 @media (max-width: 640px) {
   .ob-personal-provider {
     padding: 16px;
+  }
+  .ob-personal-actions[data-recovery] {
+    flex-basis: 100%;
+    justify-content: flex-end;
   }
 }

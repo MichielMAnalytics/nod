@@ -1326,6 +1326,8 @@ test('app consent advances in one tab and consumes its non-exportable browser ke
         URL,
         btoa,
         Date,
+        setTimeout,
+        clearTimeout,
         fetch: async (path: string, options: RequestInit) => {
           assert.equal(path, '/start');
           assert.equal(new Headers(options.headers).get('x-nod-bridge'), 'synthetic-bridge-key');

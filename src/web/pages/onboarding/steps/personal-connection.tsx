@@ -75,6 +75,7 @@ export function PersonalConnection({
   const [pending, setPending] = useState<'opening' | 'waiting'>();
   const [pairingConfirmed, setPairingConfirmed] = useState(false);
   const [signInUrl, setSignInUrl] = useState<string>();
+  const [signInOpened, setSignInOpened] = useState(false);
   const [stale, setStale] = useState(false);
   const [pollFailing, setPollFailing] = useState(false);
   const [error, setError] = useState('');
@@ -92,6 +93,7 @@ export function PersonalConnection({
     setCompleted(undefined);
     attempt.current = undefined;
     setSignInUrl(undefined);
+    setSignInOpened(false);
     setStale(false);
     setPollFailing(false);
   }
@@ -344,6 +346,8 @@ export function PersonalConnection({
       next = 'waiting';
       if (external) await openConnection(url);
       else if (popup && !popup.closed) popup.location.href = url;
+      if (!controller.signal.aborted && attempt.current?.id === response.attempt)
+        setSignInOpened(external || Boolean(popup && !popup.closed));
     } catch (cause) {
       popup?.close();
       if (controller.signal.aborted || request.current !== controller) return;
@@ -389,6 +393,7 @@ export function PersonalConnection({
   }
 
   async function retryDisconnection(connection: Connection) {
+    setProvider(providerSlugs.find((slug) => slug === connection.slug));
     try {
       await disconnect(connection);
     } catch (cause) {
@@ -462,11 +467,61 @@ export function PersonalConnection({
                   !catalog.loading &&
                   (!service || service.status === 'not_configured') &&
                   !unavailable && <span className="ob-personal-muted">Unavailable right now</span>}
+                {pending && provider === slug && (
+                  <div className="ob-personal-waiting" role={pollFailing ? 'alert' : 'status'}>
+                    <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                    <p>
+                      {pending === 'opening'
+                        ? 'Opening sign-in…'
+                        : pollFailing
+                          ? 'Can’t check sign-in right now.'
+                          : 'Waiting for sign-in…'}
+                    </p>
+                  </div>
+                )}
+                {error && provider === slug && (
+                  <p role="alert" className="ob-personal-error" data-analytics-private>
+                    {error}
+                  </p>
+                )}
               </div>
               {pending && provider === slug ? (
-                <Button variant="ghost" size="sm" onClick={cancel}>
-                  Cancel
-                </Button>
+                <div
+                  className="ob-personal-actions"
+                  data-recovery={
+                    stale ||
+                    pollFailing ||
+                    (pending === 'waiting' && signInUrl && !pairingConfirmed && !signInOpened)
+                      ? true
+                      : undefined
+                  }
+                >
+                  <Button variant="ghost" size="sm" onClick={cancel}>
+                    Cancel
+                  </Button>
+                  {stale || pollFailing ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void connect(slug, attempt.current)}
+                    >
+                      Start again
+                    </Button>
+                  ) : pending === 'waiting' && signInUrl && !pairingConfirmed && !signInOpened ? (
+                    <Button variant="secondary" size="sm" asChild>
+                      <a
+                        href={signInUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => {
+                          if (!event.defaultPrevented && event.button === 0) setSignInOpened(true);
+                        }}
+                      >
+                        Open sign-in
+                      </a>
+                    </Button>
+                  ) : null}
+                </div>
               ) : account ? (
                 <Button
                   variant="ghost"
@@ -513,32 +568,6 @@ export function PersonalConnection({
             </div>
           ))}
         </div>
-        {pending && (
-          <div className="ob-personal-waiting" role="status">
-            <LoaderCircle size={16} className="spin" aria-hidden="true" />
-            <p>
-              {pending === 'opening'
-                ? 'Opening sign-in…'
-                : stale
-                  ? 'Didn’t finish signing in?'
-                  : 'Finish signing in in your browser.'}
-            </p>
-            {signInUrl && !pairingConfirmed && (
-              <a href={signInUrl} target="_blank" rel="noreferrer">
-                Open sign-in
-              </a>
-            )}
-            {stale && provider && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void connect(provider, attempt.current)}
-              >
-                Start again
-              </Button>
-            )}
-          </div>
-        )}
         {(unavailable || (!loading && catalog.error)) && (
           <div className="ob-personal-retry">
             <p className="ob-personal-muted">
@@ -549,12 +578,7 @@ export function PersonalConnection({
             </Button>
           </div>
         )}
-        {pollFailing && (
-          <p role="alert" className="ob-personal-error">
-            Can’t check sign-in right now. Still trying.
-          </p>
-        )}
-        {error && (
+        {error && !provider && (
           <p role="alert" className="ob-personal-error" data-analytics-private>
             {error}
           </p>
