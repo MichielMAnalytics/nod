@@ -233,6 +233,7 @@ export function PersonalConnection({
     return {
       slug,
       service,
+      checking: configuration.loading || apps.loading || (!service && catalog.loading),
       account: accounts.find(ownedAccount),
       reconnect: accounts.find(
         (connection) =>
@@ -441,7 +442,7 @@ export function PersonalConnection({
       <Rise show={revealed >= 2} className="ob-personal-choices">
         <p className="ob-personal-benefits">{benefit}</p>
         <div className="ob-personal-providers">
-          {providers.map(({ slug, service, account, reconnect, disconnections: issues }) => (
+          {providers.map(({ slug, service, checking, account, reconnect, disconnections }) => (
             <div
               className="ob-personal-provider"
               key={slug}
@@ -463,10 +464,15 @@ export function PersonalConnection({
                 {!account && reconnect && (
                   <span className="ob-personal-muted">{connectionIssue(reconnect)}</span>
                 )}
-                {!loading &&
-                  !catalog.loading &&
-                  (!service || service.status === 'not_configured') &&
-                  !unavailable && <span className="ob-personal-muted">Unavailable right now</span>}
+                {!account && checking && (
+                  <div className="ob-personal-waiting" role="status">
+                    <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                    <p>Checking availability…</p>
+                  </div>
+                )}
+                {!checking && (!service || service.status === 'not_configured') && !unavailable && (
+                  <span className="ob-personal-muted">Unavailable right now</span>
+                )}
                 {pending && provider === slug && (
                   <div className="ob-personal-waiting" role={pollFailing ? 'alert' : 'status'}>
                     <LoaderCircle size={14} className="spin" aria-hidden="true" />
@@ -543,13 +549,14 @@ export function PersonalConnection({
                   variant="secondary"
                   size="sm"
                   aria-label={`${reconnect ? 'Reconnect' : 'Connect'} ${kind === 'calendar' && slug === 'outlook' ? 'Outlook Calendar' : providerNames[slug]}`}
+                  aria-busy={checking}
                   disabled={!canConnect(slug) || Boolean(pending)}
                   onClick={() => void connect(slug)}
                 >
                   {reconnect ? 'Reconnect' : 'Connect'}
                 </Button>
               )}
-              {issues.map((connection) => (
+              {disconnections.map((connection) => (
                 <div
                   className="ob-personal-retry"
                   key={connection.connectionId ?? connection.accountId}

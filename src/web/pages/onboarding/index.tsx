@@ -29,7 +29,6 @@ import { Brain } from './steps/brain';
 import { Email } from './steps/email';
 import { Calendar } from './steps/calendar';
 import { Apps } from './steps/apps';
-import { Messaging } from './steps/messaging';
 import { desktopOnboardingSteps, OnboardingFrame } from './frame';
 
 export type StepProps = {
@@ -49,7 +48,6 @@ const screens: Record<OnboardingStep, ComponentType<StepProps>> = {
   email: Email,
   calendar: Calendar,
   apps: Apps,
-  messaging: Messaging,
 };
 
 type SetupStep = OnboardingStep | 'preferences';
@@ -84,8 +82,9 @@ export function Onboarding({
     if (replay || welcomed || nativePreferences)
       window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
     const stored = readStep<{ owner: string; step: string; version?: number }>();
-    const savedStep =
-      stored?.step === 'about' || stored?.step === 'telegram' ? 'messaging' : stored?.step;
+    const savedStep = ['about', 'telegram', 'messaging'].includes(stored?.step ?? '')
+      ? 'apps'
+      : stored?.step;
     const step: SetupStep = nativePreferences
       ? 'preferences'
       : stored?.owner === user.id &&
@@ -282,14 +281,13 @@ export function Onboarding({
   }
 
   function skipped() {
-    if (step === 'email' || step === 'calendar' || step === 'messaging')
+    if (step === 'email' || step === 'calendar')
       captureAnalytics('nod_onboarding_step_skipped', { step });
   }
 
   function next() {
-    if (step !== 'messaging' && step !== 'preferences') return void go(1);
-    if (desktop && step === 'messaging')
-      return setPosition({ step: 'preferences', arrived: 'forward' });
+    if (step !== 'apps' && step !== 'preferences') return void go(1);
+    if (desktop && step === 'apps') return setPosition({ step: 'preferences', arrived: 'forward' });
     if (finishing) return;
     setWaitingForServices(preparation !== 'ready' || Boolean(runtimeError));
     setError('');
@@ -370,7 +368,7 @@ export function Onboarding({
           onNext={next}
           onBack={() => void go(-1)}
           onSkip={skipped}
-          nextLabel={!desktop && step === 'messaging' ? 'Start chatting' : undefined}
+          nextLabel={!desktop && step === 'apps' ? 'Start chatting' : undefined}
           usage={
             step === 'intro' && onUsageData
               ? { enabled: usageData, onChange: onUsageData }

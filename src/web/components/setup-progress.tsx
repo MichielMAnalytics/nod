@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
+import { NodGlyph } from './motion';
 
 export function SetupProgress({
   title,
@@ -26,24 +27,7 @@ export function SetupProgress({
   return (
     <main className="setup-progress" ref={panel} tabIndex={-1} aria-label={title}>
       <div className="setup-progress-content">
-        <svg
-          className="setup-progress-mark"
-          viewBox="0 0 64 64"
-          data-active={!error}
-          aria-hidden="true"
-        >
-          <circle
-            className="setup-progress-ring"
-            cx="32"
-            cy="32"
-            r="25"
-            fill="none"
-            strokeWidth="8"
-          />
-          <g className="setup-progress-tip">
-            <circle className="setup-progress-dot" cx="32" cy="7" r="8" strokeWidth="2" />
-          </g>
-        </svg>
+        <NodGlyph size={112} mode={error ? 'still' : 'bounce'} className="setup-progress-mark" />
         <div
           className="setup-progress-message"
           data-analytics-private

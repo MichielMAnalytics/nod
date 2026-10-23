@@ -51,7 +51,7 @@ export function AppConnectionDialog({
             <div className="app-connect-heading">
               <div className="app-connect-flow" aria-hidden="true">
                 <span className="app-connect-logo">
-                  <NodGlyph size={40} mode={!error && opening ? 'thinking' : 'still'} />
+                  <NodGlyph size={40} mode={!error && opening ? 'bounce' : 'still'} />
                 </span>
                 <span
                   className="app-connect-route"

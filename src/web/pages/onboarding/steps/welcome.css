@@ -31,20 +31,6 @@
   color: var(--foreground);
 }
 
-.ob-welcome-mark > circle,
-.ob-welcome-mark > .ob-glyph-orbit {
-  transform-box: view-box;
-  transform-origin: center;
-}
-
-.ob-welcome-mark > circle {
-  animation: ob-welcome-nod 1.5s 0.25s var(--ease-enter) infinite;
-}
-
-.ob-welcome-mark > .ob-glyph-orbit {
-  animation: ob-welcome-dot 1.5s 0.4s var(--ease-enter) infinite;
-}
-
 .ob-welcome-copy {
   max-width: 520px;
   font-size: 24px;
@@ -59,32 +45,6 @@
   font-size: 13px;
   line-height: 1.5;
   text-align: center;
-}
-
-@keyframes ob-welcome-nod {
-  0%,
-  100% {
-    transform: translateY(0) scaleY(1);
-  }
-  38% {
-    transform: translateY(6%) scaleY(0.93);
-  }
-  65% {
-    transform: translateY(-1%) scaleY(1);
-  }
-}
-
-@keyframes ob-welcome-dot {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  40% {
-    transform: translateY(8%);
-  }
-  67% {
-    transform: translateY(-2%);
-  }
 }
 
 @media (max-width: 600px) {
@@ -112,12 +72,5 @@
   }
   .ob-welcome-note {
     max-width: 280px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ob-welcome-mark > circle,
-  .ob-welcome-mark > .ob-glyph-orbit {
-    animation: none;
   }
 }

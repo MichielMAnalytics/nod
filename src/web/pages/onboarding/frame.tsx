@@ -13,7 +13,6 @@ const stepNames: Record<DisplayStep, string> = {
   calendar: 'Connect your calendar',
   brain: 'Connect an AI provider',
   apps: 'Connect your tools',
-  messaging: 'Take nod with you',
   launchAtLogin: 'Open at login',
 };
 

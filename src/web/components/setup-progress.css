@@ -31,23 +31,6 @@
   flex: none;
   overflow: visible;
 }
-.setup-progress-ring {
-  stroke: var(--foreground);
-}
-.setup-progress-tip {
-  transform-box: view-box;
-  transform-origin: center;
-  transform: rotate(45deg);
-  animation: setup-progress-orbit 3.2s linear infinite;
-}
-.setup-progress-dot {
-  fill: var(--brand-pink);
-  stroke: var(--canvas);
-}
-.setup-progress-mark[data-active='false'] .setup-progress-tip,
-[data-motion-paused='true'] .setup-progress-tip {
-  animation-play-state: paused;
-}
 .setup-progress-message {
   display: grid;
   gap: 12px;
@@ -98,14 +81,6 @@
   line-height: 1.5;
   text-wrap: pretty;
 }
-@keyframes setup-progress-orbit {
-  from {
-    transform: rotate(45deg);
-  }
-  to {
-    transform: rotate(405deg);
-  }
-}
 @media (max-width: 600px) {
   .setup-progress-mark {
     width: 96px;
@@ -113,10 +88,5 @@
   }
   .setup-progress-message h1 {
     font-size: 22px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .setup-progress-mark .setup-progress-tip {
-    animation: none;
   }
 }

@@ -11,7 +11,7 @@ This page walks you through nod's onboarding, your first tasks and what to do wh
 
 ## Onboarding at a glance
 
-nod opens onboarding the first time you use it. In the desktop app, you can connect accounts while nod prepares its computer. Optionally connect email and calendar, choose an AI provider, then connect other tools and Telegram or WhatsApp if useful. nod gets to know you in the chat after setup.
+nod opens onboarding the first time you use it. In the desktop app, you can connect accounts while nod prepares its computer. Optionally connect email and calendar, choose an AI provider, then connect other tools if useful. nod gets to know you in the chat after setup.
 
 ```mermaid
 flowchart TD
@@ -20,8 +20,7 @@ flowchart TD
   email --> calendar[Calendar or skip]:::muted
   calendar --> model[Connect<br/>a model]:::accent
   model --> apps[Other tools]:::muted
-  apps --> messaging[Telegram or WhatsApp]:::muted
-  messaging --> chat([Get to know nod<br/>in chat]):::go
+  apps --> chat([Get to know nod<br/>in chat]):::go
 ```
 
 ## Go through onboarding
@@ -40,13 +39,11 @@ flowchart TD
 
 6. **Connect other apps (optional).** Browse the categories or search by name, then select **Connect** and review the access requested by each app. Connected apps keep their place in the list. **Manage** opens the same account manager as Apps, where you can add another account or disconnect one. A count beside **Continue** shows connected tools, excluding email. Each app counts once, even with multiple accounts. Select **Continue** whenever you’re ready, including with no apps connected. You can add apps anytime from **Apps**.
 
-7. **Take nod with you (optional).** Connect **Telegram** or **WhatsApp** to send tasks from your phone and continue the same conversation. Keep nod running on your computer so it can reply. Telegram walks you through creating a bot and confirming your account; WhatsApp links your own number with a QR code; use **Message yourself** to talk to nod. You can connect either, both, or **Skip for now**.
-
-8. **Open at login.** In the desktop app, enable **Open at login**, then select **Start chatting**. The first chat requests desktop notifications once. You can change both preferences in **Settings → General**.
+7. **Open at login.** In the desktop app, enable **Open at login**, then select **Start chatting**. The first chat requests desktop notifications once. You can change both preferences in **Settings → General**.
 
 </Steps>
 
-Setup finishes after the messaging choice in the web app, or after desktop preferences in the app. If the computer is still preparing, nod shows its progress and opens chat automatically when ready. If it is already ready, chat opens directly. A startup failure offers **Try again** without clearing your connections. If setup needs a model connection, nod sends you back to that step.
+Setup finishes after the apps step in the web app, or after desktop preferences in the app. If the computer is still preparing, nod shows its progress and opens chat automatically when ready. If it is already ready, chat opens directly. A startup failure offers **Try again** without clearing your connections. If setup needs a model connection, nod sends you back to that step.
 
 You can add more later from **Apps** and **Channels** in the sidebar. See [Connect apps](/connect/apps/) and [Channels](/use/channels/).
 
@@ -56,7 +53,7 @@ In the desktop app, **Replay onboarding** opens setup again without deleting sav
 
 ## Start your first task
 
-nod opens the conversation by asking what you're working on and what it can take off your plate. Reply in chat, or ask for a task directly. There is no required interview. What you share follows the normal chat memory settings.
+nod opens the conversation by asking what you're working on and what it can take off your plate. Reply in chat, or ask for a task directly. There is no required interview. What you share follows the normal chat memory settings. The opening message also links to **Channels**, where you can connect Telegram or WhatsApp to chat from your phone. Keep nod running on your computer so it can reply.
 
 On a new desktop installation, nod requests notification permission when its first chat message appears, so it can tell you when work is ready or needs your attention. Your operating system may show a permission prompt. If you decline, nod does not ask again automatically; you can allow notifications in your system settings later. Existing notification choices are kept. Desktop alerts do not authorize app monitoring or scheduled work.
 

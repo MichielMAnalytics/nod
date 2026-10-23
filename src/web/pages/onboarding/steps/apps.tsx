@@ -53,7 +53,7 @@ function appCategory(key: string, service: Connection) {
   return 'More apps';
 }
 
-export function Apps({ onNext, onBack }: StepProps) {
+export function Apps({ onNext, onBack, nextLabel }: StepProps) {
   const connections = usePageData<Connection[]>('/api/apps');
   const catalog = usePageData<Connection[]>('/api/apps/catalog');
   const refresh = connections.refresh;
@@ -657,6 +657,7 @@ export function Apps({ onNext, onBack }: StepProps) {
         <Footer
           onBack={onBack}
           onNext={onNext}
+          nextLabel={nextLabel}
           summary={
             connectedCount > 0 ? (
               <span role="status">

@@ -19,7 +19,7 @@ export function Welcome({ onNext }: StepProps) {
     <section className="ob-step ob-welcome" data-analytics-public>
       <div className="ob-welcome-content">
         <h1 className="ob-welcome-wordmark" aria-label="nod">
-          <NodGlyph size={80} mode="still" className="ob-welcome-mark" />
+          <NodGlyph size={80} mode="bounce" className="ob-welcome-mark" />
           <span aria-hidden="true">nod</span>
         </h1>
         <p className="ob-welcome-copy">
