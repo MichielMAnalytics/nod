@@ -1,5 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
-import { NodGlyph } from './motion';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 export function SetupProgress({
   title,
@@ -15,10 +14,16 @@ export function SetupProgress({
   children?: ReactNode;
 }) {
   const panel = useRef<HTMLElement>(null);
-  const percent =
-    !error && typeof progress === 'number' && Number.isFinite(progress)
-      ? Math.round(Math.max(0, Math.min(1, progress)) * 100)
+  const [displayProgress, setDisplayProgress] = useState(progress);
+  const fraction =
+    typeof displayProgress === 'number' && Number.isFinite(displayProgress)
+      ? Math.max(0, Math.min(1, displayProgress))
       : undefined;
+  const percent = fraction === undefined ? undefined : Math.round(fraction * 100);
+
+  useLayoutEffect(() => {
+    if (!error) setDisplayProgress(progress);
+  }, [error, progress]);
 
   useEffect(() => {
     panel.current?.focus();
@@ -27,7 +32,44 @@ export function SetupProgress({
   return (
     <main className="setup-progress" ref={panel} tabIndex={-1} aria-label={title}>
       <div className="setup-progress-content">
-        <NodGlyph key={error ? 'error' : 'loading'} size={80} mode={error ? 'still' : 'thinking'} />
+        <svg
+          className="setup-progress-mark"
+          viewBox="0 0 64 64"
+          data-active={!error}
+          data-determinate={fraction !== undefined}
+          aria-hidden="true"
+        >
+          <circle
+            className="setup-progress-track"
+            cx="32"
+            cy="32"
+            r="25"
+            fill="none"
+            strokeWidth="4"
+          />
+          <circle
+            className="setup-progress-arc"
+            cx="32"
+            cy="32"
+            r="25"
+            pathLength="100"
+            fill="none"
+            strokeWidth="4"
+            strokeLinecap="round"
+            transform="rotate(-90 32 32)"
+            style={
+              fraction === undefined ? undefined : { strokeDasharray: `${fraction * 100} 100` }
+            }
+          />
+          <g
+            className="setup-progress-tip"
+            style={
+              fraction === undefined ? undefined : { transform: `rotate(${fraction * 360}deg)` }
+            }
+          >
+            <circle className="setup-progress-dot" cx="32" cy="7" r="8" strokeWidth="2" />
+          </g>
+        </svg>
         <div
           className="setup-progress-message"
           data-analytics-private
@@ -37,7 +79,7 @@ export function SetupProgress({
           {description && <p>{description}</p>}
           {error && <p data-analytics-private>{error}</p>}
         </div>
-        {percent !== undefined && (
+        {percent !== undefined && !error && (
           <div className="setup-progress-download">
             <progress aria-label="Download progress" max={100} value={percent} />
             <span aria-hidden="true">{percent}%</span>
@@ -45,6 +87,10 @@ export function SetupProgress({
         )}
         {children && <div className="setup-progress-actions">{children}</div>}
       </div>
+      <p className="setup-progress-note">
+        Your workspace, browser and data stay on this computer. Your chosen AI providers process
+        requests; browsing and connected apps contact external services.
+      </p>
     </main>
   );
 }

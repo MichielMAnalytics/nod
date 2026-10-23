@@ -1,8 +1,9 @@
 .setup-progress {
+  position: relative;
   display: grid;
-  place-items: center;
+  grid-template-rows: minmax(0, 2fr) auto minmax(0, 3fr);
   min-height: 100dvh;
-  padding: 56px 28px;
+  padding: 0 28px;
   background: var(--canvas);
   color: var(--foreground);
   text-align: center;
@@ -12,11 +13,50 @@
   min-height: calc(100dvh - var(--desktop-titlebar-height, 0px));
 }
 .setup-progress-content {
+  grid-row: 2;
+  justify-self: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: min(100%, 420px);
+  width: min(100%, 520px);
   gap: 28px;
+}
+.setup-progress-mark {
+  display: block;
+  width: 112px;
+  height: 112px;
+  flex: none;
+  overflow: visible;
+}
+.setup-progress-track {
+  stroke: var(--border);
+}
+.setup-progress-arc {
+  stroke: var(--foreground);
+  stroke-dasharray: 40 100;
+  transition: stroke-dasharray 800ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.setup-progress-tip {
+  transform-box: view-box;
+  transform-origin: center;
+  transform: rotate(144deg);
+  transition: transform 800ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.setup-progress-dot {
+  fill: var(--brand-pink);
+  stroke: var(--canvas);
+}
+.setup-progress-mark[data-determinate='false'] .setup-progress-arc {
+  animation: setup-progress-sweep 1.8s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
+}
+.setup-progress-mark[data-determinate='false'] .setup-progress-tip {
+  animation: setup-progress-tip 1.8s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
+}
+.setup-progress-mark[data-active='false'] .setup-progress-arc,
+.setup-progress-mark[data-active='false'] .setup-progress-tip,
+[data-motion-paused='true'] .setup-progress-arc,
+[data-motion-paused='true'] .setup-progress-tip {
+  animation-play-state: paused;
 }
 .setup-progress-message {
   display: grid;
@@ -27,8 +67,8 @@
   margin: 0;
   font-size: 24px;
   font-weight: 500;
-  letter-spacing: -0.65px;
-  line-height: 1.3;
+  letter-spacing: normal;
+  line-height: 1.5;
   text-wrap: balance;
 }
 .setup-progress-message p {
@@ -46,30 +86,62 @@
   gap: 12px;
 }
 .setup-progress-download {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: min(100%, 260px);
   color: var(--muted-foreground);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .setup-progress-download progress {
-  appearance: none;
-  width: 100%;
-  height: 4px;
-  border: 0;
-  border-radius: 4px;
-  background: var(--border);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
   overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
-.setup-progress-download progress::-webkit-progress-bar {
-  background: var(--border);
+.setup-progress-note {
+  position: absolute;
+  right: 28px;
+  bottom: 28px;
+  left: 28px;
+  max-width: 340px;
+  margin: 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+  text-wrap: pretty;
 }
-.setup-progress-download progress::-webkit-progress-value {
-  background: var(--brand-pink);
-  border-radius: 4px;
+@keyframes setup-progress-sweep {
+  from {
+    stroke-dasharray: 31.111111 100;
+  }
+  to {
+    stroke-dasharray: 44.444444 100;
+  }
 }
-.setup-progress-download progress::-moz-progress-bar {
-  background: var(--brand-pink);
+@keyframes setup-progress-tip {
+  from {
+    transform: rotate(112deg);
+  }
+  to {
+    transform: rotate(160deg);
+  }
+}
+@media (max-width: 600px) {
+  .setup-progress-mark {
+    width: 96px;
+    height: 96px;
+  }
+  .setup-progress-message h1 {
+    font-size: 22px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .setup-progress-mark .setup-progress-arc,
+  .setup-progress-mark .setup-progress-tip {
+    animation: none;
+    transition: none;
+  }
 }

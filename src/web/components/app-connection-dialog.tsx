@@ -21,6 +21,7 @@ export function AppConnectionDialog({
   onClose,
   onOpened,
   onCloseAutoFocus,
+  fallbackOnly = false,
 }: {
   signIn?: AppSignIn;
   opening: boolean;
@@ -28,10 +29,14 @@ export function AppConnectionDialog({
   onClose(): void;
   onOpened(): void;
   onCloseAutoFocus?: ComponentProps<typeof DialogContent>['onCloseAutoFocus'];
+  fallbackOnly?: boolean;
 }) {
   const title = useRef<HTMLHeadingElement>(null);
   return (
-    <Dialog open={Boolean(signIn)} onOpenChange={(open) => !open && onClose()}>
+    <Dialog
+      open={Boolean(signIn && (!fallbackOnly || (signIn.url && !signIn.opened && !opening)))}
+      onOpenChange={(open) => !open && onClose()}
+    >
       <DialogContent
         className="app-connect-dialog"
         onOpenAutoFocus={(event) => {

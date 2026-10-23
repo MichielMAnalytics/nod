@@ -1,63 +1,123 @@
 .ob-welcome {
+  display: grid;
+  grid-template-rows: minmax(32px, 1fr) auto minmax(32px, 1fr) auto;
+  justify-items: center;
   gap: 0;
-  padding-bottom: 24px;
+  max-width: none;
+  padding: 24px 24px 28px;
 }
-.ob-welcome > .ob-row {
-  margin: auto 0 0;
-}
-.ob-welcome-slot {
-  position: relative;
-  z-index: 2;
-}
-.ob-welcome-avatar {
-  display: block;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.ob-welcome-avatar:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-.ob-greeting-title {
-  display: block;
-  font-size: var(--text-title);
-  font-weight: 500;
-  line-height: 1.2;
-  letter-spacing: -0.01em;
-}
-.ob-greeting-sub {
-  display: block;
-  margin-top: 4px;
-  line-height: 1.5;
-}
-.ob-wave-hand {
-  display: inline-block;
-  margin-right: 8px;
-  transform-origin: 70% 75%;
-}
-.ob-wave-hand.waving {
-  animation: ob-wave 1.8s ease-in-out 250ms 2;
-}
-.ob-welcome-cta {
-  --rise-from: none;
+
+.ob-welcome-content {
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 16px;
-  margin: 48px 0 auto;
-}
-.ob-welcome-reset :is(.ob-message-content, .ob-rise) {
-  transition: none;
-}
-.ob-welcome-reassurance {
-  color: var(--muted-foreground);
-  font-size: var(--text-control);
+  gap: 36px;
   text-align: center;
+}
+
+.ob-welcome-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 60px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -2.5px;
+}
+
+.ob-welcome-mark {
+  flex: none;
+  color: var(--foreground);
+}
+
+.ob-welcome-mark > circle,
+.ob-welcome-mark > .ob-glyph-orbit {
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+.ob-welcome-mark > circle {
+  animation: ob-welcome-nod 1.5s 0.25s var(--ease-enter) infinite;
+}
+
+.ob-welcome-mark > .ob-glyph-orbit {
+  animation: ob-welcome-dot 1.5s 0.4s var(--ease-enter) infinite;
+}
+
+.ob-welcome-copy {
+  max-width: 520px;
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1.43;
+  letter-spacing: -0.45px;
+}
+
+.ob-welcome-note {
+  grid-row: 4;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@keyframes ob-welcome-nod {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  38% {
+    transform: translateY(6%) scaleY(0.93);
+  }
+  65% {
+    transform: translateY(-1%) scaleY(1);
+  }
+}
+
+@keyframes ob-welcome-dot {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(8%);
+  }
+  67% {
+    transform: translateY(-2%);
+  }
+}
+
+@media (max-width: 600px) {
+  .ob-welcome {
+    padding: 16px 24px 24px;
+  }
+  .ob-welcome-content {
+    gap: 28px;
+  }
+  .ob-welcome-wordmark {
+    gap: 16px;
+    font-size: 52px;
+    letter-spacing: -2px;
+  }
+  .ob-welcome-mark {
+    width: 68px;
+    height: 68px;
+  }
+  .ob-welcome-copy {
+    font-size: 20px;
+    letter-spacing: -0.3px;
+  }
+  .ob-welcome-break {
+    display: none;
+  }
+  .ob-welcome-note {
+    max-width: 280px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-welcome-mark > circle,
+  .ob-welcome-mark > .ob-glyph-orbit {
+    animation: none;
+  }
 }

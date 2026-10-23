@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SetupProgress } from '../../src/web/components/setup-progress';
 import { Welcome } from '../../src/web/pages/onboarding/steps/welcome';
+import { Introduction } from '../../src/web/pages/onboarding/steps/intro';
 import { OnboardingFrame } from '../../src/web/pages/onboarding/frame';
 import { initializeFocusVisibility } from '../../src/web/lib/focus';
 import '../../src/web/theme.css';
@@ -10,6 +11,7 @@ import '../../src/web/components/setup-progress.css';
 import '../../src/web/components/controls.css';
 import '../../src/web/pages/onboarding/onboarding.css';
 import '../../src/web/pages/onboarding/steps/welcome.css';
+import '../../src/web/pages/onboarding/steps/intro.css';
 
 type RuntimeStatus = {
   phase?: string;
@@ -74,6 +76,7 @@ function Startup() {
   const [initialized, setInitialized] = useState(false);
   const [settingsError, setSettingsError] = useState('');
   const [welcome, setWelcome] = useState<WelcomeChoice | null>(null);
+  const [welcomeStep, setWelcomeStep] = useState<'welcome' | 'intro'>('welcome');
   const [welcomeError, setWelcomeError] = useState('');
   const pending = useRef(false);
 
@@ -164,17 +167,21 @@ function Startup() {
     return (
       <>
         <div className="titlebar" aria-hidden="true" />
-        <OnboardingFrame step="welcome">
+        <OnboardingFrame step={welcomeStep}>
           <div className="ob-screen" inert={busy}>
-            <Welcome
-              arrived="forward"
-              onBack={() => {}}
-              onNext={() => void saveWelcome({ ...welcome, continued: true }).catch(() => {})}
-              usage={{
-                enabled: welcome.usageData,
-                onChange: (usageData) => saveWelcome({ usageData, continued: false }),
-              }}
-            />
+            {welcomeStep === 'welcome' ? (
+              <Welcome arrived="forward" onBack={() => {}} onNext={() => setWelcomeStep('intro')} />
+            ) : (
+              <Introduction
+                arrived="forward"
+                onBack={() => setWelcomeStep('welcome')}
+                onNext={() => void saveWelcome({ ...welcome, continued: true }).catch(() => {})}
+                usage={{
+                  enabled: welcome.usageData,
+                  onChange: (usageData) => saveWelcome({ usageData, continued: false }),
+                }}
+              />
+            )}
           </div>
           {welcomeError && (
             <p className="ob-native-error" role="alert">
@@ -234,11 +241,9 @@ function Startup() {
             ? 'nod needs another try'
             : unlocking
               ? 'Keeping your connections secure'
-              : firstSetup
-                ? 'Getting nod ready'
-                : 'Opening nod'
+              : active.message || (firstSetup ? 'Preparing nod’s workspace…' : 'Opening nod…')
         }
-        description={description}
+        description={unlocking || error ? description : undefined}
         error={error}
         progress={progress}
       >

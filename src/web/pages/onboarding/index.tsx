@@ -21,9 +21,11 @@ import { api, errorMessage } from '../../lib/api';
 import { analyticsForCurrentSession, captureAnalytics } from '../../lib/analytics';
 import { clearStored, prepareSuggestions, readStep, writeStep } from './storage';
 import { Welcome } from './steps/welcome';
+import { Introduction } from './steps/intro';
 import { Brain } from './steps/brain';
 import { About } from './steps/about';
 import { Email } from './steps/email';
+import { Apps } from './steps/apps';
 import { Telegram } from './steps/telegram';
 import { desktopOnboardingSteps, OnboardingFrame } from './frame';
 
@@ -38,9 +40,11 @@ export type StepProps = {
 
 const screens: Record<OnboardingStep, ComponentType<StepProps>> = {
   welcome: Welcome,
+  intro: Introduction,
   brain: Brain,
   about: About,
   email: Email,
+  apps: Apps,
   telegram: Telegram,
 };
 
@@ -97,6 +101,7 @@ export function Onboarding({
   const [completionFailed, setCompletionFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runtimeError, setRuntimeError] = useState('');
+  const [runtimeStatus, setRuntimeStatus] = useState<DesktopStatus | null>(null);
   const [error, setError] = useState('');
   const preparationRequest = useRef<AbortController | null>(null);
   const active = useRef(false);
@@ -180,6 +185,7 @@ export function Onboarding({
         status.runtime?.error ||
         (status.runtime?.phase === 'error' ? status.runtime.message : undefined);
       setRuntimeError(failure || '');
+      setRuntimeStatus(status);
     }
     const stop = subscribeDesktopStatus((status) => {
       received = true;
@@ -257,7 +263,8 @@ export function Onboarding({
   }
 
   function skipped() {
-    if (step === 'telegram') captureAnalytics('nod_onboarding_step_skipped', { step });
+    if (step === 'telegram' || step === 'apps')
+      captureAnalytics('nod_onboarding_step_skipped', { step });
   }
 
   function next() {
@@ -274,9 +281,16 @@ export function Onboarding({
   if (finishing) {
     const failure =
       runtimeError || error || (preparation === 'failed' ? 'nod couldn’t finish setup.' : '');
+    const runtime = runtimeStatus?.runtime;
+    const activeRuntime = runtime && runtime.phase !== 'ready' ? runtime : runtimeStatus;
+    const title =
+      preparation === 'ready'
+        ? 'Finishing setup…'
+        : activeRuntime?.message || 'Preparing nod’s workspace…';
     return (
       <SetupProgress
-        title={failure ? 'Setup needs another try.' : 'Finishing setup…'}
+        title={failure ? 'Setup needs another try.' : title}
+        progress={preparation === 'pending' ? activeRuntime?.progress : undefined}
         description={failure ? 'Your progress is saved.' : undefined}
         error={failure || undefined}
       >
@@ -319,7 +333,7 @@ export function Onboarding({
           onSkip={skipped}
           nextLabel={!desktop && step === 'telegram' ? 'Start chatting' : undefined}
           usage={
-            step === 'welcome' && onUsageData
+            step === 'intro' && onUsageData
               ? { enabled: usageData, onChange: onUsageData }
               : undefined
           }

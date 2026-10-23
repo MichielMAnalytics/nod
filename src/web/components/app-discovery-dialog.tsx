@@ -299,7 +299,7 @@ export function AppDiscoveryDialog({
           const target = returnFocus?.();
           if (target?.isConnected) {
             event.preventDefault();
-            target.focus();
+            target.focus({ preventScroll: true });
           }
         }}
       >

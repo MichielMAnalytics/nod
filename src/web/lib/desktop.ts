@@ -15,7 +15,8 @@ export type DesktopStatus = {
   phase?: string;
   message?: string;
   error?: string;
-  runtime?: { phase?: string; message?: string; error?: string };
+  progress?: number;
+  runtime?: { phase?: string; message?: string; error?: string; progress?: number };
 };
 
 export type DesktopSettingsChange = { onboardingCompleted?: true } & Partial<
