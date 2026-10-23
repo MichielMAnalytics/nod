@@ -1,4 +1,4 @@
-import { Check, LoaderCircle, Power } from '../../../components/icons';
+import { LoaderCircle, Power } from '../../../components/icons';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { desktopOnboardingSteps, OnboardingFrame } from '../frame';
 import { Button, Notice } from '../../../components/ui';
@@ -165,15 +165,9 @@ function DesktopPreferenceQuestion({
         typing={typing}
         items={[
           <Bubble>
-            <p>I can open when you sign in to your computer, so I’m ready when you need me.</p>
-            <div className="ob-preference-action">
-              {enabled ? (
-                <span className="ob-preference-enabled" role="status">
-                  <Power size={17} aria-hidden="true" />
-                  Open at login enabled
-                  <Check size={15} aria-hidden="true" />
-                </span>
-              ) : (
+            <p>Enable open at login so I’m ready to help when you sign in to your computer.</p>
+            {!enabled && (
+              <div className="ob-preference-action">
                 <Button disabled={saving} aria-busy={saving} onClick={() => void choose(true)}>
                   {saving ? (
                     <LoaderCircle size={17} className="spin" aria-hidden="true" />
@@ -182,14 +176,21 @@ function DesktopPreferenceQuestion({
                   )}
                   {saving ? 'Enabling…' : error ? 'Try again' : 'Enable open at login'}
                 </Button>
-              )}
-            </div>
+              </div>
+            )}
             {error && (
               <p className="ob-preference-error" role="alert">
                 {error}
               </p>
             )}
           </Bubble>,
+          ...(enabled
+            ? [
+                <Bubble role="status">
+                  Open at login is on. I’ll start when you sign in to your computer.
+                </Bubble>,
+              ]
+            : []),
         ]}
       />
       <Footer

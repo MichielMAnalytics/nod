@@ -11,6 +11,7 @@ import { Button, Notice } from '../../components/ui';
 import { SetupProgress } from '../../components/setup-progress';
 import {
   desktopSettingsAvailable,
+  desktopRendererReady,
   desktopStatus,
   subscribeDesktopStatus,
   retryDesktopRuntime,
@@ -21,7 +22,7 @@ import { useBrowserTimeZone } from '../../hooks/use-browser-time-zone';
 import { modelReady } from '../../hooks/use-models';
 import { api, ApiError, errorMessage } from '../../lib/api';
 import { analyticsForCurrentSession, captureAnalytics } from '../../lib/analytics';
-import { clearStored, prepareSuggestions, readStep, writeStep } from './storage';
+import { clearStored, readStep, writeStep } from './storage';
 import { Welcome } from './steps/welcome';
 import { Introduction } from './steps/intro';
 import { Brain } from './steps/brain';
@@ -37,6 +38,7 @@ export type StepProps = {
   onBack(): void;
   onSkip?(): void;
   nextLabel?: string;
+  onReady?(): void;
   usage?: { enabled: boolean; onChange(enabled: boolean): Promise<void> };
 };
 
@@ -120,6 +122,10 @@ export function Onboarding({
   } | null>(null);
 
   useEffect(() => {
+    if (step !== 'email' && step !== 'calendar') desktopRendererReady();
+  }, [step]);
+
+  useEffect(() => {
     writeStep({ owner: user.id, step, version: onboardingVersion });
     if (
       step !== 'preferences' &&
@@ -168,7 +174,6 @@ export function Onboarding({
   useEffect(() => {
     if (!finishing || preparation !== 'ready') return;
     const capture = analyticsForCurrentSession();
-    void prepareSuggestions(true);
     onComplete()
       .then(() => {
         clearStored();
@@ -361,6 +366,7 @@ export function Onboarding({
         <Screen
           key={step}
           arrived={arrived}
+          onReady={desktopRendererReady}
           onNext={next}
           onBack={() => void go(-1)}
           onSkip={skipped}

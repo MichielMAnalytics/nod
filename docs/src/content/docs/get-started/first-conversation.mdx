@@ -30,11 +30,11 @@ flowchart TD
 
 1. **Get started.** Select **Get started** on the welcome screen. The desktop app starts its services as soon as it opens. If storage is still preparing, a loading screen appears and continues automatically when storage is ready.
 
-2. **Say hi.** nod introduces itself and asks whether to **Share usage data**. It's off unless you turn it on, and you can change it later in **Settings → General**. Select **Let’s go**.
+2. **Say hi.** nod introduces itself and asks whether to **Share usage data**. It's off unless you turn it on, and you can change it later in **Settings → General**. Select **Let’s go**. The introduction stays visible until email setup is ready to open.
 
-3. **Connect email (optional).** Choose **Gmail** or **Outlook** to get help with replies and follow-ups. Sign in and review the permissions, or select **Skip for now**. Setup continues after the connection is confirmed. Failed sign-in does not erase your earlier progress.
+3. **Connect email (optional).** Choose **Gmail** or **Outlook** to get help with replies and follow-ups. Sign in and review the permissions, or select **Skip for now**. Setup continues after the connection is confirmed. Failed sign-in does not erase your earlier progress. If you go **Back**, **Manage** opens the same account manager as Apps to add another account or confirm removal. Select **Continue** when you’re ready.
 
-4. **Connect a calendar (optional).** Choose **Google Calendar** or **Outlook Calendar** to get help planning around your schedule and finding time for meetings. If you already connected Outlook, that account is available here. Select **Continue** or **Skip for now**.
+4. **Connect a calendar (optional).** Choose **Google Calendar** or **Outlook Calendar** to get help planning around your schedule and finding time for meetings. If you already connected Outlook, that account is available here. **Manage** offers the same account controls as email and keeps you on this step. Select **Continue** or **Skip for now**.
 
 5. **Connect a model.** Pick a provider. Each one shows how it connects: **ChatGPT plan** means you sign in with your ChatGPT Plus or Pro plan, and **API key** means you paste a key from the provider. For OpenAI, select **Sign in with ChatGPT** or paste an OpenAI API key. Anthropic takes an API key only, because Claude plans can't be used. For OpenRouter, select **Sign in to OpenRouter** to have it create a key for nod, or paste one. In the desktop app or a source install, you can instead pick **OpenAI-compatible** to use a [local model](/connect/local-models/): check the server address, add a key only if the server needs one, then select **Connect**. Your key is encrypted and never shown to the model. nod uses your provider’s default model when available. You can change it later in **Models**. Setup moves on once the new connection and model are ready; if a model choice is still needed, select one and then **Continue**.
 
@@ -60,7 +60,7 @@ nod opens the conversation by asking what you're working on and what it can take
 
 On a new desktop installation, nod requests notification permission when its first chat message appears, so it can tell you when work is ready or needs your attention. Your operating system may show a permission prompt. If you decline, nod does not ask again automatically; you can allow notifications in your system settings later. Existing notification choices are kept. Desktop alerts do not authorize app monitoring or scheduled work.
 
-nod also prepares three starting task cards: one **Right now** and two **Ongoing** ideas. If you connected Gmail, it can use a short inbox summary or recent subjects and snippets to make those suggestions useful. Existing saved setup answers can still inform them. You can ignore the cards and type any request.
+nod also prepares three starting task cards: one **Right now** and two **Ongoing** ideas. It uses the names of your connected tools to suggest relevant work. If you connected Gmail, it can also use a short inbox summary or recent subjects and snippets. It does not read other connected apps to prepare the cards. Existing saved setup answers can still inform them. You can ignore the cards and type any request.
 
 Each card shows where the task comes from (**Gmail**, **For you** or **Telegram**). Select **Do it**, or **Set it up** on an ongoing card, to send the card's title to nod as your message. The card shows **On it…** while nod works, then **Done** or **Set up**. You can also ignore the cards and type any request.
 

@@ -952,14 +952,22 @@ test('Get started waits for storage and preserves consent while later services p
       assert.deepEqual(JSON.parse(JSON.stringify(choices)), [
         { usageData: true, continued: false },
       ]);
+      waited = false;
       page.window.document.querySelector('.ob-introduction-cta button').click();
       await settle(() => choices.length === 2);
       assert.deepEqual(JSON.parse(JSON.stringify(choices[1])), {
         usageData: true,
         continued: true,
       });
-      runtime.resolve({ phase: 'ready', engineReady: true, runtime: { phase: 'ready' } });
       await settle(() => calls.length === (scenario === 'retry' ? 2 : 1));
+      assert.ok(page.window.document.querySelector('.ob-introduction'));
+      assert.equal(page.window.document.querySelector('.setup-progress'), null);
+      assert.equal(waited, false);
+      runtime.resolve({ phase: 'ready', engineReady: true, runtime: { phase: 'ready' } });
+      await new Promise((accept) => setTimeout(accept, 20));
+      assert.ok(page.window.document.querySelector('.ob-introduction'));
+      assert.equal(page.window.document.querySelector('.setup-progress'), null);
+      assert.equal(waited, false);
     });
   }
 });
@@ -1498,6 +1506,20 @@ test('native windows wait for owned renderer readiness before replacing startup'
         assert.ok(engine);
         assert.equal(engine.isVisible(), false);
         assert.equal(setup.isDestroyed(), false);
+        if (scenario === 'early-load-failure') {
+          let transferred = false;
+          void f.handlers
+            .get('nod:prepare')({
+              sender: setup.webContents,
+              senderFrame: setup.webContents.mainFrame,
+            })
+            .then(() => {
+              transferred = true;
+            });
+          for (let i = 0; !transferred && i < 20; i++)
+            await new Promise((accept) => setTimeout(accept, 10));
+          assert.equal(transferred, true);
+        }
         if (scenario !== 'early-load-failure') await f.settle();
         assert.equal(engine.isVisible(), false);
         const frame = engine.webContents.mainFrame;
@@ -1544,8 +1566,15 @@ test('native windows wait for owned renderer readiness before replacing startup'
               { sender: recovery.webContents, senderFrame: recovery.webContents.mainFrame },
               { retry: true },
             );
-          if (scenario === 'early-load-failure') await new Promise(setImmediate);
-          else await retry;
+          if (scenario === 'early-load-failure') {
+            let finished = false;
+            void retry.then(() => {
+              finished = true;
+            });
+            for (let i = 0; !finished && i < 20; i++)
+              await new Promise((accept) => setTimeout(accept, 10));
+            assert.equal(finished, true);
+          } else await retry;
           const replacement = f.windows.find((window) => window.url && !window.isDestroyed());
           assert.ok(replacement);
           assert.notEqual(replacement, engine);
@@ -2178,6 +2207,67 @@ test('an engine exit after a workspace failure retains its cause until an explic
   }
 });
 
+test('an engine exit during warmup retains its error and waits for one explicit restart', async (t) => {
+  for (const earlyRetry of [false, true]) {
+    await t.test(earlyRetry ? 'retry during warmup' : 'retry after warmup', async (t) => {
+      const connected = deferred();
+      const workspace = deferred();
+      let progress;
+      let preparations = 0;
+      const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+        initialState: 'fresh',
+        allowStart: true,
+        prepareRuntime: async ({ onStorageReady, onStatus }) => {
+          preparations++;
+          progress = onStatus;
+          const runtime = { env: {} };
+          await onStorageReady(runtime);
+          connected.resolve();
+          await workspace.promise;
+          onStatus({ phase: 'preparing', stage: 'browser', message: 'Synthetic browser setup' });
+          return runtime;
+        },
+      });
+      try {
+        await f.launch();
+        await connected.promise;
+        assert.equal(f.children.length, 1);
+        f.children[0].stderr.emit('data', Buffer.from('Error: Synthetic engine warmup failure\n'));
+        f.children[0].emit('exit', 1);
+        const failure = f.status().error;
+        assert.equal(failure, 'Synthetic engine warmup failure');
+        progress({ phase: 'preparing', stage: 'workspace', message: 'Synthetic workspace setup' });
+        assert.equal(f.status().phase, 'error');
+        assert.equal(f.status().error, failure);
+        const retry = () => Promise.all([f.prepare({ retry: true }), f.prepare({ retry: true })]);
+        const pending = earlyRetry ? retry() : null;
+        await new Promise(setImmediate);
+        assert.equal(f.children.length, 1);
+        workspace.resolve();
+        if (pending) await pending;
+        else {
+          await f.settle();
+          assert.equal(f.children.length, 1);
+          assert.equal(f.status().phase, 'error');
+          assert.equal(f.status().error, failure);
+          await f.prepare();
+          assert.equal(f.children.length, 1);
+          assert.equal(f.status().error, failure);
+          await retry();
+        }
+        assert.equal(preparations, 1);
+        assert.equal(f.children.length, 2);
+        assert.equal(f.status().phase, 'ready');
+        assert.equal(f.status().engineReady, true);
+        assert.equal(f.status().error, undefined);
+      } finally {
+        workspace.resolve();
+        await f.close();
+      }
+    });
+  }
+});
+
 test('native upgrades preserve the existing settings and vault through successful or failed startup', async (t) => {
   for (const failed of [false, true]) {
     await t.test(failed ? 'failed runtime' : 'ready runtime', async (t) => {
@@ -2662,6 +2752,54 @@ test('a failed backend launch preserves saved setup and one retry starts one rep
     assert.ok(f.windows.some((window) => window.url?.endsWith('/onboarding?welcome=complete')));
   } finally {
     await f.close();
+  }
+});
+
+test('late startup responses cannot make an exited engine ready or block its explicit retry', async (t) => {
+  for (const endpoint of ['/api/health', '/api/session']) {
+    await t.test(endpoint, async (t) => {
+      const requested = deferred();
+      const response = deferred();
+      let held = false;
+      const f = await runningDesktop(
+        t,
+        async (url) => {
+          if (!held && url.endsWith(endpoint)) {
+            held = true;
+            requested.resolve();
+            await response.promise;
+          }
+          return Response.json(
+            url.endsWith('/api/account') ? { settings: { usageData: false } } : { ok: true },
+          );
+        },
+        { initialState: 'fresh', allowStart: true },
+      );
+      try {
+        await f.storage.store.save({ welcome: { usageData: false, continued: true } });
+        await f.launch();
+        await requested.promise;
+        f.children[0].stderr.emit('data', Buffer.from('Error: Synthetic startup response lost\n'));
+        f.children[0].emit('exit', 1);
+        response.resolve();
+        await f.settle();
+        assert.equal(f.status().phase, 'error');
+        assert.equal(f.status().engineReady, false);
+        assert.equal(f.status().error, 'Synthetic startup response lost');
+        assert.equal(f.children.length, 1);
+        const shell = f.windows.find((window) => window.path && !window.isDestroyed());
+        await f.handlers.get('nod:prepare')(
+          { sender: shell.webContents, senderFrame: shell.webContents.mainFrame },
+          { retry: true },
+        );
+        assert.equal(f.status().phase, 'ready');
+        assert.equal(f.status().engineReady, true);
+        assert.equal(f.children.length, 2);
+      } finally {
+        response.resolve();
+        await f.close();
+      }
+    });
   }
 });
 

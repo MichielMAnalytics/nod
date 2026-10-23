@@ -558,11 +558,10 @@ export function Channels() {
         <DialogContent className="channel-wizard">
           {managing ? (
             <>
-              <div className="channel-wizard-heading">
+              <DialogTitle className="channel-wizard-title">
                 <img src={`/logos/${editing}.svg`} alt="" width={24} height={24} />
-                <span>{selected?.provider.name}</span>
-              </div>
-              <DialogTitle>Your {selected?.provider.name} connection</DialogTitle>
+                {selected?.provider.name}
+              </DialogTitle>
               <DialogDescription>Keep nod running to receive messages.</DialogDescription>
               <div className="channel-wizard-step" data-analytics-private>
                 <div className="channel-manage-identity">
@@ -617,17 +616,14 @@ export function Channels() {
             </>
           ) : editing === 'telegram' ? (
             <>
-              <div className="channel-wizard-heading">
+              <DialogTitle className="channel-wizard-title">
                 <img src="/logos/telegram.svg" alt="" width={24} height={24} />
-                <span>Telegram</span>
-              </div>
-              <DialogTitle>
-                {telegramStatus.paired ? 'Telegram is connected' : 'Connect Telegram'}
+                {telegramStatus.paired ? 'Telegram' : 'Connect Telegram'}
               </DialogTitle>
               <DialogDescription>
                 {telegramStatus.paired
                   ? 'Send your bot a message to start.'
-                  : 'Create a bot, then link your Telegram account.'}
+                  : 'Create a bot, then link your account.'}
               </DialogDescription>
               <TelegramSetup
                 setup={telegramSetup}
@@ -672,9 +668,11 @@ export function Channels() {
                     {loading ? 'Retrying…' : 'Retry loading'}
                   </Button>
                 )}
-                <Button variant="ghost" size="sm" disabled={busy || resuming} onClick={close}>
-                  {telegramStatus.paired ? 'Done' : 'Close'}
-                </Button>
+                {telegramStatus.paired && (
+                  <Button variant="ghost" size="sm" disabled={busy || resuming} onClick={close}>
+                    Done
+                  </Button>
+                )}
                 {telegramStatus.paired && telegramUrl && (
                   <Button asChild size="sm">
                     <a
@@ -692,15 +690,14 @@ export function Channels() {
             </>
           ) : !whatsappCloud ? (
             <>
-              <div className="channel-wizard-heading">
+              <DialogTitle className="channel-wizard-title">
                 <img src="/logos/whatsapp.svg" alt="" width={24} height={24} />
-                <span>WhatsApp</span>
-              </div>
-              <DialogTitle>
-                {selected?.setup?.enabled ? 'Your WhatsApp connection' : 'Connect WhatsApp'}
+                {selected?.setup?.connectionState === 'connected' ? 'WhatsApp' : 'Connect WhatsApp'}
               </DialogTitle>
               <DialogDescription>
-                Link an account with a QR code. nod must be running to answer.
+                {selected?.setup?.connectionState === 'connected'
+                  ? 'Keep nod running to receive messages.'
+                  : 'Link an account with a QR code.'}
               </DialogDescription>
               <WhatsAppSetup
                 setup={channels.find((item) => item.provider.id === 'whatsapp')?.setup}

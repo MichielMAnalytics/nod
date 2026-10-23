@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 export function SetupProgress({
   title,
@@ -14,15 +14,10 @@ export function SetupProgress({
   children?: ReactNode;
 }) {
   const panel = useRef<HTMLElement>(null);
-  const [displayProgress, setDisplayProgress] = useState(progress);
   const fraction =
-    typeof displayProgress === 'number' && Number.isFinite(displayProgress)
-      ? Math.max(0, Math.min(1, displayProgress))
+    typeof progress === 'number' && Number.isFinite(progress)
+      ? Math.max(0, Math.min(1, progress))
       : undefined;
-
-  useLayoutEffect(() => {
-    if (!error) setDisplayProgress(progress);
-  }, [error, progress]);
 
   useEffect(() => {
     panel.current?.focus();
@@ -35,37 +30,17 @@ export function SetupProgress({
           className="setup-progress-mark"
           viewBox="0 0 64 64"
           data-active={!error}
-          data-determinate={fraction !== undefined}
           aria-hidden="true"
         >
           <circle
-            className="setup-progress-track"
+            className="setup-progress-ring"
             cx="32"
             cy="32"
             r="25"
             fill="none"
-            strokeWidth="4"
+            strokeWidth="8"
           />
-          <circle
-            className="setup-progress-arc"
-            cx="32"
-            cy="32"
-            r="25"
-            pathLength="100"
-            fill="none"
-            strokeWidth="4"
-            strokeLinecap="round"
-            transform="rotate(-90 32 32)"
-            style={
-              fraction === undefined ? undefined : { strokeDasharray: `${fraction * 100} 100` }
-            }
-          />
-          <g
-            className="setup-progress-tip"
-            style={
-              fraction === undefined ? undefined : { transform: `rotate(${fraction * 360}deg)` }
-            }
-          >
+          <g className="setup-progress-tip">
             <circle className="setup-progress-dot" cx="32" cy="7" r="8" strokeWidth="2" />
           </g>
         </svg>

@@ -82,6 +82,7 @@ let engineWindow;
 let engineFocusRequested = false;
 let pendingFeedback = false;
 let engine;
+let engineFailure;
 let welcomePassed = false;
 let welcomeNavigation = false;
 let transferringWelcome;
@@ -166,6 +167,7 @@ const lifecycle = createDesktopLifecycle({
     const runtime = { ...value, message: bounded(value.message) };
     if (
       preparing &&
+      !engineFailure &&
       !welcomeTransferError &&
       status.phase !== 'starting' &&
       value.phase !== 'error'
@@ -962,6 +964,7 @@ async function transferWelcome() {
         throw new Error('nod could not confirm your choice. Try again.');
       await settings.acknowledgeWelcome(saved.welcome);
     }
+    if (engineFailure) throw new Error(engineFailure);
     welcomeNavigation = true;
     welcomePassed = true;
     welcomeTransferError = undefined;
@@ -986,7 +989,7 @@ async function transferWelcome() {
 
 async function finishEnginePreparation(pending = false) {
   await appPreferences.sync();
-  if (quitting || !engine) throw new Error('nod is closing.');
+  if (quitting || !engine) throw new Error(engineFailure || 'nod is closing.');
   if (!onboardingCompleted) {
     const response = await engineRequest('/api/session');
     if (response.ok && (await response.json()).settings?.onboardingCompleted === true) {
@@ -1002,6 +1005,7 @@ async function finishEnginePreparation(pending = false) {
       }
     }
   }
+  if (quitting || !engine) throw new Error(engineFailure || 'nod is closing.');
   if (!pending && !engineRuntimeReady) {
     engine.postMessage({ type: 'nod-runtime-ready' });
     engineRuntimeReady = true;
@@ -1304,6 +1308,7 @@ async function validateStart() {
 }
 
 async function startEngine({ runtime, signal, pending = false }) {
+  if (engineFailure) throw new Error(engineFailure);
   if (engine && enginePreferencesReady) return finishEnginePreparation(pending);
   if (engine) {
     if (!(await confirmRestart()))
@@ -1420,6 +1425,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     for (const window of engineWindows) if (!window.isDestroyed()) window.destroy();
     engineWindows.clear();
     if (!quitting && !closingEngine) {
+      engineFailure = failure;
       update({
         phase: 'error',
         message: failure,
@@ -1440,7 +1446,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     } catch {}
     await new Promise((accept) => setTimeout(accept, 300));
   }
-  if (!ready) {
+  if (!ready || engine !== child || signal.aborted) {
     await stopEngine();
     throw new Error(
       failure || 'nod’s background service did not respond. Try again to restart it.',
@@ -1451,11 +1457,13 @@ async function startEngine({ runtime, signal, pending = false }) {
 }
 
 async function prepare(options = {}) {
+  if (engineFailure && options?.retry !== true) return status;
   if (preparing) {
     const retryAfterFailure = options?.retry === true && status.phase === 'error';
     await preparing;
     return retryAfterFailure ? prepare(options) : status;
   }
+  if (options?.retry === true) engineFailure = undefined;
   update({
     phase: 'preparing',
     windowError: undefined,
@@ -1799,8 +1807,12 @@ else {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         if (options?.retry === true && !enginePreferencesReady) welcomeTransferError = undefined;
         await transferWelcome();
-        if (options?.retry === true && status.windowError) showEngine();
-        if (engineRuntimeReady) return status;
+        if (options?.retry === true && status.windowError) {
+          showEngine();
+          if (enginePreferencesReady && status.runtime.phase !== 'error') return status;
+        }
+        if (engineRuntimeReady || (!options?.retry && enginePreferencesReady && preparing))
+          return status;
         return prepare(options);
       });
       ipcMain.handle('nod:runtime:import', (event) => {

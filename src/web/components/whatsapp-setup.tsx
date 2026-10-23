@@ -117,6 +117,8 @@ export function WhatsAppSetup({
   }
 
   const state = link?.state ?? setup?.connectionState ?? 'connecting';
+  const hasAccount = state === 'connected' || Boolean(link?.accountHandle || setup?.accountHandle);
+  const canRestart = state === 'failed' || state === 'expired' || state === 'logged_out';
   const linkedNumber = (link?.accountHandle ?? setup?.accountHandle)?.replace(/^\+/, '');
   const chatUrl =
     linkedNumber && /^\d{7,15}$/.test(linkedNumber) ? `https://wa.me/${linkedNumber}` : undefined;
@@ -183,14 +185,10 @@ export function WhatsAppSetup({
             </>
           ) : (
             <p>
-              Link your own account, then open <strong>Message yourself</strong> in WhatsApp to talk
-              to nod. Other chats stay outside nod.
+              Use <strong>Message yourself</strong> to chat with nod. Other chats stay outside nod.
             </p>
           )}
-          <p>
-            This connection uses an unofficial WhatsApp client. WhatsApp can restrict the account or
-            change how it connects.
-          </p>
+          <p>This uses an unofficial connection. WhatsApp may restrict your account.</p>
           <label className="channel-policy">
             <Checkbox
               checked={policy}
@@ -199,7 +197,7 @@ export function WhatsAppSetup({
               onChange={(event) => setPolicy(event.target.checked)}
             />
             <span>
-              I understand the account risk and have checked the{' '}
+              I understand this risk and have checked the{' '}
               <a
                 href="https://www.whatsapp.com/legal/terms-of-service"
                 target="_blank"
@@ -211,9 +209,6 @@ export function WhatsAppSetup({
             </span>
           </label>
           <div className="channel-wizard-actions">
-            <Button type="button" variant="ghost" onClick={onDone} disabled={busy}>
-              Cancel
-            </Button>
             <Button type="submit" disabled={busy || !ready || !policy}>
               {busy ? 'Preparing connection…' : 'Show QR code'}
             </Button>
@@ -226,7 +221,7 @@ export function WhatsAppSetup({
         </form>
       ) : (
         <>
-          <div role="status" aria-live="polite">
+          <div className="whatsapp-setup-status" role="status" aria-live="polite">
             {state === 'connected' ? (
               <>
                 <div className="whatsapp-connected-identity">
@@ -238,19 +233,31 @@ export function WhatsAppSetup({
                   )}
                 </div>
                 <p>
+                  {chatUrl ? (
+                    <a
+                      className="channel-external-link"
+                      href={chatUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Open WhatsApp
+                    </a>
+                  ) : (
+                    'Open WhatsApp'
+                  )}
                   {setup?.linkMode === 'self-chat'
-                    ? 'Open Message yourself in WhatsApp and send nod a message.'
-                    : 'From your personal WhatsApp, send a message to the linked number.'}
+                    ? ', select Message yourself, and send nod a message.'
+                    : ' on your phone and send a message to the linked number.'}
                 </p>
               </>
             ) : state === 'awaiting_scan' ? (
               <>
                 <p>
-                  Open the WhatsApp account you want to link. Select{' '}
-                  <strong>Settings → Linked Devices → Link a Device</strong>, then scan this code.
+                  In WhatsApp, open <strong>Settings → Linked Devices → Link a Device</strong>, then
+                  scan this code.
                 </p>
                 {link?.qr && link.expiresAt && Date.parse(link.expiresAt) > Date.now() ? (
-                  <div className="telegram-setup-qr">
+                  <div className="whatsapp-setup-qr">
                     <QRCodeSVG
                       value={link.qr}
                       size={196}
@@ -279,45 +286,27 @@ export function WhatsAppSetup({
               </Notice>
             )}
           </div>
-          <div className="channel-wizard-actions">
-            {state === 'connected' ? (
-              <>
-                {onDisconnect && (
-                  <Button type="button" variant="ghost" disabled={busy} onClick={onDisconnect}>
-                    Disconnect
-                  </Button>
-                )}
-                {chatUrl && (
-                  <Button asChild variant="outline">
-                    <a href={chatUrl} target="_blank" rel="noopener noreferrer">
-                      Open WhatsApp
-                    </a>
-                  </Button>
-                )}
-                <Button type="button" onClick={onDone}>
-                  Done
-                </Button>
-              </>
-            ) : (
-              <>
-                {onDisconnect && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={busy || restarting}
-                    onClick={onDisconnect}
-                  >
-                    Disconnect
-                  </Button>
-                )}
+          {!hasAccount && link?.pairingId && !canRestart && (
+            <p className="whatsapp-setup-hint">Closing this window cancels setup.</p>
+          )}
+          {(hasAccount || canRestart) && (
+            <div className="channel-wizard-actions">
+              {hasAccount && onDisconnect && (
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={onDone}
                   disabled={busy || restarting}
+                  onClick={onDisconnect}
                 >
-                  Close
+                  Disconnect
                 </Button>
+              )}
+              {state === 'connected' && (
+                <Button type="button" onClick={onDone}>
+                  Done
+                </Button>
+              )}
+              {canRestart && (
                 <Button
                   type="button"
                   onClick={() => void restart()}
@@ -325,9 +314,9 @@ export function WhatsAppSetup({
                 >
                   {restarting ? 'Preparing connection…' : 'Start again'}
                 </Button>
-              </>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

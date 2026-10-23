@@ -18,11 +18,11 @@ import { Bubble, Footer, Messages, useReveal } from '../motion';
 
 const sequence = [{ typing: 450 }, { wait: 300, typing: 550 }, { wait: 200 }, { wait: 300 }];
 const providers = [
-  { id: 'telegram' as const, name: 'Telegram', description: 'Connect your own Telegram bot.' },
+  { id: 'telegram' as const, name: 'Telegram', description: 'Chat with nod in Telegram.' },
   {
     id: 'whatsapp' as const,
     name: 'WhatsApp',
-    description: 'Link your own number with a QR code.',
+    description: 'Chat with nod in WhatsApp.',
   },
 ];
 
@@ -65,6 +65,7 @@ export function Messaging({ arrived, onNext, onBack, onSkip, nextLabel }: StepPr
   const connected = telegramStatus.paired || whatsappReady;
   const selected = editing === 'telegram' ? telegram : whatsapp;
   const selectedName = editing === 'telegram' ? 'Telegram' : 'WhatsApp';
+  const selectedReady = editing === 'telegram' ? telegramStatus.paired : whatsappReady;
   const existingWhatsApp = Boolean(
     whatsapp?.enabled && (whatsapp.mode !== 'linked' || whatsapp.linkMode !== 'self-chat'),
   );
@@ -207,19 +208,16 @@ export function Messaging({ arrived, onNext, onBack, onSkip, nextLabel }: StepPr
         }}
       >
         <DialogContent className="channel-wizard" aria-busy={busy}>
-          <div className="channel-wizard-heading">
+          <DialogTitle className="channel-wizard-title">
             <img src={`/logos/${editing ?? 'telegram'}.svg`} alt="" width={24} height={24} />
-            <span>{selectedName}</span>
-          </div>
-          <DialogTitle>
-            {selected?.enabled ? `Your ${selectedName} connection` : `Connect ${selectedName}`}
+            {selectedReady ? selectedName : `Connect ${selectedName}`}
           </DialogTitle>
           <DialogDescription>
-            {selected?.enabled
-              ? 'Keep nod running on your computer to receive messages.'
+            {selectedReady
+              ? 'Keep nod running to receive messages.'
               : editing === 'telegram'
-                ? 'Create a bot, then link your Telegram account.'
-                : 'Link your own number, then use Message yourself to talk to nod.'}
+                ? 'Create a bot, then link your account.'
+                : 'Link your number with a QR code.'}
           </DialogDescription>
           {editing === 'telegram' && telegramStatus.paired ? (
             <div className="channel-wizard-step" data-analytics-private>
@@ -268,16 +266,13 @@ export function Messaging({ arrived, onNext, onBack, onSkip, nextLabel }: StepPr
                   void action('user', { allowedUserId: fields.allowedUserId?.trim() });
                 }}
               />
-              <div className="channel-wizard-actions">
-                {telegram?.enabled && (
+              {telegram?.enabled && (
+                <div className="channel-wizard-actions">
                   <Button variant="ghost" disabled={busy} onClick={() => setRemoving(true)}>
                     Disconnect
                   </Button>
-                )}
-                <Button variant="ghost" disabled={busy} onClick={close}>
-                  Close
-                </Button>
-              </div>
+                </div>
+              )}
             </>
           ) : existingWhatsApp ? (
             <div className="channel-wizard-step" data-analytics-private>

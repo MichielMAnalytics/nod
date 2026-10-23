@@ -43,10 +43,9 @@ function isAbbreviation(query: string, words: string[]) {
   return true;
 }
 
-export function searchApps<T extends { name: string; description: string; category: string }>(
-  apps: T[],
-  query: string,
-): T[] {
+export function searchApps<
+  T extends { name: string; description: string; category: string; slug?: string },
+>(apps: T[], query: string): T[] {
   const normalized = normalize(query);
   if (!normalized) return apps;
   const terms = normalized.split(' ');
@@ -54,12 +53,13 @@ export function searchApps<T extends { name: string; description: string; catego
   return apps
     .map((app, index) => {
       const name = normalize(app.name);
+      const slug = normalize(app.slug ?? '');
       const words = name.split(' ');
       const supportingText = normalize(`${app.description} ${app.category}`);
       const ranks = terms.map((term) => {
         if (words.includes(term)) return 0;
         if (words.some((word) => word.startsWith(term))) return 1;
-        if (name.includes(term)) return 2;
+        if (name.includes(term) || slug.includes(term)) return 2;
         if (term.length >= 4 && words.some((word) => oneEditAway(term, word))) return 3;
         if (isAbbreviation(term, words)) return 4;
         if (term.length >= 3 && supportingText.includes(term)) return 5;

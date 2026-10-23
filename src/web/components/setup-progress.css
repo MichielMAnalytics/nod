@@ -31,33 +31,20 @@
   flex: none;
   overflow: visible;
 }
-.setup-progress-track {
-  stroke: var(--border);
-}
-.setup-progress-arc {
+.setup-progress-ring {
   stroke: var(--foreground);
-  stroke-dasharray: 40 100;
-  transition: stroke-dasharray 800ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .setup-progress-tip {
   transform-box: view-box;
   transform-origin: center;
-  transform: rotate(144deg);
-  transition: transform 800ms cubic-bezier(0.23, 1, 0.32, 1);
+  transform: rotate(45deg);
+  animation: setup-progress-orbit 3.2s linear infinite;
 }
 .setup-progress-dot {
   fill: var(--brand-pink);
   stroke: var(--canvas);
 }
-.setup-progress-mark[data-determinate='false'] .setup-progress-arc {
-  animation: setup-progress-sweep 1.8s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
-}
-.setup-progress-mark[data-determinate='false'] .setup-progress-tip {
-  animation: setup-progress-tip 1.8s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
-}
-.setup-progress-mark[data-active='false'] .setup-progress-arc,
 .setup-progress-mark[data-active='false'] .setup-progress-tip,
-[data-motion-paused='true'] .setup-progress-arc,
 [data-motion-paused='true'] .setup-progress-tip {
   animation-play-state: paused;
 }
@@ -111,20 +98,12 @@
   line-height: 1.5;
   text-wrap: pretty;
 }
-@keyframes setup-progress-sweep {
+@keyframes setup-progress-orbit {
   from {
-    stroke-dasharray: 31.111111 100;
+    transform: rotate(45deg);
   }
   to {
-    stroke-dasharray: 44.444444 100;
-  }
-}
-@keyframes setup-progress-tip {
-  from {
-    transform: rotate(112deg);
-  }
-  to {
-    transform: rotate(160deg);
+    transform: rotate(405deg);
   }
 }
 @media (max-width: 600px) {
@@ -137,9 +116,7 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .setup-progress-mark .setup-progress-arc,
   .setup-progress-mark .setup-progress-tip {
     animation: none;
-    transition: none;
   }
 }

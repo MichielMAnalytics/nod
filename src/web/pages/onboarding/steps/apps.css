@@ -230,14 +230,8 @@
 }
 
 .ob-apps-footer {
-  position: relative;
   flex-shrink: 0;
-}
-
-.ob-apps-footer .ob-footer {
-  position: static;
-  padding-top: 16px;
-  background: var(--canvas);
+  height: var(--ob-navigation-height);
 }
 
 @media (max-width: 960px) {
@@ -268,8 +262,5 @@
   }
   .ob-apps-category + .ob-apps-category {
     margin-top: 28px;
-  }
-  .ob-apps-footer .ob-footer {
-    padding-top: 16px;
   }
 }

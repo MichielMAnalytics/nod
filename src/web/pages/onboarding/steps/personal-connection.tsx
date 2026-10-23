@@ -7,6 +7,7 @@ import {
   onboardingEmailProviders,
 } from '../../../../shared/onboarding';
 import { ServiceLogo } from '../../../components/service-logo';
+import { AppAccountManager } from '../../../components/app-account-manager';
 import { Rise } from '../../../components/motion';
 import { Button } from '../../../components/ui';
 import { usePageData } from '../../../hooks/use-page-data';
@@ -14,7 +15,7 @@ import { api, errorMessage } from '../../../lib/api';
 import { analyticsForCurrentSession } from '../../../lib/analytics';
 import { connectionUrl } from '../../../lib/connection-url';
 import { desktopLinksAvailable, openConnection } from '../../../lib/desktop';
-import { connectionIssue } from '../../../lib/secondary-pages';
+import { connectionGroups, connectionIssue, removeConnection } from '../../../lib/secondary-pages';
 import type { StepProps } from '..';
 import { Bubble, Footer, Messages, useReveal, type RevealStep } from '../motion';
 
@@ -24,7 +25,7 @@ const outcomes = ['connected', 'cancelled', 'failed', 'expired'];
 
 type PersonalProvider =
   (typeof onboardingEmailProviders)[number] | (typeof onboardingCalendarProviders)[number];
-type PersonalTarget = { service: PersonalProvider; connectionId?: string };
+type PersonalTarget = { service: PersonalProvider; connectionId?: string; managed?: boolean };
 const providerNames: Record<PersonalProvider, string> = {
   gmail: 'Gmail',
   outlook: 'Outlook',
@@ -55,6 +56,7 @@ export function PersonalConnection({
   onNext,
   onBack,
   onSkip,
+  onReady,
 }: StepProps & {
   kind: 'email' | 'calendar';
   providerSlugs: readonly PersonalProvider[];
@@ -78,9 +80,13 @@ export function PersonalConnection({
   const [error, setError] = useState('');
   const [completed, setCompleted] = useState<PersonalTarget>();
   const [provider, setProvider] = useState<PersonalProvider>();
+  const [manageService, setManageService] = useState<PersonalProvider>();
   const request = useRef<AbortController | null>(null);
   const attempt = useRef<(PersonalTarget & { id: string }) | undefined>(undefined);
+  const manageTrigger = useRef<HTMLButtonElement | null>(null);
+  const manageCard = useRef<HTMLElement | null>(null);
   const active = useRef(false);
+  const readyReported = useRef(false);
 
   function clearAttempt() {
     setCompleted(undefined);
@@ -238,7 +244,16 @@ export function PersonalConnection({
     };
   });
   const connected = providers.some((entry) => entry.account);
+  const managed = connectionGroups(apps.data ?? [], catalog.data ?? []).find(
+    (group) => group.key === manageService,
+  );
   const loading = (!configuration.data && !configuration.error) || (!apps.data && !apps.error);
+  useEffect(() => {
+    if (!readyReported.current && !loading && revealed >= 2 && onReady) {
+      readyReported.current = true;
+      onReady();
+    }
+  }, [loading, revealed, onReady]);
   const unavailable = loading
     ? ''
     : !configuration.data || !apps.data
@@ -270,6 +285,7 @@ export function PersonalConnection({
     if (
       arrived !== 'forward' ||
       !completed ||
+      completed.managed ||
       !confirmed ||
       !ready ||
       pending ||
@@ -281,9 +297,14 @@ export function PersonalConnection({
     onNext();
   }, [arrived, completed, confirmed, ready, pending, apps.refreshing, apps.error, onNext]);
 
-  async function connect(slug: PersonalProvider) {
+  async function connect(
+    slug: PersonalProvider,
+    target?: Pick<PersonalTarget, 'connectionId' | 'managed'>,
+  ) {
     if (request.current || !canConnect(slug)) return;
-    const connectionId = providers.find((entry) => entry.slug === slug)?.reconnect?.connectionId;
+    const { connectionId, managed: managing } = target ?? {
+      connectionId: providers.find((entry) => entry.slug === slug)?.reconnect?.connectionId,
+    };
     const capture = analyticsForCurrentSession();
     capture('nod_app_connect_clicked', { entry: 'onboarding', result: 'opened' });
     const external = desktopLinksAvailable();
@@ -316,7 +337,7 @@ export function PersonalConnection({
       const url = connectionUrl(response.url, window.location.origin);
       if (!response.attempt || !/^[A-Za-z0-9_-]{43}$/.test(response.attempt))
         throw new Error(connectionMessage(slug, 'failed'));
-      attempt.current = { id: response.attempt, service: slug, connectionId };
+      attempt.current = { id: response.attempt, service: slug, connectionId, managed: managing };
       flushSync(() => {
         setSignInUrl(url);
       });
@@ -337,9 +358,9 @@ export function PersonalConnection({
     }
   }
 
-  async function retryDisconnection(connection: Connection) {
-    const id = connection.connectionId!;
-    if (request.current || recovering) return;
+  async function disconnect(connection: Connection) {
+    const id = connection.connectionId;
+    if (!id || request.current || recovering || pending) return;
     const controller = new AbortController();
     request.current = controller;
     setRecovering(id);
@@ -349,16 +370,37 @@ export function PersonalConnection({
         `/api/apps/${encodeURIComponent(connection.slug)}/accounts/${encodeURIComponent(id)}/disconnect`,
         {
           method: 'POST',
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         },
       );
-      await refreshApps();
+      if (controller.signal.aborted) return;
+      apps.update((current) => (current ? removeConnection(current, id) : current));
+      if (managed?.accounts.length === 1) setManageService(undefined);
+      void refreshApps();
     } catch (cause) {
-      if (!controller.signal.aborted) setError(errorMessage(cause));
+      if (controller.signal.aborted) return;
+      void refreshApps();
+      analyticsForCurrentSession()('nod_ui_error', { area: 'onboarding', action: 'disconnect' });
+      throw cause;
     } finally {
       if (request.current === controller) request.current = null;
       if (active.current) setRecovering(undefined);
     }
+  }
+
+  async function retryDisconnection(connection: Connection) {
+    try {
+      await disconnect(connection);
+    } catch (cause) {
+      if (active.current) setError(errorMessage(cause));
+    }
+  }
+
+  function restoreFocus() {
+    const target = manageTrigger.current?.isConnected
+      ? manageTrigger.current
+      : manageCard.current?.querySelector<HTMLButtonElement>('button:not(:disabled)');
+    target?.focus({ preventScroll: true });
   }
 
   function cancel() {
@@ -403,7 +445,7 @@ export function PersonalConnection({
             >
               <ServiceLogo slug={slug} logoUrl={service?.logoUrl} size={28} />
               <div className="ob-personal-identity">
-                <span>
+                <span className="ob-personal-name">
                   {kind === 'calendar' && slug === 'outlook'
                     ? 'Outlook Calendar'
                     : providerNames[slug]}
@@ -421,13 +463,25 @@ export function PersonalConnection({
                   (!service || service.status === 'not_configured') &&
                   !unavailable && <span className="ob-personal-muted">Unavailable right now</span>}
               </div>
-              {account ? (
-                <span className="ob-personal-connected">
-                  {kind === 'calendar' && slug === 'outlook' ? 'Account connected' : 'Connected'}
-                </span>
-              ) : pending && provider === slug ? (
+              {pending && provider === slug ? (
                 <Button variant="ghost" size="sm" onClick={cancel}>
                   Cancel
+                </Button>
+              ) : account ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ob-personal-manage"
+                  aria-label={`Manage ${kind === 'calendar' && slug === 'outlook' ? 'Outlook Calendar' : providerNames[slug]} accounts`}
+                  disabled={Boolean(pending || recovering)}
+                  onClick={(event) => {
+                    manageTrigger.current = event.currentTarget;
+                    manageCard.current = event.currentTarget.closest('[data-provider]');
+                    setError('');
+                    setManageService(slug);
+                  }}
+                >
+                  Manage
                 </Button>
               ) : (
                 <Button
@@ -475,7 +529,11 @@ export function PersonalConnection({
               </a>
             )}
             {stale && provider && (
-              <Button variant="ghost" size="sm" onClick={() => void connect(provider)}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void connect(provider, attempt.current)}
+              >
                 Start again
               </Button>
             )}
@@ -516,6 +574,24 @@ export function PersonalConnection({
               }
         }
         nextDisabled={!connected || Boolean(pending || recovering)}
+      />
+      <AppAccountManager
+        group={managed}
+        suspended={Boolean(pending)}
+        busy={Boolean(pending || recovering)}
+        error={error}
+        onDismissError={() => setError('')}
+        onClose={() => setManageService(undefined)}
+        onConnect={(account, addAccount) => {
+          const slug = providerSlugs.find((value) => value === account.slug);
+          if (slug)
+            void connect(slug, {
+              connectionId: addAccount ? undefined : account.connectionId,
+              managed: true,
+            });
+        }}
+        onDisconnect={disconnect}
+        onRestoreFocus={restoreFocus}
       />
     </section>
   );

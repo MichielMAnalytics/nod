@@ -3,8 +3,7 @@
   gap: 16px;
 }
 .ob-personal-benefits,
-.ob-personal-muted,
-.ob-personal-connected {
+.ob-personal-muted {
   color: var(--muted-foreground);
   font-size: var(--text-control);
 }
@@ -36,6 +35,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ob-personal-name {
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: var(--text-control);
+  font-weight: 500;
+  line-height: 1.5;
+}
+.ob-personal-manage {
+  color: var(--muted-foreground);
 }
 .ob-personal-retry,
 .ob-personal-waiting {

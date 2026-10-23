@@ -961,10 +961,7 @@ async function initializeApplication(
       (await memory.load()).entries
         .filter((entry) => entry.origin === 'stated' && entry.slug === 'onboarding')
         .map((entry) => entry.text),
-    gmail: async () =>
-      (await integrations.connectedApps()).some(
-        (app) => app.slug === 'gmail' && app.status === 'connected',
-      ),
+    apps: (owner) => integrations.list(owner, { refresh: false }),
     inbox: integrations.inboxSnippets,
     telegram: async () =>
       Boolean(

@@ -555,7 +555,10 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
         className="ob-brain-messages"
         items={[
           <Bubble data-analytics-public>Let’s connect an AI provider.</Bubble>,
-          <Bubble data-analytics-public>Sign in with your ChatGPT plan, or use an API key.</Bubble>,
+          <Bubble data-analytics-public>
+            Choose your provider. You can use a supported subscription, an API key, or a local
+            model.
+          </Bubble>,
         ]}
       />
       {!data && models.error && (

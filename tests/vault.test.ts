@@ -4944,6 +4944,7 @@ window.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventLi
 let finishPreparation;
 let deferPreparation = false;
 let suggestions = 0;
+let completions = 0;
 window.fetch = globalThis.fetch = async (url) => {
   const path = new URL(url, window.location.href).pathname;
   if (path === '/api/account/prepare') return deferPreparation ? new Promise(resolve => {finishPreparation = () => resolve(Response.json({ok:true}));}) : Response.json({ ok: true });
@@ -4982,7 +4983,7 @@ let sharing = false;
 let native = false;
 const render = () => {const view = createElement(Onboarding, {
   user: { id: 'synthetic-owner', name: 'Synthetic', email: null, avatarUrl: null },
-  onComplete: async () => {},
+  onComplete: async () => { completions++; },
   onFeedback() {},
   usageData: sharing,
   onUsageData: async (value) => { sharing = value; analytics.configureAnalytics(value ? enabled : undefined, 'web'); render(); },
@@ -5019,21 +5020,23 @@ assert.deepEqual(steps(), [
 await act(async () => root.unmount());
 captured.length = 0;
 deferPreparation = true;
-sessionStorage.removeItem('nod.onboarding.suggestions');
 suggestions = 0;
+completions = 0;
 sessionStorage.setItem('nod.onboarding.step', JSON.stringify({ owner: 'synthetic-owner', step: 'telegram', version: 2 }));
 root = createRoot(document.getElementById('root'));
 await act(async () => render());
 for (let attempt = 0; attempt < 80 && !button('Skip for now'); attempt++) await settle();
-assert.equal(suggestions, 0, 'suggestions wait for account preparation');
+assert.equal(completions, 0, 'completion waits for account preparation');
 await act(async () => button('Skip for now').click());
 await settle();
 assert.deepEqual(steps(), [['nod_onboarding_step_viewed', 'messaging', 'forward'], ['nod_onboarding_step_skipped', 'messaging', undefined]]);
 assert.equal(captured.some(event => event.event === 'nod_onboarding_recap'), false);
+assert.equal(completions, 0);
 assert.equal(suggestions, 0);
 await act(async () => finishPreparation());
-for (let attempt = 0; attempt < 80 && !suggestions; attempt++) await settle();
-assert.equal(suggestions, 1);
+for (let attempt = 0; attempt < 80 && !completions; attempt++) await settle();
+assert.equal(completions, 1);
+assert.equal(suggestions, 0, 'first-task preparation belongs to server delivery');
 await act(async () => root.unmount());
 sessionStorage.setItem('nod.onboarding.step', JSON.stringify({ owner: 'synthetic-owner', step: 'telegram', version: 1 }));
 root = createRoot(document.getElementById('root'));
@@ -5499,15 +5502,16 @@ const {pageDataCache}=await import('./src/web/lib/page-data-cache.ts');
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 let root;
 let advances=0;
+let readySignals=0;
 const settle=(ms=15)=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,ms));});
 const waitFor=async(condition)=>{for(let i=0;i<100&&!condition();i++)await settle();assert.ok(condition(),'Expected the confirmed connection to advance its React step');};
 const button=text=>[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===text||item.getAttribute('aria-label')===text);
 const click=async(text)=>{await waitFor(()=>button(text)&&!button(text).disabled);await act(async()=>button(text).click());await settle();};
 async function mount(Component,arrived='forward') {
   if(root) await act(async()=>root.unmount());
-  pageDataCache.clear(); advances=0;
+  pageDataCache.clear(); advances=0; readySignals=0;
   root=createRoot(document.getElementById('root'));
-  await act(async()=>root.render(createElement(Component,{arrived,onNext(){advances++;},onBack(){},onSkip(){}})));
+  await act(async()=>root.render(createElement(Component,{arrived,onNext(){advances++;},onBack(){},onSkip(){},onReady(){readySignals++;}})));
   await settle();
 }
 const connection={id:'fixture-model',provider:'anthropic',method:'api_key',status:'connected',label:'Fixture model',managed:false,models:[{id:'fixture-model-name',name:'Fixture',efforts:['off'],images:false,contextWindow:32000}]};
@@ -5524,6 +5528,8 @@ let connectingService='gmail';
 const connectCalls=[];
 const reconnectCalls=[];
 let otherGmailConnected=false;
+let otherGmailDisconnects=0;
+let failOtherGmailDisconnect=true;
 let disconnectPending=false;
 let disconnectCalls=0;
 let failDisconnect=true;
@@ -5531,6 +5537,8 @@ let gmailReconnect=false;
 let appCompleted=false;
 let appMissing=false;
 let failApps=false;
+let initialApps;
+let initialCatalog;
 let failTelegram=true;
 let failChannelLoad=false;
 let whatsapp;
@@ -5552,6 +5560,8 @@ window.fetch=globalThis.fetch=async(url,options={})=>{
   if(path==='/api/models/oauth')return Response.json({attempt:'fixture-oauth',url:'https://auth.openai.com/authorize?fixture=1'});
   if(path==='/api/models/oauth/status/fixture-oauth')return new Promise(resolve=>{oauth=()=>resolve(Response.json({status:'connected'}));});
   if(path==='/api/configuration')return Response.json({integrationsReady:true});
+  if(path==='/api/apps'&&initialApps)await initialApps;
+  if(path==='/api/apps/catalog'&&initialCatalog)await initialCatalog;
   if(path==='/api/apps')return failApps?Response.json({error:'Fixture account refresh failed'},{status:503}):Response.json([{slug:'gmail',name:'Gmail',status:gmailConnected?'connected':'disconnected',connectionId:gmailConnected||disconnectPending?'fixture-account':undefined,accountId:gmailConnected||disconnectPending?'fixture-gmail':undefined,reconnectRequired:gmailReconnect,canReconnect:true,disconnectPending},...(otherGmailConnected?[{slug:'gmail',name:'Gmail',status:'connected',connectionId:'fixture-other-gmail-account',accountId:'fixture-other-gmail'}]:[]),...(outlookConnected?[{slug:'outlook',name:'Outlook',status:'connected',connectionId:'fixture-outlook-account',accountId:'fixture-outlook',reconnectRequired:outlookReconnect,canReconnect:true}]:[]),...(calendarConnected?[{slug:'googlecalendar',name:'Google Calendar',status:'connected',connectionId:'fixture-calendar-account',accountId:'fixture-calendar'}]:[])]);
   if(path==='/api/apps/catalog')return Response.json([{slug:'gmail',name:'Gmail',status:'disconnected'},{slug:'outlook',name:'Outlook',status:'disconnected'},...(calendarAvailable?[{slug:'googlecalendar',name:'Google Calendar',status:'disconnected'}]:[])]);
   if(path==='/api/apps/gmail/accounts/fixture-account/disconnect'){
@@ -5560,6 +5570,14 @@ window.fetch=globalThis.fetch=async(url,options={})=>{
     disconnectCalls++;
     if(failDisconnect)return Response.json({error:'Fixture disconnection unavailable'},{status:502});
     disconnectPending=false;
+    gmailConnected=false;
+    return Response.json({disconnected:true});
+  }
+  if(path==='/api/apps/gmail/accounts/fixture-other-gmail-account/disconnect'){
+    assert.equal(options.method,'POST');
+    otherGmailDisconnects++;
+    if(failOtherGmailDisconnect)return Response.json({error:'Fixture account removal failed'},{status:502});
+    otherGmailConnected=false;
     return Response.json({disconnected:true});
   }
   if(path==='/api/apps/gmail/connect'||path==='/api/apps/outlook/connect'||path==='/api/apps/googlecalendar/connect'){
@@ -5619,8 +5637,18 @@ models={connections:[{...connection,provider:'openai',method:'subscription'}],se
 await act(async()=>oauth());
 await waitFor(()=>advances===1);
 disconnectPending=true;
+const appsReady=Promise.withResolvers();
+const catalogReady=Promise.withResolvers();
+initialApps=appsReady.promise;
+initialCatalog=catalogReady.promise;
 await mount(Email);
+assert.equal(readySignals,0,'native intro stays until the owned account state settles');
+await act(async()=>{initialApps=undefined;appsReady.resolve();});
+await waitFor(()=>readySignals===1);
+assert.ok(initialCatalog,'an optional catalog response does not gate native handoff');
+await act(async()=>{initialCatalog=undefined;catalogReady.resolve();});
 await waitFor(()=>button('Retry disconnection'));
+assert.equal(readySignals,1,'email readiness is reported once');
 assert.equal(disconnectCalls,0,'uncertain disconnection is never retried automatically');
 assert.ok(button('Connect Gmail').disabled);
 assert.ok(button('Continue').disabled);
@@ -5636,6 +5664,11 @@ assert.equal(disconnectCalls,2);
 assert.equal(button('Retry disconnection'),undefined);
 assert.doesNotMatch(document.body.textContent,/Fixture disconnection unavailable/);
 assert.equal(advances,0,'recovered disconnection still requires Gmail consent');
+failApps=true;
+await mount(Email,'back');
+await waitFor(()=>readySignals===1);
+assert.ok(button('Try again'),'an initial account error exposes recovery instead of retaining native intro');
+failApps=false;
 await mount(Email);
 await act(async()=>button('Continue').click());
 assert.equal(advances,0,'Continue cannot claim an unconnected account');
@@ -5687,6 +5720,68 @@ for(const direction of ['forward','back']){
   await waitFor(()=>button('Continue')&&!button('Continue').disabled);
   assert.equal(advances,0,'cached email must not bounce '+direction);
 }
+const beforeManageConnections=connectCalls.length;
+await click('Manage Gmail accounts');
+await waitFor(()=>document.querySelectorAll('.compact-account').length===1);
+assert.equal(connectCalls.length,beforeManageConnections,'managing an existing email account does not start consent');
+assert.equal(advances,0,'returning to a connected email step preserves account management');
+currentAttempt='D'.repeat(43);
+await click('Add account');
+assert.equal(connectCalls.length,beforeManageConnections+1);
+assert.deepEqual(reconnectCalls,['fixture-account','fixture-account'],'Add account must not reconnect the existing email account');
+otherGmailConnected=true;
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt:currentAttempt}}));
+await waitFor(()=>document.querySelectorAll('.compact-account').length===2);
+assert.equal(advances,0,'adding an account on Back never advances the email step');
+await act(async()=>document.querySelector('[data-disconnect-account="fixture-other-gmail-account"]').click());
+await waitFor(()=>button('Keep account'));
+assert.equal(otherGmailDisconnects,0,'removing email access requires confirmation');
+await click('Keep account');
+await waitFor(()=>document.querySelectorAll('.compact-account').length===2);
+assert.equal(otherGmailDisconnects,0,'keeping an account preserves its access');
+await act(async()=>document.querySelector('[data-disconnect-account="fixture-other-gmail-account"]').click());
+await click('Disconnect');
+assert.equal(otherGmailDisconnects,1);
+assert.equal(otherGmailConnected,true,'failed removal preserves the account');
+assert.match(document.body.textContent,/Fixture account removal failed/);
+failOtherGmailDisconnect=false;
+await click('Disconnect');
+await waitFor(()=>document.querySelectorAll('.compact-account').length===1);
+assert.equal(otherGmailDisconnects,2,'failed removal is retried only by the user');
+assert.equal(gmailConnected,true,'removing one email account preserves the other');
+await click('Done');
+await waitFor(()=>!document.querySelector('[role="dialog"]'));
+await waitFor(()=>document.activeElement===button('Manage Gmail accounts'));
+assert.equal(document.activeElement===button('Manage Gmail accounts'),true,'closing account management restores focus');
+assert.equal(advances,0);
+await click('Manage Gmail accounts');
+await act(async()=>document.querySelector('[data-disconnect-account="fixture-account"]').click());
+const afterDisconnectRefresh=Promise.withResolvers();
+initialApps=afterDisconnectRefresh.promise;
+await click('Disconnect');
+await waitFor(()=>!document.querySelector('[role="dialog"]'));
+await act(async()=>{initialApps=undefined;afterDisconnectRefresh.resolve();});
+assert.ok(button('Continue').disabled,'removing the last account restores the optional connection choice');
+assert.ok(button('Skip for now')&&!button('Skip for now').disabled);
+assert.ok(button('Connect Gmail')&&!button('Connect Gmail').disabled);
+await waitFor(()=>document.activeElement===button('Connect Gmail'));
+assert.equal(document.activeElement===button('Connect Gmail'),true,'removing the last account restores focus to its connection action');
+assert.equal(advances,0,'removing the last account never advances onboarding');
+gmailConnected=true;
+currentAttempt='E'.repeat(43);
+await mount(Email);
+await click('Manage Gmail accounts');
+await click('Add account');
+otherGmailConnected=true;
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt:currentAttempt}}));
+await waitFor(()=>document.querySelectorAll('.compact-account').length===2);
+assert.equal(advances,0,'account management does not auto-advance even when arriving forward');
+await click('Done');
+assert.equal(advances,0);
+await click('Continue');
+assert.equal(advances,1,'leaving account management remains an explicit choice');
+otherGmailConnected=false;
+currentAttempt=attempt;
 for(const direction of ['forward','back']){
   gmailConnected=false; appCompleted=false;
   await mount(Email,direction);
@@ -5773,6 +5868,10 @@ await act(async()=>pageDataCache.refresh('/api/apps',true));
 await waitFor(()=>document.querySelector('[data-provider="outlook"][data-connected="true"]'));
 assert.equal(button('Connect Outlook Calendar'),undefined);
 assert.equal(advances,0,'an existing Outlook account leaves calendar choice visible');
+await click('Manage Outlook Calendar accounts');
+await waitFor(()=>document.querySelectorAll('.compact-account').length===1);
+assert.equal(document.querySelector('[data-disconnect-account]').dataset.disconnectAccount,'fixture-outlook-account','calendar management reuses the owned Outlook account');
+await click('Done');
 await click('Continue');
 assert.equal(advances,1);
 assert.equal(connectCalls.length,beforeOutlookReuse,'email and calendar reuse the same Outlook connection');
@@ -6732,6 +6831,115 @@ test(
       });
   },
 );
+
+test('native renderer handoff waits for actionable onboarding or a visible recovery state', async () => {
+  const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {
+    timeoutMs: 25_000,
+    input: String.raw`
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+const dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://127.0.0.1:51000/onboarding',pretendToBeVisual:true});
+for(const name of ['window','document','Node','NodeFilter','Element','HTMLElement','HTMLInputElement','HTMLButtonElement','Event','CustomEvent','MutationObserver','getComputedStyle','localStorage','sessionStorage'])Object.defineProperty(globalThis,name,{configurable:true,value:name==='window'?dom.window:name==='document'?dom.window.document:typeof dom.window[name]==='function'&&name[0]===name[0].toLowerCase()?dom.window[name].bind(dom.window):dom.window[name]});
+Object.defineProperty(globalThis,'navigator',{configurable:true,value:dom.window.navigator});
+globalThis.requestAnimationFrame=dom.window.requestAnimationFrame.bind(dom.window);
+globalThis.cancelAnimationFrame=dom.window.cancelAnimationFrame.bind(dom.window);
+globalThis.location=window.location;
+globalThis.ResizeObserver=class{observe(){}disconnect(){}};
+globalThis.BroadcastChannel=class{postMessage(){}close(){}};
+HTMLElement.prototype.scrollIntoView=function(){};
+window.matchMedia=()=>({matches:true,addEventListener(){},removeEventListener(){}});
+const {createElement,act}=await import('react');
+const {createRoot}=await import('react-dom/client');
+const {App}=await import('./src/web/app.tsx');
+const {sessionStore}=await import('./src/web/lib/session.ts');
+const {pageDataCache}=await import('./src/web/lib/page-data-cache.ts');
+const {writeStep}=await import('./src/web/pages/onboarding/storage.ts');
+globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const owner={id:'synthetic-handoff-owner',name:'',email:null,avatarUrl:null};
+const session={user:owner,settings:{theme:'light',onboardingCompleted:false,usageData:false,traces:false},capabilities:{developer:false,traces:false}};
+const ready=[];
+let gates;
+let failure;
+let preparations=0;
+window.nodDesktop={
+  ready:()=>{ready.push({step:document.querySelector('.ob')?.dataset.step,retry:[...document.querySelectorAll('button')].some(button=>button.textContent==='Try again')});},
+  onOpenSettings:()=>()=>{},
+  getSettings:async()=>({onboardingPreferenceStep:'complete'}),
+  onPreferences:()=>()=>{},
+  status:async()=>({phase:'ready',runtime:{phase:'preparing'}}),
+  onStatus:()=>()=>{},
+};
+window.fetch=globalThis.fetch=async(url,options={})=>{
+  const path=new URL(url,window.location.href).pathname;
+  if(gates.has(path))await gates.get(path).promise;
+  if(path===failure)return Response.json({error:'Synthetic request unavailable'},{status:503});
+  if(path==='/api/session')return Response.json(session);
+  if(path==='/api/preferences')return Response.json({timeZone:'Europe/Lisbon'});
+  if(path==='/api/configuration')return Response.json({integrationsReady:true});
+  if(path==='/api/apps')return Response.json([{slug:'gmail',name:'Gmail',status:'disconnected'}]);
+  if(path==='/api/apps/catalog')return Response.json(['gmail','outlook','googlecalendar'].map(slug=>({slug,name:slug,status:'disconnected'})));
+  if(path==='/api/account/prepare'){
+    preparations++;
+    return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true}));
+  }
+  if(path==='/api/models')return Response.json({connections:[{id:'synthetic-model',provider:'anthropic',method:'api_key',status:'connected',label:'Synthetic model',managed:false,models:[{id:'synthetic-choice',name:'Synthetic',efforts:['off'],images:false,contextWindow:1000}]}],selection:{connectionId:'synthetic-model',modelId:'synthetic-choice',effort:'off'}});
+  if(path==='/api/channel-settings')return Response.json({ready:true,channels:[]});
+  if(path==='/api/channels')return Response.json({channels:[],inbox:[],deliveries:[],error:null});
+  throw new Error('Unexpected fixture request '+path);
+};
+let root;
+const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
+const waitFor=async condition=>{for(let i=0;i<100&&!condition();i++)await settle();assert.ok(condition(),'Expected the native renderer handoff state');};
+const release=async path=>{const gate=gates.get(path);gates.delete(path);await act(async()=>gate.resolve());await settle();};
+async function mount(step,failed){
+  if(root)await act(async()=>root.unmount());
+  pageDataCache.clear();
+  sessionStorage.clear();
+  window.history.replaceState(null,'','/onboarding');
+  writeStep({owner:owner.id,step,version:2});
+  gates=new Map(['/api/session','/api/configuration','/api/apps','/api/apps/catalog'].map(path=>[path,Promise.withResolvers()]));
+  failure=failed;
+  ready.length=0;
+  void sessionStore.refresh({conceal:true});
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>root.render(createElement(App)));
+  await settle();
+  assert.deepEqual(ready,[],'a pending session cannot reveal a placeholder renderer');
+}
+for(const failed of [undefined,'/api/apps','/api/configuration']){
+  await mount('email',failed);
+  await release('/api/session');
+  await waitFor(()=>document.querySelector('.ob')?.dataset.step==='email');
+  assert.deepEqual(ready,[],'session availability alone does not reveal email');
+  await release('/api/apps');
+  assert.deepEqual(ready,[],'email still waits for initial connection configuration');
+  await release('/api/configuration');
+  await waitFor(()=>ready.length===1);
+  assert.equal(ready[0].step,'email');
+  assert.equal(ready[0].retry,Boolean(failed),'an initial request error reveals an actionable retry');
+  assert.ok(gates.has('/api/apps/catalog'),'catalog loading is not a handoff prerequisite');
+  assert.ok(preparations>0,'email is revealed while service preparation is pending');
+  await release('/api/apps/catalog');
+  assert.equal(ready.length,1,'settling the optional catalog does not reveal twice');
+}
+await mount('email','/api/session');
+await release('/api/session');
+await waitFor(()=>ready.length===1);
+assert.equal(ready[0].step,undefined);
+assert.equal(ready[0].retry,true,'session failure exposes recovery instead of retaining native intro');
+for(const step of ['brain','messaging']){
+  await mount(step);
+  await release('/api/session');
+  await waitFor(()=>ready.some(value=>value.step===step));
+  assert.ok(gates.has('/api/configuration')&&gates.has('/api/apps')&&gates.has('/api/apps/catalog'),'restored non-personal steps do not wait for unrelated app data');
+}
+await act(async()=>root.unmount());
+dom.window.close();
+process.exit(0);
+`,
+  });
+  assert.equal(result.exitCode, 0, result.stderr);
+});
 
 test('the first-chat notification bridge runs without a card and preserves earlier dismissal', async () => {
   const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {

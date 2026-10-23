@@ -82,6 +82,7 @@ function Startup() {
   const [welcome, setWelcome] = useState<WelcomeChoice | null>(null);
   const currentWelcome = useRef<WelcomeChoice | null>(null);
   const [welcomeStep, setWelcomeStep] = useState<'welcome' | 'waiting' | 'intro'>('welcome');
+  const [handingOff, setHandingOff] = useState(false);
   const [welcomeError, setWelcomeError] = useState('');
   const pending = useRef(false);
   const recoveryPending = useRef(false);
@@ -162,6 +163,7 @@ function Startup() {
     pending.current = true;
     setBusy(true);
     setWelcomeError('');
+    if (choice.continued) setHandingOff(true);
     try {
       const saved = await desktop.saveSettings({ welcome: choice });
       acceptWelcome(saved.welcome ?? choice);
@@ -169,6 +171,7 @@ function Startup() {
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : 'Your choice could not be saved. Try again.';
+      setHandingOff(false);
       setWelcomeError(message);
       if (choice.continued) setStatus({ phase: 'error', error: message });
       throw cause;
@@ -178,12 +181,22 @@ function Startup() {
     }
   }
 
-  if (firstSetup && welcome && !welcome.continued && welcomeStep !== 'waiting')
+  if (
+    firstSetup &&
+    welcome &&
+    welcomeStep !== 'waiting' &&
+    (!welcome.continued ||
+      (handingOff &&
+        status.engineReady &&
+        status.phase !== 'error' &&
+        status.runtime?.phase !== 'error' &&
+        !status.windowError))
+  )
     return (
       <>
         <div className="titlebar" aria-hidden="true" />
         <OnboardingFrame step={welcomeStep}>
-          <div className="ob-screen" inert={busy}>
+          <div className="ob-screen" inert={busy || handingOff} aria-busy={busy || handingOff}>
             {welcomeStep === 'welcome' ? (
               <Welcome
                 arrived="forward"

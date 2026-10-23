@@ -24,7 +24,7 @@ import { ObjectStoreConflict, type PrivateObjectStore } from '../src/ports/objec
 import { createAgentRuntime } from '../src/runtime/index.ts';
 import { createPreferencesStore } from '../src/server/preferences.ts';
 import type { ThreadDependencies } from '../src/server/thread.ts';
-import type { SubmitMessageResponse, Task } from '../src/shared/contracts.ts';
+import type { Connection, SubmitMessageResponse, Task } from '../src/shared/contracts.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { createMemoryLearning } from '../src/server/memory-learning.ts';
 import { createMemoryService } from '../src/server/memory.ts';
@@ -147,6 +147,8 @@ test(
     let briefAnswer: () => unknown = () => null;
     let planGate: Promise<void> | undefined;
     let inbox: InboxSnippet[] = [];
+    let inboxReads = 0;
+    const suggestionApps = new Map<string, Connection[]>();
     const onboardingFor = (owner: string, configured = () => true) =>
       createOnboardingSuggestions({
         ownerId: owner,
@@ -167,8 +169,12 @@ test(
           },
         },
         answers: async () => [`Working on: a synthetic newsletter for ${owner}`],
-        gmail: async () => currentApps.some((app) => app.slug === 'gmail'),
-        inbox: async () => structuredClone(inbox),
+        apps: async (requestedOwner) =>
+          structuredClone(suggestionApps.get(requestedOwner) ?? currentApps),
+        inbox: async () => {
+          inboxReads++;
+          return structuredClone(inbox);
+        },
         telegram: async () => false,
         mailCheck: async (email) => /verification code/i.test(`${email.subject}\n${email.text}`),
       });
@@ -1861,6 +1867,7 @@ test(
             owner: ownerId,
             input: {
               answers: [`Working on: a synthetic newsletter for ${ownerId}`],
+              apps: [{ slug: 'gmail', name: 'Gmail' }],
               inbox: [
                 {
                   subject: 'Venue shortlist for the launch',
@@ -1921,6 +1928,147 @@ test(
             (await request('GET', '/api/onboarding/introduction')).json(),
             introduction,
           );
+        },
+      );
+
+      await t.test(
+        'first tasks refresh owned tools at delivery and exclude unhealthy Gmail from reads and sources',
+        async () => {
+          const firstOwner = 'synthetic-tools-owner';
+          const otherOwner = 'synthetic-tools-other-owner';
+          const connection = (
+            slug: string,
+            name: string,
+            extra: Partial<Connection> = {},
+          ): Connection => ({
+            slug,
+            name,
+            status: 'connected',
+            connectionId: randomUUID(),
+            accountId: randomUUID(),
+            accountName: 'Synthetic private account label',
+            accountEmail: 'private@example.test',
+            description: 'Synthetic private account content',
+            triggersEnabled: false,
+            ...extra,
+          });
+          const first = [
+            connection('slack', 'Slack'),
+            connection('slack', 'Slack'),
+            connection('notion', 'Notion', { disconnectPending: true }),
+            connection('outlook', 'Outlook', { reconnectRequired: true }),
+            connection('gmail', 'Gmail', { reconnectRequired: true }),
+            connection('gmail', 'Gmail', { disconnectPending: true }),
+            connection('linear', 'Linear', { status: 'disconnected' }),
+            connection('github', 'GitHub', { status: 'not_configured' }),
+            connection('browser', 'Saved website', { savedLogin: true }),
+            connection('n8n', 'n8n', { direct: true, connectionId: undefined }),
+          ];
+          suggestionApps.set(firstOwner, first);
+          suggestionApps.set(otherOwner, [connection('notion', 'Notion')]);
+          const firstPlans = onboardingFor(firstOwner);
+          const otherPlans = onboardingFor(otherOwner);
+          const previousInboxReads = inboxReads;
+          let immediate = 'Review recent Slack decisions';
+          planAnswer = () => ({
+            intro: 'Here are a few ideas to get started.',
+            tasks: [
+              { kind: 'now', title: immediate, source: 'web' },
+              { kind: 'ongoing', title: 'Research newsletter topics every Monday', source: 'web' },
+              { kind: 'ongoing', title: 'Review the newsletter plan every Friday', source: 'web' },
+            ],
+          });
+          try {
+            await firstPlans.initialize();
+            await otherPlans.initialize();
+            const cached = await firstPlans.prepare();
+            assert.equal(cached.tasks[0].title, immediate);
+            const initial = planInputs.at(-1)!;
+            assert.deepEqual(initial, {
+              owner: firstOwner,
+              input: {
+                answers: [`Working on: a synthetic newsletter for ${firstOwner}`],
+                apps: [
+                  { slug: 'slack', name: 'Slack' },
+                  { slug: 'n8n', name: 'n8n' },
+                ],
+                sources: ['web'],
+              },
+            });
+            await otherPlans.prepare();
+            assert.deepEqual(planInputs.at(-1), {
+              owner: otherOwner,
+              input: {
+                answers: [`Working on: a synthetic newsletter for ${otherOwner}`],
+                apps: [{ slug: 'notion', name: 'Notion' }],
+                sources: ['web'],
+              },
+            });
+            let unhealthyReads = 0;
+            await firstPlans.briefInbox(async () => {
+              unhealthyReads++;
+              return [];
+            });
+            assert.equal(unhealthyReads, 0);
+            await db.pool.query('UPDATE onboarding_suggestions SET brief=$2 WHERE owner_id=$1', [
+              firstOwner,
+              {
+                summary: 'Synthetic stale Gmail context',
+                waiting: [],
+                recurring: [],
+                upcoming: [],
+              },
+            ]);
+            assert.equal(await firstPlans.currentBrief(), undefined);
+            assert.equal(
+              (
+                await db.pool.query('SELECT 1 FROM messages WHERE owner_id=ANY($1)', [
+                  [firstOwner, otherOwner],
+                ])
+              ).rowCount,
+              0,
+            );
+            first[0]!.disconnectPending = true;
+            first[1]!.status = 'disconnected';
+            first.push(connection('googlecalendar', 'Google Calendar'));
+            immediate = 'Review my upcoming calendar events';
+            const plansBeforeDelivery = planInputs.length;
+            await firstPlans.complete();
+            await firstPlans.delivered();
+            assert.equal(planInputs.length, plansBeforeDelivery + 1);
+            assert.deepEqual(planInputs.at(-1), {
+              owner: firstOwner,
+              input: {
+                answers: [`Working on: a synthetic newsletter for ${firstOwner}`],
+                apps: [
+                  { slug: 'n8n', name: 'n8n' },
+                  { slug: 'googlecalendar', name: 'Google Calendar' },
+                ],
+                sources: ['web'],
+              },
+            });
+            assert.equal(inboxReads, previousInboxReads);
+            const posted = await db.pool.query(
+              'SELECT suggestions FROM messages WHERE owner_id=$1 AND suggestions IS NOT NULL',
+              [firstOwner],
+            );
+            assert.equal(posted.rowCount, 1);
+            assert.equal(posted.rows[0].suggestions.tasks[0].title, immediate);
+            assert.notEqual(posted.rows[0].suggestions.tasks[0].title, cached.tasks[0].title);
+            await firstPlans.complete();
+            await firstPlans.delivered();
+            assert.equal(planInputs.length, plansBeforeDelivery + 1);
+          } finally {
+            planAnswer = () => null;
+            suggestionApps.delete(firstOwner);
+            suggestionApps.delete(otherOwner);
+            await db.pool.query('DELETE FROM onboarding_suggestions WHERE owner_id=ANY($1)', [
+              [firstOwner, otherOwner],
+            ]);
+            await db.pool.query('DELETE FROM messages WHERE owner_id=ANY($1)', [
+              [firstOwner, otherOwner],
+            ]);
+          }
         },
       );
 
@@ -2217,6 +2365,7 @@ test(
             owner,
             input: {
               answers: [`Working on: a synthetic newsletter for ${owner}`],
+              apps: [{ slug: 'gmail', name: 'Gmail' }],
               brief: {
                 summary: 'Runs a synthetic launch with Riley.',
                 waiting: ['Sign the venue contract for Riley', 'Write back to riley@example.test'],

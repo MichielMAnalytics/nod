@@ -18,6 +18,7 @@ import { AppDiscoveryDialog } from '../components/app-discovery-dialog';
 import { AppAccountManager } from '../components/app-account-manager';
 import { api, errorMessage } from '../lib/api';
 import { connectionUrl } from '../lib/connection-url';
+import { searchApps } from '../lib/app-search';
 import { desktopLinksAvailable, openConnection } from '../lib/desktop';
 import { connectionGroups, connectionIssue, removeConnection } from '../lib/secondary-pages';
 import { usePageData } from '../hooks/use-page-data';
@@ -216,7 +217,13 @@ export function Apps({
   const dialogService = useRef('');
   const actionRequest = useRef<AbortController | null>(null);
   const locked = Boolean(busy);
-  const groups = connectionGroups(connections ?? [], catalog ?? []);
+  const groups = connectionGroups(connections ?? [], catalog ?? []).map((group) => ({
+    ...group,
+    name: group.service.name,
+    slug: group.service.slug,
+    description: group.service.description ?? '',
+    category: (group.service.categories ?? []).join(' '),
+  }));
   const managed = groups.find((group) => group.key === manageService);
   const manageError = managed?.key === connectErrorService ? error : '';
   const categories = [
@@ -226,16 +233,12 @@ export function Apps({
     categoryLabel(name).toLocaleLowerCase().includes(categoryQuery.trim().toLocaleLowerCase()),
   );
   const search = query.trim().toLocaleLowerCase();
-  const filtered = groups.filter(
+  const filtered = searchApps(groups, query).filter(
     (group) =>
-      (!selectedCategories.length ||
-        group.service.categories?.some((category) =>
-          selectedCategories.includes(categoryKey(category)),
-        )) &&
-      (!search ||
-        `${group.service.name} ${group.service.slug} ${group.service.description ?? ''}`
-          .toLocaleLowerCase()
-          .includes(search)),
+      !selectedCategories.length ||
+      group.service.categories?.some((category) =>
+        selectedCategories.includes(categoryKey(category)),
+      ),
   );
   const connected = filtered.filter((group) => group.accounts.length);
   const available = filtered.filter((group) => !group.accounts.length);
