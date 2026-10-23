@@ -74,9 +74,10 @@ import { usagePdf } from '../src/server/usage-report.ts';
 import type { TrustEntry } from '../src/shared/trust.ts';
 import { createAppGrantVault } from '../src/server/vault-app-grants.ts';
 import { createWorkAdmission } from '../src/server/work-admission.ts';
-import { integrationServiceIds } from '../src/shared/integrations.ts';
+import { integrationServiceIds, integrationServices } from '../src/shared/integrations.ts';
 import { connectedGmail } from '../src/shared/onboarding.ts';
 import { fileBytes } from '../src/shared/files.ts';
+import { connectionGroups } from '../src/web/lib/secondary-pages.ts';
 import { fakeComputer, fakeExecution, fakeWorkspace } from './runtime-fixtures.ts';
 
 const fixtureIdentityCheckpoint = {
@@ -3072,6 +3073,66 @@ async function appsFixture(
   };
 }
 
+test('app groups retain service metadata and account identity when catalog data is missing', () => {
+  const gmail: AppConnection = {
+    slug: 'gmail',
+    name: 'gmail',
+    status: 'connected',
+    connectionId: 'owned-gmail',
+    triggersEnabled: false,
+  };
+  const notes: AppConnection = {
+    slug: 'custom_notes',
+    name: 'Custom Notes',
+    description: 'Work with saved notes.',
+    status: 'connected',
+    connectionId: 'owned-notes',
+    triggersEnabled: false,
+  };
+  for (const catalog of [
+    [],
+    [
+      { slug: 'gmail', name: 'gmail', description: '' },
+      { slug: 'custom_notes', name: ' ', description: ' ' },
+    ].map((service): AppConnection => ({
+      ...service,
+      status: 'disconnected',
+      triggersEnabled: false,
+    })),
+  ]) {
+    const groups = connectionGroups([gmail, notes], catalog);
+    const mail = groups.find((group) => group.key === 'gmail')!;
+    assert.equal(mail.service.name, integrationServices.gmail.name);
+    assert.equal(mail.service.description, integrationServices.gmail.description);
+    assert.equal(mail.service.status, 'connected');
+    assert.deepEqual(mail.accounts, [gmail]);
+    const custom = groups.find((group) => group.key === 'custom_notes')!;
+    assert.equal(custom.service.name, notes.name);
+    assert.equal(custom.service.description, notes.description);
+    assert.deepEqual(custom.accounts, [notes]);
+  }
+  const native = { ...notes, connectionId: undefined, status: 'disconnected' as const };
+  const mcp = { ...notes, slug: 'custom_notes_mcp', name: 'Custom Notes MCP' };
+  const catalog: AppConnection = {
+    slug: notes.slug,
+    name: notes.name,
+    description: '',
+    status: 'disconnected',
+    triggersEnabled: false,
+    logoUrl: 'https://assets.example.test/notes.svg',
+    categories: ['Productivity'],
+  };
+  const [group] = connectionGroups([native, mcp], [catalog]);
+  assert.equal(group.service.description, notes.description);
+  assert.equal(group.service.logoUrl, catalog.logoUrl);
+  assert.deepEqual(group.service.categories, catalog.categories);
+  assert.deepEqual(group.accounts, [mcp]);
+  const [available] = connectionGroups([native], [catalog]);
+  assert.equal(available.service.description, notes.description);
+  const [described] = connectionGroups([notes], [{ ...catalog, description: 'Catalog purpose.' }]);
+  assert.equal(described.service.description, 'Catalog purpose.');
+});
+
 test(
   'managed app discovery keeps consent and underscore tool routing bound to owned accounts',
   { skip: !process.env.TEST_DATABASE_URL },
@@ -3089,9 +3150,22 @@ test(
           logoUrl: 'https://logos.composio.dev/api/foo_mcp',
           categories: ['Productivity', 'Meetings'],
         },
-        { slug: 'gmail', name: 'Gmail', description: '', categories: ['Email'] },
+        {
+          slug: 'gmail',
+          name: 'gmail',
+          description: '',
+          logoUrl: 'https://logos.composio.dev/api/gmail',
+          categories: ['Email'],
+        },
       ];
     };
+    const catalog = await f.app.inject({ url: '/api/apps/catalog' });
+    assert.equal(catalog.statusCode, 200, catalog.body);
+    const mail = catalog.json<AppConnection[]>().find((service) => service.slug === 'gmail')!;
+    assert.equal(mail.name, integrationServices.gmail.name);
+    assert.equal(mail.description, integrationServices.gmail.description);
+    assert.equal(mail.logoUrl, 'https://logos.composio.dev/api/gmail');
+    assert.deepEqual(mail.categories, ['Email']);
     const foo = await f.connect('foo');
     const consent = await f.app.inject({ method: 'POST', url: '/api/apps/foo_mcp/connect' });
     assert.equal(consent.statusCode, 200, consent.body);

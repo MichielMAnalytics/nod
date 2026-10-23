@@ -158,8 +158,8 @@ async function prepare(options, onComputerStart) {
   });
   let downloading = runtimeAssets.paths.length > 0;
   let waiting;
-  const status = (phase, message) => {
-    const value = { phase, message };
+  const status = (phase, message, stage = 'computer') => {
+    const value = { phase, message, stage };
     if (downloading) waiting = value;
     else onStatus(value);
   };
@@ -537,7 +537,7 @@ export async function finishRuntime({
   onStorageReady,
   runtimeReady,
 }) {
-  status('starting', 'Preparing secure storage and tools…');
+  status('starting', 'Preparing secure storage and tools…', 'storage');
   const images = {};
   const loadImage = (name) => {
     images[name] = Promise.resolve().then(() => prepareImage?.(name));
@@ -572,7 +572,7 @@ export async function finishRuntime({
   const storage = storageReady.get(resolve(dataRoot));
   const port =
     process.platform === 'win32' ? (storage?.port ?? (await availablePort())) : saved.port;
-  status('starting', 'Starting your database…');
+  status('starting', 'Starting your database…', 'storage');
   const postgres = await replaceContainer(
     runDocker,
     names.postgres,
@@ -602,7 +602,7 @@ export async function finishRuntime({
     },
   );
   const databaseUrl = `postgresql://nod:${saved.password}@127.0.0.1:${port}/nod`;
-  status('starting', 'Waiting for your database to be ready…');
+  status('starting', 'Waiting for your database to be ready…', 'storage');
   try {
     await waitFor(
       () => runDocker(['exec', names.postgres, 'pg_isready', '-U', 'nod', '-d', 'nod']),
@@ -695,7 +695,7 @@ exec "$docker" "$@"
   signal?.throwIfAborted();
   await onStorageReady?.(runtime);
   signal?.throwIfAborted();
-  status('starting', 'Preparing your workspace…');
+  status('starting', 'Preparing your workspace…', 'workspace');
   await images.workspace;
   await replaceContainer(
     runDocker,
@@ -724,7 +724,7 @@ exec "$docker" "$@"
     ],
     { command: ['infinity'] },
   );
-  status('starting', 'Preparing your browser…');
+  status('starting', 'Preparing your browser…', 'browser');
   await images.browser;
   await replaceContainer(runDocker, names.browser, image('browser'), [
     '--network',
@@ -770,7 +770,7 @@ exec "$docker" "$@"
   );
   await runtimeReady;
   await removeStaleImages(runDocker, runGuest, manifest).catch(() => {});
-  status('ready', 'Your private computer is ready.');
+  status('ready', 'Your private computer is ready.', 'ready');
   return runtime;
 }
 

@@ -1,7 +1,16 @@
 import type { Connection } from './contracts.ts';
 
-export const onboardingSteps = ['welcome', 'intro', 'email', 'brain', 'apps', 'messaging'] as const;
+export const onboardingSteps = [
+  'welcome',
+  'intro',
+  'email',
+  'calendar',
+  'brain',
+  'apps',
+  'messaging',
+] as const;
 export const onboardingEmailProviders = ['gmail', 'outlook'] as const;
+export const onboardingCalendarProviders = ['googlecalendar', 'outlook'] as const;
 export const onboardingVersion = 2;
 export type OnboardingStep = (typeof onboardingSteps)[number];
 export function connectedGmail(connection: Connection) {

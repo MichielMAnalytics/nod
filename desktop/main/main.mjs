@@ -114,9 +114,11 @@ let status = {
   platform: process.platform,
   unlockingKeys: false,
   phase: 'idle',
+  stage: 'computer',
   message: 'Set up nod on your computer.',
   runtime: {
     phase: 'idle',
+    stage: 'computer',
     message: 'Your computer will prepare in the background.',
     needsRuntimeArchive: false,
   },
@@ -171,6 +173,7 @@ const lifecycle = createDesktopLifecycle({
       update({
         runtime,
         phase: 'preparing',
+        stage: runtime.stage,
         message: runtime.message,
         progress: value.progress,
         needsRuntimeArchive: false,
@@ -1005,6 +1008,7 @@ async function finishEnginePreparation(pending = false) {
   }
   update({
     phase: pending ? 'preparing' : 'ready',
+    stage: pending ? status.runtime.stage : 'ready',
     message: pending ? status.runtime.message : 'nod is running on your computer.',
     progress: pending ? status.runtime.progress : undefined,
     engineReady: true,
@@ -1309,13 +1313,23 @@ async function startEngine({ runtime, signal, pending = false }) {
     await stopEngine();
   }
   if (quitting) throw new Error('nod is closing.');
+  const startup = setupWindow;
+  if (startup && pendingRenderers.has(startup)) await setupWindowLoaded;
+  if (quitting || signal.aborted) throw new Error('nod is closing.');
+  if (startup?.isDestroyed() || status.windowError)
+    throw new Error('nod could not open setup. Reopen the window, then try again.');
   const port = await availablePort();
   if (quitting || signal.aborted) throw new Error('nod is closing.');
   engineBound = false;
   authToken = randomBytes(32).toString('base64url');
   knownSecrets.add(authToken);
   engineOrigin = `http://127.0.0.1:${port}`;
-  update({ phase: 'starting', message: 'Unlocking your saved API keys…', unlockingKeys: true });
+  update({
+    phase: 'starting',
+    stage: 'storage',
+    message: 'Unlocking your saved API keys…',
+    unlockingKeys: true,
+  });
   await new Promise((accept) => setTimeout(accept, 50));
   if (quitting || signal.aborted) throw new Error('nod is closing.');
   const providerEnvironment = await settings.environment();
@@ -1372,7 +1386,7 @@ async function startEngine({ runtime, signal, pending = false }) {
   let diagnostics = '';
   let failure = '';
   child.stderr?.on('data', (chunk) => {
-    if (status.phase !== 'starting') return;
+    if (enginePreferencesReady && engineRuntimeReady) return;
     diagnostics = (diagnostics + chunk.toString()).slice(-4000);
     const lines = diagnostics.split('\n');
     diagnostics = lines.pop() || '';
@@ -1387,6 +1401,12 @@ async function startEngine({ runtime, signal, pending = false }) {
   });
   child.on('exit', (code) => {
     if (engine !== child) return;
+    if (!closingEngine)
+      failure =
+        (status.phase === 'error' && status.error) ||
+        (status.runtime.phase === 'error' && status.runtime.message) ||
+        failure ||
+        `nod’s background service stopped${enginePreferencesReady ? '' : ' before it was ready'}${Number.isInteger(code) ? ` (code ${code})` : ''}. Try again to restart it.`;
     stopNotifications?.();
     stopNotifications = undefined;
     if (!closingEngine) void writeDiagnostic(`Engine exited with code ${code}.`).catch(() => {});
@@ -1402,10 +1422,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     if (!quitting && !closingEngine) {
       update({
         phase: 'error',
-        message: 'nod stopped unexpectedly.',
-        error: 'Open settings and choose Start nod to recover.',
+        message: failure,
+        error: failure,
       });
-      showSettings();
+      showSettings('general', true);
     }
   });
   const deadline = Date.now() + 120_000;
@@ -1422,14 +1442,20 @@ async function startEngine({ runtime, signal, pending = false }) {
   }
   if (!ready) {
     await stopEngine();
-    throw new Error(failure || 'nod could not start. Check your settings and try again.');
+    throw new Error(
+      failure || 'nod’s background service did not respond. Try again to restart it.',
+    );
   }
   enginePreferencesReady = true;
   return finishEnginePreparation(pending);
 }
 
 async function prepare(options = {}) {
-  if (preparing) return preparing;
+  if (preparing) {
+    const retryAfterFailure = options?.retry === true && status.phase === 'error';
+    await preparing;
+    return retryAfterFailure ? prepare(options) : status;
+  }
   update({
     phase: 'preparing',
     windowError: undefined,
@@ -1836,8 +1862,9 @@ else {
         onboardingCompleted = saved.onboardingCompleted;
         applyPreferences(saved);
         guidedStartup = !saved.onboardingCompleted;
-        await showSettings('general', true);
-        if (setupWindow && !setupWindow.isDestroyed()) void prepare();
+        const presented = showSettings('general', true);
+        void prepare();
+        await presented;
       } catch (error) {
         showSettings('general', true);
         update({ phase: 'error', message: bounded(error.message), error: bounded(error.message) });

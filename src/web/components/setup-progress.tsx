@@ -19,7 +19,6 @@ export function SetupProgress({
     typeof displayProgress === 'number' && Number.isFinite(displayProgress)
       ? Math.max(0, Math.min(1, displayProgress))
       : undefined;
-  const percent = fraction === undefined ? undefined : Math.round(fraction * 100);
 
   useLayoutEffect(() => {
     if (!error) setDisplayProgress(progress);
@@ -79,11 +78,13 @@ export function SetupProgress({
           {description && <p>{description}</p>}
           {error && <p data-analytics-private>{error}</p>}
         </div>
-        {percent !== undefined && !error && (
-          <div className="setup-progress-download">
-            <progress aria-label="Download progress" max={100} value={percent} />
-            <span aria-hidden="true">{percent}%</span>
-          </div>
+        {fraction !== undefined && !error && (
+          <progress
+            className="setup-progress-download"
+            aria-label="Download progress"
+            max={1}
+            value={fraction}
+          />
         )}
         {children && <div className="setup-progress-actions">{children}</div>}
       </div>

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react';
 import type { AccountPreparationResponse, AccountUser } from '../../../shared/account';
+import { startupMessage } from '../../../shared/desktop-startup';
 import type { ModelsResponse } from '../../../shared/models';
 import {
   onboardingSteps,
@@ -25,6 +26,7 @@ import { Welcome } from './steps/welcome';
 import { Introduction } from './steps/intro';
 import { Brain } from './steps/brain';
 import { Email } from './steps/email';
+import { Calendar } from './steps/calendar';
 import { Apps } from './steps/apps';
 import { Messaging } from './steps/messaging';
 import { desktopOnboardingSteps, OnboardingFrame } from './frame';
@@ -43,6 +45,7 @@ const screens: Record<OnboardingStep, ComponentType<StepProps>> = {
   intro: Introduction,
   brain: Brain,
   email: Email,
+  calendar: Calendar,
   apps: Apps,
   messaging: Messaging,
 };
@@ -274,7 +277,7 @@ export function Onboarding({
   }
 
   function skipped() {
-    if (step === 'email' || step === 'messaging')
+    if (step === 'email' || step === 'calendar' || step === 'messaging')
       captureAnalytics('nod_onboarding_step_skipped', { step });
   }
 
@@ -300,8 +303,8 @@ export function Onboarding({
     const activeRuntime = runtime && runtime.phase !== 'ready' ? runtime : runtimeStatus;
     const title =
       preparation === 'ready'
-        ? 'Finishing setup…'
-        : activeRuntime?.message || 'Preparing nod’s workspace…';
+        ? startupMessage('ready')
+        : startupMessage(activeRuntime?.stage ?? 'workspace');
     return (
       <SetupProgress
         title={failure ? 'Setup needs another try.' : title}

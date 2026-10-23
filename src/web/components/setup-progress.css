@@ -89,11 +89,6 @@
   gap: 12px;
 }
 .setup-progress-download {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-.setup-progress-download progress {
   position: absolute;
   width: 1px;
   height: 1px;

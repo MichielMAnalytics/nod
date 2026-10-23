@@ -129,7 +129,11 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
   const { revealed, typing, done, skip } = useReveal(sequence, { enabled: arrived === 'forward' });
   const models = useModels();
   const [connected, setConnected] = useState<ModelProvider | null>(null);
-  const flow = useModelSignIn(models, setConnected);
+  const [changing, setChanging] = useState<string>();
+  const flow = useModelSignIn(models, (provider) => {
+    setChanging(undefined);
+    setConnected(provider);
+  });
   const data = models.data;
   const [choice, setChoice] = useState<ModelProvider>();
   const [key, setKey] = useState('');
@@ -221,6 +225,7 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
     models.setError('');
     if (next === provider) return;
     setConnected(null);
+    setChanging(undefined);
     if (flow.signIn) void flow.cancel();
     setChoice(next);
     setKey('');
@@ -237,7 +242,9 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
     setKeyError('');
     const reconnect = connections.find(
       (item) =>
-        item.provider === provider && item.status === 'reconnect' && item.method !== 'api_key',
+        item.provider === provider &&
+        item.method !== 'api_key' &&
+        (changing ? item.id === changing : item.status === 'reconnect'),
     );
     void flow.connect(provider, reconnect?.id);
   }
@@ -269,6 +276,7 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
         },
       );
       models.update(() => result);
+      setChanging(undefined);
       setConnected(provider);
       setKey('');
       setUrl(localServerAddress);
@@ -294,7 +302,7 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
           <p className="ob-brain-wait">Loading…</p>
         </div>
       );
-    if (shown)
+    if (shown && changing !== shown.id)
       return (
         <div className="ob-brain-status">
           <span className="ob-brain-icon ob-brain-done" aria-hidden="true">
@@ -330,10 +338,29 @@ export function Brain({ arrived, onNext, onBack }: StepProps) {
               Refresh models
             </Button>
           )}
+          {!ready && (shown.status === 'loading' || (!recommendation && !ownerChooses(shown))) && (
+            <Button
+              variant="ghost"
+              disabled={locked}
+              onClick={() => {
+                setChanging(shown.id);
+                setConnected(null);
+                models.setError('');
+                setKeyError('');
+                requestAnimationFrame(() => keyField.current?.focus());
+              }}
+            >
+              {shown.provider === 'compatible'
+                ? 'Change server'
+                : shown.method === 'api_key'
+                  ? 'Use another API key'
+                  : 'Use another account'}
+            </Button>
+          )}
           {shown.status === 'connected' && !ready && !recommendation && !ownerChooses(shown) && (
             <Problem>
-              The default model isn’t available for this account. Refresh the models or choose
-              another provider.
+              No supported models are available for this account. Refresh the models or try another
+              connection.
             </Problem>
           )}
           <Problem>{models.error}</Problem>

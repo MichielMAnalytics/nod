@@ -5,10 +5,18 @@ import { analyticsRoute, recordingOptions, sanitizedAnalyticsUrl } from './analy
 
 type AnalyticsEvents = {
   nod_onboarding_step_viewed: {
-    step: 'welcome' | 'intro' | 'brain' | 'email' | 'apps' | 'messaging' | 'launch_at_login';
+    step:
+      | 'welcome'
+      | 'intro'
+      | 'brain'
+      | 'email'
+      | 'calendar'
+      | 'apps'
+      | 'messaging'
+      | 'launch_at_login';
     direction: 'forward' | 'back';
   };
-  nod_onboarding_step_skipped: { step: 'email' | 'messaging' };
+  nod_onboarding_step_skipped: { step: 'email' | 'calendar' | 'messaging' };
   nod_settings_viewed: {
     tab: 'general' | 'models' | 'app_connections' | 'memory';
   };
@@ -71,10 +79,19 @@ export type AnalyticsProperties<Event extends keyof AnalyticsEvents> = NonNullab
 const roles = ['assistant', 'user'];
 const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unknown[]>> = {
   nod_onboarding_step_viewed: {
-    step: ['welcome', 'intro', 'brain', 'email', 'apps', 'messaging', 'launch_at_login'],
+    step: [
+      'welcome',
+      'intro',
+      'brain',
+      'email',
+      'calendar',
+      'apps',
+      'messaging',
+      'launch_at_login',
+    ],
     direction: ['forward', 'back'],
   },
-  nod_onboarding_step_skipped: { step: ['email', 'messaging'] },
+  nod_onboarding_step_skipped: { step: ['email', 'calendar', 'messaging'] },
   nod_settings_viewed: {
     tab: ['general', 'models', 'app_connections', 'memory'],
   },

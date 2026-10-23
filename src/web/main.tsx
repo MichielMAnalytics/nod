@@ -34,7 +34,7 @@ import './pages/onboarding/onboarding.css';
 import './pages/onboarding/steps/welcome.css';
 import './pages/onboarding/steps/intro.css';
 import './pages/onboarding/steps/brain.css';
-import './pages/onboarding/steps/email.css';
+import './pages/onboarding/steps/personal-connection.css';
 import './pages/onboarding/steps/apps.css';
 import './pages/onboarding/steps/messaging.css';
 import './components/app-account-manager.css';

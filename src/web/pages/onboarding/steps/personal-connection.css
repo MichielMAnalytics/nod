@@ -1,18 +1,18 @@
-.ob-email-choices {
+.ob-personal-choices {
   display: grid;
   gap: 16px;
 }
-.ob-email-benefits,
-.ob-email-muted,
-.ob-email-connected {
+.ob-personal-benefits,
+.ob-personal-muted,
+.ob-personal-connected {
   color: var(--muted-foreground);
   font-size: var(--text-control);
 }
-.ob-email-providers {
+.ob-personal-providers {
   display: grid;
   gap: 12px;
 }
-.ob-email-provider {
+.ob-personal-provider {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -22,44 +22,44 @@
   border-radius: var(--dialog-radius);
   background: var(--surface);
 }
-.ob-email-provider > .service-logo {
+.ob-personal-provider > .service-logo {
   flex-shrink: 0;
 }
-.ob-email-identity {
+.ob-personal-identity {
   display: grid;
   flex: 1;
   gap: 2px;
   min-width: 0;
   font-size: var(--text-control);
 }
-.ob-email-identity > span {
+.ob-personal-identity > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ob-email-retry,
-.ob-email-waiting {
+.ob-personal-retry,
+.ob-personal-waiting {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: var(--text-control);
 }
-.ob-email-provider > .ob-email-retry {
+.ob-personal-provider > .ob-personal-retry {
   flex-basis: 100%;
 }
-.ob-email-waiting {
+.ob-personal-waiting {
   color: var(--muted-foreground);
 }
-.ob-email-waiting > p {
+.ob-personal-waiting > p {
   flex: 1 1 200px;
 }
-.ob-email-error {
+.ob-personal-error {
   color: var(--error);
   font-size: var(--text-control);
 }
 @media (max-width: 640px) {
-  .ob-email-provider {
+  .ob-personal-provider {
     padding: 16px;
   }
 }

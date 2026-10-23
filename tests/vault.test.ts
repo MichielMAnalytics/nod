@@ -5003,6 +5003,19 @@ assert.deepEqual(captured, []);
 await act(async () => button('Let’s go').click());
 await settle();
 assert.deepEqual(steps(), [['nod_onboarding_step_viewed', 'email', 'forward']]);
+await act(async () => button('Skip for now').click());
+await settle();
+assert.equal(document.querySelector('.ob').dataset.step, 'calendar');
+await act(async () => button('Skip for now').click());
+await settle();
+assert.equal(document.querySelector('.ob').dataset.step, 'brain');
+assert.deepEqual(steps(), [
+  ['nod_onboarding_step_viewed', 'email', 'forward'],
+  ['nod_onboarding_step_skipped', 'email', undefined],
+  ['nod_onboarding_step_viewed', 'calendar', 'forward'],
+  ['nod_onboarding_step_skipped', 'calendar', undefined],
+  ['nod_onboarding_step_viewed', 'brain', 'forward'],
+]);
 await act(async () => root.unmount());
 captured.length = 0;
 deferPreparation = true;
@@ -5480,6 +5493,7 @@ const {createElement,act}=await import('react');
 const {createRoot}=await import('react-dom/client');
 const {Brain}=await import('./src/web/pages/onboarding/steps/brain.tsx');
 const {Email}=await import('./src/web/pages/onboarding/steps/email.tsx');
+const {Calendar}=await import('./src/web/pages/onboarding/steps/calendar.tsx');
 const {Messaging}=await import('./src/web/pages/onboarding/steps/messaging.tsx');
 const {pageDataCache}=await import('./src/web/lib/page-data-cache.ts');
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
@@ -5503,13 +5517,19 @@ let select;
 let oauth;
 let gmailConnected=false;
 let outlookConnected=false;
-let connectingEmail='gmail';
+let outlookReconnect=false;
+let calendarConnected=false;
+let calendarAvailable=true;
+let connectingService='gmail';
+const connectCalls=[];
+const reconnectCalls=[];
+let otherGmailConnected=false;
 let disconnectPending=false;
 let disconnectCalls=0;
 let failDisconnect=true;
 let gmailReconnect=false;
-let gmailCompleted=false;
-let gmailMissing=false;
+let appCompleted=false;
+let appMissing=false;
 let failApps=false;
 let failTelegram=true;
 let failChannelLoad=false;
@@ -5517,6 +5537,7 @@ let whatsapp;
 const whatsappWrites=[];
 let telegram={provider:'telegram',enabled:true,mode:'polling',accountHandle:'@fixture_bot',pairingCandidate:{id:'123456',name:'Fixture'},pairingExpiresAt:new Date(Date.now()+600000).toISOString()};
 const attempt='A'.repeat(43);
+let currentAttempt=attempt;
 window.fetch=globalThis.fetch=async(url,options={})=>{
   const path=new URL(url,window.location.href).pathname;
   const body=options.body?JSON.parse(options.body):{};
@@ -5531,8 +5552,8 @@ window.fetch=globalThis.fetch=async(url,options={})=>{
   if(path==='/api/models/oauth')return Response.json({attempt:'fixture-oauth',url:'https://auth.openai.com/authorize?fixture=1'});
   if(path==='/api/models/oauth/status/fixture-oauth')return new Promise(resolve=>{oauth=()=>resolve(Response.json({status:'connected'}));});
   if(path==='/api/configuration')return Response.json({integrationsReady:true});
-  if(path==='/api/apps')return failApps?Response.json({error:'Fixture account refresh failed'},{status:503}):Response.json([{slug:'gmail',name:'Gmail',status:gmailConnected?'connected':'disconnected',connectionId:gmailConnected||disconnectPending?'fixture-account':undefined,accountId:gmailConnected||disconnectPending?'fixture-gmail':undefined,reconnectRequired:gmailReconnect,disconnectPending},...(outlookConnected?[{slug:'outlook',name:'Outlook',status:'connected',connectionId:'fixture-outlook-account',accountId:'fixture-outlook'}]:[])]);
-  if(path==='/api/apps/catalog')return Response.json([{slug:'gmail',name:'Gmail',status:'disconnected'},{slug:'outlook',name:'Outlook',status:'disconnected'}]);
+  if(path==='/api/apps')return failApps?Response.json({error:'Fixture account refresh failed'},{status:503}):Response.json([{slug:'gmail',name:'Gmail',status:gmailConnected?'connected':'disconnected',connectionId:gmailConnected||disconnectPending?'fixture-account':undefined,accountId:gmailConnected||disconnectPending?'fixture-gmail':undefined,reconnectRequired:gmailReconnect,canReconnect:true,disconnectPending},...(otherGmailConnected?[{slug:'gmail',name:'Gmail',status:'connected',connectionId:'fixture-other-gmail-account',accountId:'fixture-other-gmail'}]:[]),...(outlookConnected?[{slug:'outlook',name:'Outlook',status:'connected',connectionId:'fixture-outlook-account',accountId:'fixture-outlook',reconnectRequired:outlookReconnect,canReconnect:true}]:[]),...(calendarConnected?[{slug:'googlecalendar',name:'Google Calendar',status:'connected',connectionId:'fixture-calendar-account',accountId:'fixture-calendar'}]:[])]);
+  if(path==='/api/apps/catalog')return Response.json([{slug:'gmail',name:'Gmail',status:'disconnected'},{slug:'outlook',name:'Outlook',status:'disconnected'},...(calendarAvailable?[{slug:'googlecalendar',name:'Google Calendar',status:'disconnected'}]:[])]);
   if(path==='/api/apps/gmail/accounts/fixture-account/disconnect'){
     assert.equal(options.method,'POST');
     assert.equal(options.body,undefined);
@@ -5541,12 +5562,17 @@ window.fetch=globalThis.fetch=async(url,options={})=>{
     disconnectPending=false;
     return Response.json({disconnected:true});
   }
-  if(path==='/api/apps/gmail/connect'||path==='/api/apps/outlook/connect'){
-    assert.deepEqual(body,{returnTo:'window'});
-    connectingEmail=path.split('/')[3];
-    return Response.json({url:'https://connect.composio.dev/link/fixture-'+connectingEmail,attempt});
+  if(path==='/api/apps/gmail/connect'||path==='/api/apps/outlook/connect'||path==='/api/apps/googlecalendar/connect'){
+    connectingService=path.split('/')[3];
+    if(body.connectionId){
+      assert.equal(connectingService,'gmail');
+      assert.deepEqual(body,{returnTo:'window',connectionId:'fixture-account'});
+      reconnectCalls.push(body.connectionId);
+    }else assert.deepEqual(body,{returnTo:'window'});
+    connectCalls.push(connectingService);
+    return Response.json({url:'https://connect.composio.dev/link/fixture-'+connectingService,attempt:currentAttempt});
   }
-  if(path==='/api/apps/setup-status')return Response.json({completed:gmailCompleted?body.hashes:[],apps:gmailMissing?[]:body.hashes.map(hash=>({hash,pairingConfirmed:true}))});
+  if(path==='/api/apps/setup-status')return Response.json({completed:appCompleted?body.hashes:[],apps:appMissing?[]:body.hashes.map(hash=>({hash,pairingConfirmed:true}))});
   if(path==='/api/channels')return failChannelLoad?Response.json({error:'Fixture channel refresh failed'},{status:503}):Response.json({channels:[],inbox:[],deliveries:[],error:null});
   if(path==='/api/channel-settings')return Response.json({ready:true,channels:[telegram,...(whatsapp?[whatsapp]:[])]});
   if(path==='/api/channel-settings/whatsapp'){
@@ -5625,8 +5651,35 @@ await act(async()=>pageDataCache.refresh('/api/apps',true));
 assert.equal(advances,0,'an inactive account cannot complete onboarding');
 gmailConnected=true;
 await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,0,'an account requiring sign-in cannot complete onboarding');
+assert.equal(document.querySelector('[data-provider="gmail"]').dataset.connected,'false');
+assert.ok(button('Continue').disabled);
+assert.equal(reconnectCalls.length,0,'an unhealthy account is never reconnected automatically');
+currentAttempt='B'.repeat(43);
+await click('Reconnect Gmail');
+assert.deepEqual(reconnectCalls,['fixture-account'],'reconnection must target the owned account');
+await click('Cancel');
+gmailReconnect=false;
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt:currentAttempt}}));
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,0,'a cancelled reconnect cannot advance after a late healthy account refresh');
+gmailReconnect=true;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+currentAttempt='C'.repeat(43);
+await click('Reconnect Gmail');
+assert.deepEqual(reconnectCalls,['fixture-account','fixture-account']);
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt}}));
+assert.equal(advances,0,'the previous callback cannot confirm reconnection');
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt:currentAttempt}}));
+assert.equal(advances,0,'confirmed sign-in still waits for a healthy owned account');
+otherGmailConnected=true;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,0,'another healthy account cannot complete the selected account reconnection');
+gmailReconnect=false;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
 await waitFor(()=>advances===1);
-assert.equal(gmailReconnect,true,'expired inbox history does not invalidate a connected account');
+otherGmailConnected=false;
+currentAttempt=attempt;
 await act(async()=>pageDataCache.refresh('/api/apps',true));
 assert.equal(advances,1);
 for(const direction of ['forward','back']){
@@ -5635,15 +5688,15 @@ for(const direction of ['forward','back']){
   assert.equal(advances,0,'cached email must not bounce '+direction);
 }
 for(const direction of ['forward','back']){
-  gmailConnected=false; gmailCompleted=false;
+  gmailConnected=false; appCompleted=false;
   await mount(Email,direction);
   await click('Connect Gmail');
-  gmailConnected=true; gmailCompleted=true;
+  gmailConnected=true; appCompleted=true;
   await act(async()=>window.dispatchEvent(new Event('focus')));
   await waitFor(()=>button('Continue')&&!button('Continue').disabled);
   assert.equal(advances,direction==='forward'?1:0,'confirmed polling only advances forward');
 }
-gmailConnected=false; gmailCompleted=false; gmailMissing=false;
+gmailConnected=false; appCompleted=false; appMissing=false;
 await mount(Email);
 await click('Connect Gmail');
 gmailConnected=true;
@@ -5651,20 +5704,20 @@ await act(async()=>window.dispatchEvent(new Event('focus')));
 await waitFor(()=>document.querySelector('[data-provider="gmail"][data-connected="true"]'));
 assert.doesNotMatch(document.body.textContent,/Gmail didn’t connect/);
 assert.equal(advances,0,'an account refresh cannot replace confirmation of this attempt');
-gmailCompleted=true;
+appCompleted=true;
 await act(async()=>window.dispatchEvent(new Event('focus')));
 await waitFor(()=>advances===1);
-gmailConnected=false; gmailCompleted=false; gmailMissing=false;
+gmailConnected=false; appCompleted=false; appMissing=false;
 await mount(Email);
 await click('Connect Gmail');
-gmailMissing=true;
+appMissing=true;
 await act(async()=>window.dispatchEvent(new Event('focus')));
 await waitFor(()=>document.body.textContent.includes('Gmail didn’t connect'));
 assert.equal(advances,0,'an absent attempt without completion remains a failure');
-gmailConnected=true; gmailCompleted=false; gmailMissing=false;
+gmailConnected=true; appCompleted=false; appMissing=false;
 await mount(Email);
 await click('Connect Outlook');
-assert.equal(connectingEmail,'outlook');
+assert.equal(connectingService,'outlook');
 await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt}}));
 assert.equal(advances,0,'a Gmail callback cannot confirm an Outlook attempt');
 await act(async()=>channel.onmessage({data:{connection:'connected',service:'outlook',attempt}}));
@@ -5673,7 +5726,7 @@ assert.equal(advances,0,'an existing Gmail account cannot substitute for the new
 outlookConnected=true;
 await act(async()=>pageDataCache.refresh('/api/apps',true));
 await waitFor(()=>advances===1);
-gmailConnected=false; outlookConnected=false; gmailCompleted=false; gmailMissing=false;
+gmailConnected=false; outlookConnected=false; appCompleted=false; appMissing=false;
 await mount(Email);
 await click('Connect Outlook');
 await click('Cancel');
@@ -5681,12 +5734,80 @@ outlookConnected=true;
 await act(async()=>channel.onmessage({data:{connection:'connected',service:'outlook',attempt}}));
 await act(async()=>pageDataCache.refresh('/api/apps',true));
 assert.equal(advances,0,'a cancelled Outlook attempt cannot advance after a late callback');
-gmailConnected=false; outlookConnected=false; gmailCompleted=false; gmailMissing=false;
+gmailConnected=false; outlookConnected=false; appCompleted=false; appMissing=false;
 await mount(Email);
 const previousDisconnects=disconnectCalls;
 await click('Skip for now');
 assert.equal(advances,1,'email can be skipped without a connection');
 assert.equal(disconnectCalls,previousDisconnects,'skipping never disconnects an account');
+gmailConnected=true;
+await mount(Calendar);
+assert.equal(button('Continue').disabled,true,'email access does not substitute for a calendar connection');
+await click('Connect Google Calendar');
+assert.equal(connectingService,'googlecalendar');
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'gmail',attempt}}));
+assert.equal(advances,0,'an email callback cannot confirm a calendar attempt');
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'googlecalendar',attempt:'B'.repeat(43)}}));
+assert.equal(advances,0,'a foreign calendar attempt cannot advance');
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'googlecalendar',attempt}}));
+assert.equal(advances,0,'calendar confirmation waits for its owned account');
+calendarConnected=true;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+await waitFor(()=>advances===1);
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,1);
+for(const direction of ['forward','back']){
+  await mount(Calendar,direction);
+  await waitFor(()=>button('Continue')&&!button('Continue').disabled);
+  assert.equal(advances,0,'cached calendar must not bounce '+direction);
+}
+calendarConnected=false;
+outlookConnected=true;
+outlookReconnect=true;
+const beforeOutlookReuse=connectCalls.length;
+await mount(Calendar);
+assert.ok(button('Continue').disabled,'an Outlook account requiring sign-in cannot satisfy calendar setup');
+assert.ok(button('Reconnect Outlook Calendar')&&!button('Reconnect Outlook Calendar').disabled);
+outlookReconnect=false;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+await waitFor(()=>document.querySelector('[data-provider="outlook"][data-connected="true"]'));
+assert.equal(button('Connect Outlook Calendar'),undefined);
+assert.equal(advances,0,'an existing Outlook account leaves calendar choice visible');
+await click('Continue');
+assert.equal(advances,1);
+assert.equal(connectCalls.length,beforeOutlookReuse,'email and calendar reuse the same Outlook connection');
+outlookConnected=false;
+await mount(Email);
+await click('Connect Outlook');
+const previousEmailChannel=channel;
+await click('Cancel');
+currentAttempt='B'.repeat(43);
+await mount(Calendar);
+await click('Connect Outlook Calendar');
+await act(async()=>previousEmailChannel.onmessage({data:{connection:'connected',service:'outlook',attempt}}));
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'outlook',attempt}}));
+outlookConnected=true;
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,0,'a cancelled email attempt cannot complete a new calendar attempt for the same provider');
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'outlook',attempt:currentAttempt}}));
+await waitFor(()=>advances===1);
+outlookConnected=false;
+calendarAvailable=false;
+await mount(Calendar);
+assert.equal(button('Connect Google Calendar').disabled,true,'calendar providers must exist in the configured catalog');
+const beforeCalendarSkip=connectCalls.length;
+await click('Skip for now');
+assert.equal(advances,1,'calendar can be skipped independently of email');
+assert.equal(connectCalls.length,beforeCalendarSkip);
+assert.equal(disconnectCalls,previousDisconnects,'calendar skip preserves existing email accounts');
+calendarAvailable=true;
+await mount(Calendar);
+await click('Connect Google Calendar');
+await click('Skip for now');
+calendarConnected=true;
+await act(async()=>channel.onmessage({data:{connection:'connected',service:'googlecalendar',attempt:currentAttempt}}));
+await act(async()=>pageDataCache.refresh('/api/apps',true));
+assert.equal(advances,1,'a late calendar callback cannot advance again after skipping');
 await mount(Messaging);
 const openTelegram=()=>[...document.querySelectorAll('.ob-messaging-card')].find(card=>card.textContent.includes('Telegram')).querySelector('button');
 await waitFor(()=>openTelegram());
@@ -5802,7 +5923,7 @@ window.fetch = globalThis.fetch = async (url, options = {}) => {
   if (path === '/api/preferences') return Response.json({timeZone:'Europe/Lisbon'});
   if (path === '/api/models') return failModels ? Response.json({error:'Synthetic model service is unavailable'}, {status:503}) : Response.json({connections:modelConnected?[{id:'synthetic-model',provider:'anthropic',method:'api_key',status:modelsStatus,label:'Synthetic model',managed:false,models:choices}]:[],selection:modelConnected?selection:null});
   if (path === '/api/apps') return Response.json(gmailConnected?[gmailAccount]:[{slug:'gmail',name:'Gmail',status:'disconnected'}]);
-  if (path === '/api/apps/catalog') return Response.json(['gmail','outlook'].map(slug=>({slug,name:slug,status:'disconnected'})));
+  if (path === '/api/apps/catalog') return Response.json(['gmail','outlook','googlecalendar'].map(slug=>({slug,name:slug,status:'disconnected'})));
   if (path === '/api/configuration') return Response.json({integrationsReady:true});
   if (path === '/api/channel-settings') return Response.json({ready:false,channels:[]});
   if (path === '/api/onboarding/suggestions') {suggestions++;return Response.json({ok:true});}
@@ -5822,6 +5943,9 @@ const waitFor=async condition=>{for(let at=0;at<80&&!condition();at++)await sett
 window.history.replaceState(null,'','/onboarding?welcome=complete');
 await act(async()=>render());
 await waitFor(()=>document.querySelector('.ob')?.dataset.step==='email');
+await waitFor(()=>button('Skip for now')&&!button('Skip for now').disabled);
+await act(async()=>button('Skip for now').click());
+await waitFor(()=>document.querySelector('.ob')?.dataset.step==='calendar');
 await waitFor(()=>button('Skip for now')&&!button('Skip for now').disabled);
 await act(async()=>button('Skip for now').click());
 await waitFor(()=>document.querySelector('.ob')?.dataset.step==='brain');
@@ -5984,9 +6108,11 @@ for(const unavailable of [
   assert.deepEqual(JSON.parse(sessionStorage.getItem('nod.onboarding.step')),{owner:owner.id,step:'brain',version:2});
   await waitFor(()=>button('Back')&&!button('Back').disabled);
   await act(async()=>button('Back').click());
+  await waitFor(()=>document.querySelector('.ob')?.dataset.step==='calendar');
+  await act(async()=>button('Back').click());
   await waitFor(()=>document.querySelector('[data-provider="gmail"][data-connected="true"]'));
   assert.equal(document.querySelector('.ob').dataset.step,'email');
-  assert.equal(document.querySelector('[data-provider="gmail"] .ob-email-muted').textContent,gmailAccount.accountEmail);
+  assert.equal(document.querySelector('[data-provider="gmail"] .ob-personal-muted').textContent,gmailAccount.accountEmail);
   assert.equal(button('Connect Gmail'),undefined);
   assert.ok(mutations.slice(beforeMutations).every(path=>path==='/api/account/prepare'||path==='/api/models/selection'),'model recovery must not reset verified account progress');
   await act(async()=>root.unmount());
@@ -6652,6 +6778,140 @@ for(const status of ['skipped','unsupported','failed']) {
 delete window.nodDesktop;
 await mount('synthetic-web-owner');
 assert.equal(requests.length,4);
+await act(async()=>root.unmount());
+dom.window.close();
+process.exit(0);
+`,
+  });
+  assert.equal(result.exitCode, 0, result.stderr);
+});
+
+test('onboarding recovers an unusable model connection within its provider without deleting it', async () => {
+  const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {
+    timeoutMs: 25_000,
+    input: String.raw`
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+const dom=new JSDOM('<!doctype html><div id="root"></div>',{url:'http://127.0.0.1:51000/onboarding',pretendToBeVisual:true});
+for(const name of ['window','document','Node','NodeFilter','Element','HTMLElement','HTMLInputElement','HTMLButtonElement','Event','CustomEvent','MutationObserver','getComputedStyle','sessionStorage']) Object.defineProperty(globalThis,name,{configurable:true,value:name==='window'?dom.window:name==='document'?dom.window.document:typeof dom.window[name]==='function'&&name[0]===name[0].toLowerCase()?dom.window[name].bind(dom.window):dom.window[name]});
+Object.defineProperty(globalThis,'navigator',{configurable:true,value:dom.window.navigator});
+globalThis.requestAnimationFrame=dom.window.requestAnimationFrame.bind(dom.window);
+globalThis.cancelAnimationFrame=dom.window.cancelAnimationFrame.bind(dom.window);
+globalThis.location=window.location;
+globalThis.ResizeObserver=class {observe(){} disconnect(){}};
+HTMLElement.prototype.scrollIntoView=function(){};
+window.matchMedia=()=>({matches:true,addEventListener(){},removeEventListener(){}});
+window.open=()=>({closed:false,opener:null,location:{replace(){}},close(){}});
+const {createElement,act}=await import('react');
+const {createRoot}=await import('react-dom/client');
+const {Brain}=await import('./src/web/pages/onboarding/steps/brain.tsx');
+const {pageDataCache}=await import('./src/web/lib/page-data-cache.ts');
+globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const previous={id:'ab118324-a1f0-4b4d-a1ee-26701d353da0',provider:'openai',method:'subscription',status:'loading',label:'Synthetic saved account',managed:false,models:[]};
+const model={id:'synthetic-model',name:'Synthetic model',efforts:['off'],images:false,contextWindow:32000};
+let models={connections:[previous],selection:null};
+const requests=[];
+let oauthResult;
+let rejectKey=true;
+window.fetch=globalThis.fetch=async(path,options={})=>{
+  const method=options.method??'GET';
+  const body=options.body?JSON.parse(options.body):undefined;
+  if(method!=='GET')requests.push({path,method,body});
+  if(path==='/api/models'&&method==='GET')return Response.json(models);
+  if(path==='/api/models/connections/'+previous.id+'/refresh'&&method==='POST')return Response.json({error:'Synthetic catalog unavailable'},{status:503});
+  if(path==='/api/models/oauth'&&method==='POST')return Response.json({url:'https://auth.openai.com/authorize?fixture=1',attempt:'synthetic-attempt'});
+  if(path==='/api/models/oauth/status/synthetic-attempt'&&method==='GET')return new Promise(resolve=>{oauthResult=result=>resolve(Response.json(result));});
+  if(path==='/api/models/oauth/synthetic-attempt'&&method==='DELETE')return Response.json({ok:true});
+  if(path==='/api/models/keys'&&method==='POST'){
+    if(rejectKey)return Response.json({error:'Synthetic key rejected'},{status:400});
+    models={connections:[...models.connections,{...previous,id:'0331cc73-6b29-41ee-b4b6-586a1d753da7',provider:body.provider,method:'api_key',status:'connected',models:[model]}],selection:null};
+    return Response.json(models);
+  }
+  if(path==='/api/models/selection'&&method==='PUT'){
+    const connection=models.connections.find(item=>item.id===body.connectionId);
+    assert.ok(connection?.status==='connected'&&connection.models.some(item=>item.id===body.modelId&&item.efforts.includes(body.effort)));
+    models={...models,selection:body};
+    return Response.json(models);
+  }
+  assert.fail('Unexpected request '+method+' '+path);
+};
+let root;
+let advances=0;
+const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,15));});
+const waitFor=async(condition)=>{for(let i=0;i<100&&!condition();i++)await settle();assert.ok(condition(),'Expected same-provider model recovery to be available');};
+const button=text=>[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===text||item.getAttribute('aria-label')===text);
+const click=async(text)=>{await waitFor(()=>button(text)&&!button(text).disabled);await act(async()=>button(text).click());await settle();};
+async function mount(arrived='forward'){
+  if(root)await act(async()=>root.unmount());
+  pageDataCache.clear();advances=0;
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>root.render(createElement(Brain,{arrived,onNext:()=>advances++,onBack:()=>assert.fail('Recovery must stay in onboarding')})));
+  await waitFor(()=>button('Continue'));
+}
+async function submitKey(value){
+  const field=document.querySelector('input[type="password"]');
+  assert.ok(field);
+  await act(async()=>{
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(field,value);
+    field.dispatchEvent(new Event('input',{bubbles:true}));
+  });
+  await click('Connect');
+}
+await mount();
+assert.equal(button('Continue').disabled,true);
+await click('Refresh models');
+await waitFor(()=>document.querySelector('[role="alert"]'));
+await click('Use another account');
+assert.deepEqual(models.connections,[previous]);
+assert.equal(requests.length,1,'showing recovery must not mutate the saved account');
+await click('Sign in with ChatGPT');
+await waitFor(()=>oauthResult);
+assert.deepEqual(requests.at(-1),{path:'/api/models/oauth',method:'POST',body:{provider:'openai',connectionId:previous.id}});
+assert.deepEqual(models.connections,[previous]);
+assert.equal(advances,0);
+await click('Cancel');
+assert.deepEqual(models.connections,[previous]);
+assert.equal(requests.filter(item=>item.method==='DELETE').length,1);
+assert.equal(requests.at(-1).path,'/api/models/oauth/synthetic-attempt');
+oauthResult=undefined;
+await click('Sign in with ChatGPT');
+await waitFor(()=>oauthResult);
+await act(async()=>oauthResult({status:'failed',error:'Synthetic sign-in failed'}));
+await waitFor(()=>button('Sign in with ChatGPT'));
+assert.deepEqual(models.connections,[previous]);
+assert.equal(button('Continue').disabled,true);
+assert.equal(advances,0);
+oauthResult=undefined;
+await click('Sign in with ChatGPT');
+await waitFor(()=>oauthResult);
+models={connections:[{...previous,status:'connected',models:[model]}],selection:null};
+await act(async()=>oauthResult({status:'connected'}));
+await waitFor(()=>advances===1);
+assert.deepEqual(models.selection,{connectionId:previous.id,modelId:model.id,effort:'off'});
+assert.equal(document.querySelector('#ob-brain-option-openai').getAttribute('aria-expanded'),'true');
+const savedKey={...previous,provider:'anthropic',method:'api_key',status:'connected'};
+models={connections:[savedKey],selection:null};
+await mount('back');
+assert.equal(button('Continue').disabled,true);
+await click('Use another API key');
+await submitKey('synthetic-rejected-key');
+await waitFor(()=>document.querySelector('input[aria-invalid="true"]'));
+assert.deepEqual(models.connections,[savedKey]);
+assert.equal(models.selection,null);
+assert.equal(button('Continue').disabled,true);
+assert.equal(advances,0);
+rejectKey=false;
+await submitKey('synthetic-valid-key');
+await waitFor(()=>!button('Continue').disabled);
+assert.deepEqual(models.connections[0],savedKey);
+assert.equal(models.connections.length,2);
+assert.equal(models.selection.connectionId,models.connections[1].id);
+assert.equal(models.connections[1].provider,'anthropic');
+assert.equal(document.querySelector('#ob-brain-option-anthropic').getAttribute('aria-expanded'),'true');
+assert.equal(advances,0,'returning Back still requires an explicit Continue');
+await click('Continue');
+assert.equal(advances,1);
+assert.equal(requests.filter(item=>item.method==='DELETE').length,1,'recovery never deletes a saved connection');
 await act(async()=>root.unmount());
 dom.window.close();
 process.exit(0);

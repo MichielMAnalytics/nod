@@ -11,13 +11,14 @@ This page walks you through nod's onboarding, your first tasks and what to do wh
 
 ## Onboarding at a glance
 
-nod opens onboarding the first time you use it. In the desktop app, you can connect accounts while nod prepares its computer. Connect Gmail or skip it, choose an AI provider, then optionally connect other tools and Telegram or WhatsApp. nod gets to know you in the chat after setup.
+nod opens onboarding the first time you use it. In the desktop app, you can connect accounts while nod prepares its computer. Optionally connect email and calendar, choose an AI provider, then connect other tools and Telegram or WhatsApp if useful. nod gets to know you in the chat after setup.
 
 ```mermaid
 flowchart TD
   start[Get started] --> hi[Say hi and<br/>usage data]
-  hi --> gmail[Gmail or skip]:::muted
-  gmail --> model[Connect<br/>a model]:::accent
+  hi --> email[Email or skip]:::muted
+  email --> calendar[Calendar or skip]:::muted
+  calendar --> model[Connect<br/>a model]:::accent
   model --> apps[Other tools]:::muted
   apps --> messaging[Telegram or WhatsApp]:::muted
   messaging --> chat([Get to know nod<br/>in chat]):::go
@@ -27,23 +28,25 @@ flowchart TD
 
 <Steps>
 
-1. **Get started.** Select **Get started** on the welcome screen.
+1. **Get started.** Select **Get started** on the welcome screen. The desktop app starts its services as soon as it opens. If storage is still preparing, a loading screen appears and continues automatically when storage is ready.
 
 2. **Say hi.** nod introduces itself and asks whether to **Share usage data**. It's off unless you turn it on, and you can change it later in **Settings → General**. Select **Let’s go**.
 
 3. **Connect email (optional).** Choose **Gmail** or **Outlook** to get help with replies and follow-ups. Sign in and review the permissions, or select **Skip for now**. Setup continues after the connection is confirmed. Failed sign-in does not erase your earlier progress.
 
-4. **Connect a model.** Pick a provider. Each one shows how it connects: **ChatGPT plan** means you sign in with your ChatGPT Plus or Pro plan, and **API key** means you paste a key from the provider. For OpenAI, select **Sign in with ChatGPT** or paste an OpenAI API key. Anthropic takes an API key only, because Claude plans can't be used. For OpenRouter, select **Sign in to OpenRouter** to have it create a key for nod, or paste one. In the desktop app or a source install, you can instead pick **OpenAI-compatible** to use a [local model](/connect/local-models/): check the server address, add a key only if the server needs one, then select **Connect**. Your key is encrypted and never shown to the model. nod uses your provider’s default model when available. You can change it later in **Models**. Setup moves on once the new connection and model are ready; if a model choice is still needed, select one and then **Continue**.
+4. **Connect a calendar (optional).** Choose **Google Calendar** or **Outlook Calendar** to get help planning around your schedule and finding time for meetings. If you already connected Outlook, that account is available here. Select **Continue** or **Skip for now**.
 
-5. **Connect other apps (optional).** Browse the categories or search by name, then select **Connect** and review the access requested by each app. Connected apps keep their place in the list. **Manage** opens the same account manager as Apps, where you can add another account or disconnect one. A count beside **Continue** shows connected tools, excluding email. Each app counts once, even with multiple accounts. Select **Continue** whenever you’re ready, including with no apps connected. You can add apps anytime from **Apps**.
+5. **Connect a model.** Pick a provider. Each one shows how it connects: **ChatGPT plan** means you sign in with your ChatGPT Plus or Pro plan, and **API key** means you paste a key from the provider. For OpenAI, select **Sign in with ChatGPT** or paste an OpenAI API key. Anthropic takes an API key only, because Claude plans can't be used. For OpenRouter, select **Sign in to OpenRouter** to have it create a key for nod, or paste one. In the desktop app or a source install, you can instead pick **OpenAI-compatible** to use a [local model](/connect/local-models/): check the server address, add a key only if the server needs one, then select **Connect**. Your key is encrypted and never shown to the model. nod uses your provider’s default model when available. You can change it later in **Models**. Setup moves on once the new connection and model are ready; if a model choice is still needed, select one and then **Continue**.
 
-6. **Take nod with you (optional).** Connect **Telegram** or **WhatsApp** to send tasks from your phone and continue the same conversation. Keep nod running on your computer so it can reply. Telegram walks you through creating a bot and confirming your account; WhatsApp links your own number with a QR code; use **Message yourself** to talk to nod. You can connect either, both, or **Skip for now**.
+6. **Connect other apps (optional).** Browse the categories or search by name, then select **Connect** and review the access requested by each app. Connected apps keep their place in the list. **Manage** opens the same account manager as Apps, where you can add another account or disconnect one. A count beside **Continue** shows connected tools, excluding email. Each app counts once, even with multiple accounts. Select **Continue** whenever you’re ready, including with no apps connected. You can add apps anytime from **Apps**.
 
-7. **Open at login.** In the desktop app, enable **Open at login**, then select **Start chatting**. The first chat requests desktop notifications once. You can change both preferences in **Settings → General**.
+7. **Take nod with you (optional).** Connect **Telegram** or **WhatsApp** to send tasks from your phone and continue the same conversation. Keep nod running on your computer so it can reply. Telegram walks you through creating a bot and confirming your account; WhatsApp links your own number with a QR code; use **Message yourself** to talk to nod. You can connect either, both, or **Skip for now**.
+
+8. **Open at login.** In the desktop app, enable **Open at login**, then select **Start chatting**. The first chat requests desktop notifications once. You can change both preferences in **Settings → General**.
 
 </Steps>
 
-Setup finishes after the messaging choice in the web app, or after desktop preferences in the app. If the computer is still preparing, nod shows its progress and opens chat automatically when ready. If it is already ready, chat opens directly.
+Setup finishes after the messaging choice in the web app, or after desktop preferences in the app. If the computer is still preparing, nod shows its progress and opens chat automatically when ready. If it is already ready, chat opens directly. A startup failure offers **Try again** without clearing your connections. If setup needs a model connection, nod sends you back to that step.
 
 You can add more later from **Apps** and **Channels** in the sidebar. See [Connect apps](/connect/apps/) and [Channels](/use/channels/).
 

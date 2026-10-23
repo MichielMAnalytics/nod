@@ -1,4 +1,5 @@
 import type { ChatReadCursor } from './chat-unread';
+import type { StartupStage } from '../../shared/desktop-startup';
 
 export type DesktopPreferences = {
   theme: 'system' | 'light' | 'dark';
@@ -13,10 +14,17 @@ export type DesktopSettings = DesktopPreferences & {
 
 export type DesktopStatus = {
   phase?: string;
+  stage?: StartupStage;
   message?: string;
   error?: string;
   progress?: number;
-  runtime?: { phase?: string; message?: string; error?: string; progress?: number };
+  runtime?: {
+    phase?: string;
+    stage?: StartupStage;
+    message?: string;
+    error?: string;
+    progress?: number;
+  };
 };
 
 export type DesktopSettingsChange = { onboardingCompleted?: true } & Partial<

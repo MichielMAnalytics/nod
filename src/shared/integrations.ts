@@ -30,3 +30,17 @@ export const integrationServices: Record<
 };
 
 export const integrationServiceIds = Object.keys(integrationServices);
+
+export function integrationMetadata(
+  slug: string,
+  ...sources: Array<Partial<Pick<IntegrationServiceInfo, 'name' | 'description'>> | undefined>
+): Pick<IntegrationServiceInfo, 'name' | 'description'> {
+  const metadata = [
+    Object.hasOwn(integrationServices, slug) ? integrationServices[slug] : undefined,
+    ...sources,
+  ];
+  return {
+    name: metadata.map((source) => source?.name?.trim()).find(Boolean) || slug.replaceAll('_', ' '),
+    description: metadata.map((source) => source?.description?.trim()).find(Boolean) || '',
+  };
+}

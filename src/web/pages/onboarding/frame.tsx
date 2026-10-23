@@ -10,6 +10,7 @@ const stepNames: Record<DisplayStep, string> = {
   welcome: 'Welcome to nod',
   intro: 'Meet nod',
   email: 'Connect your email',
+  calendar: 'Connect your calendar',
   brain: 'Connect an AI provider',
   apps: 'Connect your tools',
   messaging: 'Take nod with you',

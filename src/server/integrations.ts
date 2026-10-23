@@ -18,7 +18,7 @@ import {
   type InboxThread,
   type SentEmail,
 } from '../ports/integrations.ts';
-import { integrationServiceIds, integrationServices } from '../shared/integrations.ts';
+import { integrationMetadata, integrationServiceIds } from '../shared/integrations.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import {
   DiscoveredConnectionError,
@@ -283,13 +283,8 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     .parse(provider.id);
   let serviceCatalog: Map<string, IntegrationServiceInfo> | undefined;
   function serviceInfo(slug: string): IntegrationServiceInfo {
-    const featured = Object.hasOwn(integrationServices, slug)
-      ? integrationServices[slug as keyof typeof integrationServices]
-      : undefined;
     const info = serviceCatalog?.get(slug);
-    if (info) return { ...info, ...featured };
-    if (featured) return { slug, ...featured };
-    return { slug, name: slug.replaceAll('_', ' '), description: '' };
+    return { slug, ...info, ...integrationMetadata(slug, info) };
   }
   function providerForRow(row: Pick<ConnectionRow, 'provider_id'>) {
     if (row.provider_id !== providerId)
@@ -437,7 +432,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
         return featured(left.slug) - featured(right.slug) || left.name.localeCompare(right.name);
       })
       .map((service) => ({
-        ...service,
+        ...serviceInfo(service.slug),
         status: 'disconnected',
         triggersEnabled: false,
         supportsTriggers: supportsWatch(service.slug),
