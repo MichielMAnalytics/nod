@@ -364,7 +364,7 @@ test('WhatsApp setup removes stale QR codes and recovers from failed and stalled
         return Response.json(link);
       };
       const root=createRoot(document.querySelector('#root'));
-      const hasQr=()=>Boolean(document.querySelector('.telegram-setup-qr svg'));
+      const hasQr=()=>Boolean(document.querySelector('.whatsapp-setup-qr svg'));
       const advance=async ms=>act(async()=>mock.timers.tick(ms));
       try {
         await act(async()=>root.render(createElement(WhatsAppSetup,{
