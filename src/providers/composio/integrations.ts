@@ -14,7 +14,15 @@ import {
   type IntegrationSession,
 } from '../../ports/integrations.ts';
 
-const toolkits = ['gmail', 'googlecalendar', 'googledrive', 'googlesheets', 'googledocs', 'slack'];
+const toolkits = [
+  'gmail',
+  'googlecalendar',
+  'googledrive',
+  'googlesheets',
+  'googledocs',
+  'slack',
+  'outlook',
+];
 type ManagedSession = Awaited<ReturnType<Composio['sessions']['create']>> &
   Pick<InstanceType<typeof ToolRouterSession>, 'search' | 'execute'>;
 type AccountIdentity = { expiresAt: number; accountName?: string; accountEmail?: string };

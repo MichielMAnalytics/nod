@@ -8,8 +8,8 @@ import { PersonalConnection } from './personal-connection';
 
 function introduction(accounts: Connection[]) {
   return accounts.some((account) => onboardingEmailProviders.some((slug) => account.slug === slug))
-    ? 'Your email is connected. Shall we connect your calendar too?'
-    : 'Want to connect your calendar?';
+    ? 'Your email is connected. I can help with your schedule too.'
+    : 'I can help you spend less time managing your schedule.';
 }
 
 export function Calendar(props: StepProps) {
@@ -19,7 +19,7 @@ export function Calendar(props: StepProps) {
       kind="calendar"
       providerSlugs={onboardingCalendarProviders}
       introduction={introduction}
-      benefit="See what’s coming up, find time for meetings, and plan work around your schedule."
+      benefit="Connect your calendar so I can handle the scheduling and pull together what you need for your next meeting."
     />
   );
 }

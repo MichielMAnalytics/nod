@@ -68,7 +68,6 @@ export function PersonalConnection({
   });
   const configuration = usePageData<Configuration>('/api/configuration');
   const apps = usePageData<Connection[]>('/api/apps');
-  const catalog = usePageData<Connection[]>('/api/apps/catalog');
   const refreshApps = apps.refresh;
   const [reloading, setReloading] = useState(false);
   const [recovering, setRecovering] = useState<string>();
@@ -227,13 +226,10 @@ export function PersonalConnection({
 
   const providers = providerSlugs.map((slug) => {
     const accounts = apps.data?.filter((connection) => connection.slug === slug) ?? [];
-    const service =
-      catalog.data?.find((connection) => connection.slug === slug) ??
-      accounts.find((connection) => connection.status !== 'not_configured');
+    const service = accounts.find((connection) => connection.status !== 'not_configured');
     return {
       slug,
       service,
-      checking: configuration.loading || apps.loading || (!service && catalog.loading),
       account: accounts.find(ownedAccount),
       reconnect: accounts.find(
         (connection) =>
@@ -247,9 +243,7 @@ export function PersonalConnection({
     };
   });
   const connected = providers.some((entry) => entry.account);
-  const managed = connectionGroups(apps.data ?? [], catalog.data ?? []).find(
-    (group) => group.key === manageService,
-  );
+  const managed = connectionGroups(apps.data ?? []).find((group) => group.key === manageService);
   const loading = (!configuration.data && !configuration.error) || (!apps.data && !apps.error);
   useEffect(() => {
     if (!readyReported.current && !loading && revealed >= 2 && onReady) {
@@ -418,7 +412,7 @@ export function PersonalConnection({
 
   async function reload() {
     setReloading(true);
-    await Promise.all([configuration.refresh(), refreshApps(), catalog.refresh()]);
+    await Promise.all([configuration.refresh(), refreshApps()]);
     if (active.current) setReloading(false);
   }
 
@@ -442,7 +436,7 @@ export function PersonalConnection({
       <Rise show={revealed >= 2} className="ob-personal-choices">
         <p className="ob-personal-benefits">{benefit}</p>
         <div className="ob-personal-providers">
-          {providers.map(({ slug, service, checking, account, reconnect, disconnections }) => (
+          {providers.map(({ slug, service, account, reconnect, disconnections }) => (
             <div
               className="ob-personal-provider"
               key={slug}
@@ -464,13 +458,7 @@ export function PersonalConnection({
                 {!account && reconnect && (
                   <span className="ob-personal-muted">{connectionIssue(reconnect)}</span>
                 )}
-                {!account && checking && (
-                  <div className="ob-personal-waiting" role="status">
-                    <LoaderCircle size={14} className="spin" aria-hidden="true" />
-                    <p>Checking availability…</p>
-                  </div>
-                )}
-                {!checking && (!service || service.status === 'not_configured') && !unavailable && (
+                {!loading && !service && !unavailable && (
                   <span className="ob-personal-muted">Unavailable right now</span>
                 )}
                 {pending && provider === slug && (
@@ -549,7 +537,6 @@ export function PersonalConnection({
                   variant="secondary"
                   size="sm"
                   aria-label={`${reconnect ? 'Reconnect' : 'Connect'} ${kind === 'calendar' && slug === 'outlook' ? 'Outlook Calendar' : providerNames[slug]}`}
-                  aria-busy={checking}
                   disabled={!canConnect(slug) || Boolean(pending)}
                   onClick={() => void connect(slug)}
                 >
@@ -575,11 +562,9 @@ export function PersonalConnection({
             </div>
           ))}
         </div>
-        {(unavailable || (!loading && catalog.error)) && (
+        {unavailable && (
           <div className="ob-personal-retry">
-            <p className="ob-personal-muted">
-              {unavailable || `Couldn’t load all ${kind} providers.`}
-            </p>
+            <p className="ob-personal-muted">{unavailable}</p>
             <Button variant="ghost" size="sm" disabled={reloading} onClick={() => void reload()}>
               Try again
             </Button>

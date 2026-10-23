@@ -3140,6 +3140,24 @@ test(
   { skip: !process.env.TEST_DATABASE_URL },
   async (t) => {
     const f = await appsFixture(t);
+    const supported = f.provider.supportedServices!;
+    f.provider.supportedServices = supported.filter((slug) => slug !== 'outlook');
+    f.provider.listServices = async () => [];
+    const unavailable = (await f.app.inject({ url: '/api/apps' })).json<AppConnection[]>();
+    assert.equal(unavailable.find((entry) => entry.slug === 'outlook')?.status, 'not_configured');
+    const blocked = await f.app.inject({ method: 'POST', url: '/api/apps/outlook/connect' });
+    assert.equal(blocked.statusCode, 503, blocked.body);
+    assert.equal(f.callbacks.length, 0);
+    f.provider.supportedServices = supported;
+    let catalogRequests = 0;
+    f.provider.listServices = async () => {
+      catalogRequests++;
+      throw new Error('Synthetic catalog unavailable');
+    };
+    const personal = (await f.app.inject({ url: '/api/apps' })).json<AppConnection[]>();
+    assert.equal(personal.find((entry) => entry.slug === 'outlook')?.status, 'disconnected');
+    await f.connect('outlook');
+    assert.equal(catalogRequests, 0);
     let failure: Error | undefined;
     f.provider.listServices = async () => {
       if (failure) throw failure;
@@ -6856,7 +6874,14 @@ test('Composio catalog failures preserve owned accounts', async (t) => {
     sessionId: 'new-session',
     execute,
   }));
-  const provider = createComposioProvider({ proxy: composioProxyFixture(client) });
+  const authorize = t.mock.fn(async () => ({
+    accountId: 'fixture-outlook',
+    url: 'https://proxy.fixture.invalid/connect/outlook',
+    verificationSecret: 'fixture-outlook-verification',
+  }));
+  const provider = createComposioProvider({
+    proxy: composioProxyFixture(client, 'fixture-owner', { authorize }),
+  });
   await assert.rejects(provider.listServices!(), (error: Error) => {
     assert.ok(error instanceof IntegrationCatalogAccessDenied);
     assert.doesNotMatch(error.message, /private-provider-response/);
@@ -6865,6 +6890,10 @@ test('Composio catalog failures preserve owned accounts', async (t) => {
   const session = await provider.createSession('fixture-owner', { retired_mcp: ['owned-account'] });
   const configuration = create.mock.calls[0]!.arguments[1] as unknown as { toolkits: string[] };
   assert.ok(configuration.toolkits.includes('retired_mcp'));
+  const callback = 'http://localhost:4310/api/apps/callback';
+  await session.authorize('outlook', callback);
+  assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback]);
+  assert.equal(listing.mock.callCount(), 1);
   await session.execute('RETIRED_MCP_LIST', {}, 'owned-account');
   assert.equal(execute.mock.callCount(), 1);
   assert.equal(listing.mock.callCount(), 1);

@@ -27,6 +27,7 @@ export const integrationServices: Record<
   notion: { name: 'Notion', description: 'Find and work with your pages and databases.' },
   linear: { name: 'Linear', description: 'Find and work with your projects and issues.' },
   n8n: { name: 'n8n', description: 'Build, test and run your workflows and agents.' },
+  outlook: { name: 'Outlook', description: 'Read email and plan your calendar.' },
 };
 
 export const integrationServiceIds = Object.keys(integrationServices);

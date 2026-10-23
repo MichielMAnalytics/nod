@@ -5541,6 +5541,7 @@ let appMissing=false;
 let failApps=false;
 let initialApps;
 let initialCatalog;
+let catalogReads=0;
 const attempt='A'.repeat(43);
 let currentAttempt=attempt;
 window.fetch=globalThis.fetch=async(url,options={})=>{
@@ -5558,8 +5559,8 @@ window.fetch=globalThis.fetch=async(url,options={})=>{
   if(path==='/api/models/oauth/status/fixture-oauth')return new Promise(resolve=>{oauth=()=>resolve(Response.json({status:'connected'}));});
   if(path==='/api/configuration')return Response.json({integrationsReady:true});
   if(path==='/api/apps'&&initialApps)await initialApps;
-  if(path==='/api/apps/catalog'&&initialCatalog)await initialCatalog;
-  if(path==='/api/apps')return failApps?Response.json({error:'Fixture account refresh failed'},{status:503}):Response.json([{slug:'gmail',name:'Gmail',status:gmailConnected?'connected':'disconnected',connectionId:gmailConnected||disconnectPending?'fixture-account':undefined,accountId:gmailConnected||disconnectPending?'fixture-gmail':undefined,reconnectRequired:gmailReconnect,canReconnect:true,disconnectPending},...(otherGmailConnected?[{slug:'gmail',name:'Gmail',status:'connected',connectionId:'fixture-other-gmail-account',accountId:'fixture-other-gmail'}]:[]),...(outlookConnected?[{slug:'outlook',name:'Outlook',status:'connected',connectionId:'fixture-outlook-account',accountId:'fixture-outlook',reconnectRequired:outlookReconnect,canReconnect:true}]:[]),...(calendarConnected?[{slug:'googlecalendar',name:'Google Calendar',status:'connected',connectionId:'fixture-calendar-account',accountId:'fixture-calendar'}]:[])]);
+  if(path==='/api/apps/catalog'){catalogReads++;if(initialCatalog)await initialCatalog;}
+  if(path==='/api/apps')return failApps?Response.json({error:'Fixture account refresh failed'},{status:503}):Response.json([{slug:'gmail',name:'Gmail',status:gmailConnected?'connected':'disconnected',connectionId:gmailConnected||disconnectPending?'fixture-account':undefined,accountId:gmailConnected||disconnectPending?'fixture-gmail':undefined,reconnectRequired:gmailReconnect,canReconnect:true,disconnectPending},...(otherGmailConnected?[{slug:'gmail',name:'Gmail',status:'connected',connectionId:'fixture-other-gmail-account',accountId:'fixture-other-gmail'}]:[]),{slug:'outlook',name:'Outlook',status:outlookConnected?'connected':'disconnected',connectionId:outlookConnected?'fixture-outlook-account':undefined,accountId:outlookConnected?'fixture-outlook':undefined,reconnectRequired:outlookReconnect,canReconnect:true},{slug:'googlecalendar',name:'Google Calendar',status:calendarConnected?'connected':calendarAvailable?'disconnected':'not_configured',connectionId:calendarConnected?'fixture-calendar-account':undefined,accountId:calendarConnected?'fixture-calendar':undefined}]);
   if(path==='/api/apps/catalog')return Response.json([{slug:'gmail',name:'Gmail',status:'disconnected'},{slug:'outlook',name:'Outlook',status:'disconnected'},...(calendarAvailable?[{slug:'googlecalendar',name:'Google Calendar',status:'disconnected'}]:[])]);
   if(path==='/api/apps/gmail/accounts/fixture-account/disconnect'){
     assert.equal(options.method,'POST');
@@ -5638,6 +5639,8 @@ assert.equal(readySignals,0,'native intro stays until the owned account state se
 await act(async()=>{initialApps=undefined;appsReady.resolve();});
 await waitFor(()=>readySignals===1);
 assert.ok(initialCatalog,'an optional catalog response does not gate native handoff');
+assert.ok(button('Connect Outlook')&&!button('Connect Outlook').disabled,'supported Outlook is connectable when email opens');
+assert.equal(catalogReads,0,'personal connections must not start full catalog discovery');
 await act(async()=>{initialCatalog=undefined;catalogReady.resolve();});
 await waitFor(()=>button('Retry disconnection'));
 assert.equal(readySignals,1,'email readiness is reported once');
@@ -5885,7 +5888,7 @@ await waitFor(()=>advances===1);
 outlookConnected=false;
 calendarAvailable=false;
 await mount(Calendar);
-assert.equal(button('Connect Google Calendar').disabled,true,'calendar providers must exist in the configured catalog');
+assert.equal(button('Connect Google Calendar').disabled,true,'unsupported calendar providers cannot start consent');
 const beforeCalendarSkip=connectCalls.length;
 await click('Skip for now');
 assert.equal(advances,1,'calendar can be skipped independently of email');

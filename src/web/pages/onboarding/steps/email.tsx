@@ -8,8 +8,8 @@ export function Email(props: StepProps) {
       {...props}
       kind="email"
       providerSlugs={onboardingEmailProviders}
-      introduction="I can help you stay on top of your inbox."
-      benefit="Find emails that need a reply, pull out next steps, and draft responses for you to review."
+      introduction="I can help you spend less time in your inbox."
+      benefit="Connect your email so I can catch you up on what matters and draft replies for you to review."
     />
   );
 }
