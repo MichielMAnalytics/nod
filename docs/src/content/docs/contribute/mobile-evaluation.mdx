@@ -121,6 +121,10 @@ pnpm run mobile:check
 
 A successful build proves compilation, not server compatibility, audio-device behavior, or an end-to-end conversation. Keep fixture checks, native runtime checks, and live-provider checks separate when reporting results.
 
+### Launcher artwork
+
+The Flutter launchers use Nod's existing pink-ring and white-dot artwork from `desktop/assets/nod-macos.svg` and its PNG. iOS uses an opaque, full-bleed charcoal background, leaving corner masking to the system; macOS retains the desktop inset. Android includes legacy density images and a separate adaptive foreground within the safe area. Windows includes a multi-resolution icon. These assets don't imply runtime validation of those additional platforms.
+
 ## Run synthetic recovery checks
 
 From the repo root, install both dependency sets and run the host-side recovery harness. Use the pinned Flutter SDK's `dart` on your `PATH`.
