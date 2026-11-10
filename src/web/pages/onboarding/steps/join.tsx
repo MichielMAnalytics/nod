@@ -138,7 +138,7 @@ export function Join({ onNext, onBack, nextLabel, updatesEmail, usageShared }: S
       )}
       {canSubscribe && (
         <p className="ob-join-consent-note">
-          You can withdraw data in Settings and unsubscribe via link in every email or at
+          Unsubscribe via the link in every email. Unlink your email from usage data at
           privacy@n8n.io.
         </p>
       )}
