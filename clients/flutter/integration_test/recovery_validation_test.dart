@@ -101,7 +101,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
         await _pumpUntil(tester, find.text('Synthetic app message'));
         await fixture.streamReply();
-        await _pumpUntil(tester, find.byKey(const ValueKey('turn-running')));
+        await _pumpUntil(tester, find.byKey(const Key('chat-wave-progress')));
         await _pumpUntil(tester, find.text('Synthetic streamed reply'));
 
         final waiting = repository.events
@@ -116,7 +116,7 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 500));
         await _pumpUntil(tester, find.byKey(const Key('chat-stop')));
-        expect(find.byKey(const Key('chat-working-activity')), findsNothing);
+        expect(find.byKey(const Key('chat-wave-progress')), findsNothing);
         final cancelled = repository.events
             .where(
               (event) =>
@@ -128,7 +128,7 @@ void main() {
         await cancelled.timeout(const Duration(seconds: 10));
         await _pumpUntil(tester, find.byKey(const Key('chat-send')));
         expect(find.byKey(const Key('chat-stop')), findsNothing);
-        expect(find.byKey(const Key('chat-working-activity')), findsNothing);
+        expect(find.byKey(const Key('chat-wave-progress')), findsNothing);
 
         await fixture.interruptAndCommit(
           id: '00000000-0000-4000-8000-000000000040',

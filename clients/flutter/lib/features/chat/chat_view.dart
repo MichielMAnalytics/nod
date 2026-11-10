@@ -477,14 +477,6 @@ class _NodChatState extends State<NodChat>
                       ],
                     ),
                   ),
-                  if (widget.active &&
-                      _controller.failure == null &&
-                      _controller.question == null &&
-                      _controller.connection.phase ==
-                          NodConnectionPhase.connected &&
-                      (_controller.turn == NodTurnState.queued ||
-                          _controller.turn == NodTurnState.running))
-                    _WorkingActivity(turn: _controller.turn),
                   if (_attachmentError != null) Text(_attachmentError!),
                   if (_draft != null && _draft!.files.isNotEmpty)
                     SizedBox(
@@ -656,10 +648,26 @@ class _Conversation extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (controller.isLoading && controller.messages.isEmpty) {
+    final messages = controller.messages
+        .where(
+          (message) =>
+              message.role != NodMessageRole.assistant ||
+              message.text.trim().isNotEmpty ||
+              message.attachments.isNotEmpty,
+        )
+        .toList();
+    final working =
+        active &&
+        !controller.isLoading &&
+        controller.failure == null &&
+        controller.question == null &&
+        controller.connection.phase == NodConnectionPhase.connected &&
+        (controller.turn == NodTurnState.queued ||
+            controller.turn == NodTurnState.running);
+    if (controller.isLoading && messages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (controller.messages.isEmpty && controller.question == null) {
+    if (messages.isEmpty && controller.question == null) {
       return _EmptyConversation(
         failure: controller.failure?.kind == ChatFailureKind.audio
             ? null
@@ -671,9 +679,8 @@ class _Conversation extends StatelessWidget {
         key: const Key('chat-message-list'),
         controller: scrollController,
         reverse: true,
-        padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
-        itemCount:
-            controller.messages.length + (controller.question == null ? 0 : 1),
+        padding: EdgeInsets.fromLTRB(16, 20, 16, working ? 56 : 24),
+        itemCount: messages.length + (controller.question == null ? 0 : 1),
         itemBuilder: (context, index) {
           if (index == 0 && controller.question != null) {
             return _QuestionCard(
@@ -683,11 +690,11 @@ class _Conversation extends StatelessWidget {
             );
           }
           final messageIndex =
-              controller.messages.length -
+              messages.length -
               1 -
               index +
               (controller.question == null ? 0 : 1);
-          final message = controller.messages[messageIndex];
+          final message = messages[messageIndex];
           return Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 760),
@@ -1007,45 +1014,6 @@ class _ConnectionStatus extends StatelessWidget {
                     label,
                     style: Theme.of(context).textTheme.labelLarge
                         ?.copyWith(color: colors.onSurfaceVariant),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _WorkingActivity extends StatelessWidget {
-  const _WorkingActivity({required this.turn});
-  final NodTurnState turn;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      key: const Key('chat-working-activity'),
-      liveRegion: true,
-      label: turn == NodTurnState.queued
-          ? 'Nod is getting started'
-          : 'Nod is working',
-      excludeSemantics: true,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 8, 24, 4),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 760),
-            child: Row(
-              children: [
-                const NodPresence(state: NodMotionState.working, size: 24),
-                const SizedBox(width: NodSpacing.xs),
-                Expanded(
-                  child: Text(
-                    turn == NodTurnState.queued ? 'Getting started' : 'Working',
-                    key: ValueKey('turn-${turn.name}'),
-                    style: Theme.of(context).textTheme.bodySmall
-                        ?.copyWith(color: context.nodColors.textSecondary),
                   ),
                 ),
               ],

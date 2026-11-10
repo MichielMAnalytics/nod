@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../design_system/nod_brand_mark.dart';
 import '../design_system/nod_tokens.dart';
 import 'nod_motion.dart';
 
@@ -109,18 +110,42 @@ class _NodAmbientWavesState extends State<NodAmbientWaves>
   @override
   Widget build(BuildContext context) {
     return IgnorePointer(
-      child: ExcludeSemantics(
-        child: RepaintBoundary(
-          child: CustomPaint(
-            painter: _AmbientPainter(
-              phase: _phase,
-              reveal: _reveal,
-              energy: _energy,
-              repaint: _repaint,
-              dark: Theme.of(context).brightness == Brightness.dark,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ExcludeSemantics(
+            child: RepaintBoundary(
+              child: CustomPaint(
+                painter: _AmbientPainter(
+                  phase: _phase,
+                  reveal: _reveal,
+                  energy: _energy,
+                  repaint: _repaint,
+                  dark: Theme.of(context).brightness == Brightness.dark,
+                ),
+              ),
             ),
           ),
-        ),
+          if (widget.visible && widget.working && widget.active)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: NodSpacing.md),
+                child: Semantics(
+                  key: const Key('chat-wave-progress'),
+                  liveRegion: true,
+                  label: 'Nod is working',
+                  excludeSemantics: true,
+                  child: RepaintBoundary(
+                    child: RotationTransition(
+                      turns: Tween<double>(begin: 0, end: 6).animate(_phase),
+                      child: const NodBrandMark(size: 24),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

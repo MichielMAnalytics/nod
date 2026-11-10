@@ -21,7 +21,18 @@ void main() {
             ),
           );
       await show();
-      await tester.pump(const Duration(seconds: 1));
+      final initialTurns = tester
+          .widget<RotationTransition>(find.byType(RotationTransition))
+          .turns
+          .value;
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        tester
+            .widget<RotationTransition>(find.byType(RotationTransition))
+            .turns
+            .value,
+        greaterThan(initialTurns),
+      );
       expect(tester.binding.hasScheduledFrame, isTrue);
       await show(visible: false);
       await tester.pumpAndSettle();
@@ -50,6 +61,18 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.binding.hasScheduledFrame, isFalse);
+    final initialTurns = tester
+        .widget<RotationTransition>(find.byType(RotationTransition))
+        .turns
+        .value;
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(
+      tester
+          .widget<RotationTransition>(find.byType(RotationTransition))
+          .turns
+          .value,
+      initialTurns,
+    );
     tester.platformDispatcher.accessibilityFeaturesTestValue =
         const FakeAccessibilityFeatures(highContrast: true);
     await tester.pumpAndSettle();

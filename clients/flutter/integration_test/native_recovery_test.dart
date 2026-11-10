@@ -128,7 +128,7 @@ void main() {
           isEmpty,
         );
         await command('stream');
-        await _pumpUntil(tester, find.byKey(const ValueKey('turn-running')));
+        await _pumpUntil(tester, find.byKey(const Key('chat-wave-progress')));
         await _pumpUntil(tester, find.text('Synthetic streamed reply'));
         final waiting = _nextTurn(repository, NodTurnState.waiting);
         await command('wait');
@@ -136,13 +136,13 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 500));
         await _pumpUntil(tester, find.byKey(const Key('chat-stop')));
-        expect(find.byKey(const Key('chat-working-activity')), findsNothing);
+        expect(find.byKey(const Key('chat-wave-progress')), findsNothing);
         final cancelled = _nextTurn(repository, NodTurnState.cancelled);
         await tester.tap(find.byKey(const Key('chat-stop')));
         await cancelled;
         await _pumpUntil(tester, find.byKey(const Key('chat-send')));
         expect(find.byKey(const Key('chat-stop')), findsNothing);
-        expect(find.byKey(const Key('chat-working-activity')), findsNothing);
+        expect(find.byKey(const Key('chat-wave-progress')), findsNothing);
 
         await command('interrupt', {
           'id': '00000000-0000-4000-8000-000000000041',

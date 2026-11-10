@@ -541,6 +541,60 @@ void main() {
     expect(find.text('Here is the final update.'), findsOneWidget);
   });
 
+  testWidgets(
+    'empty assistant history and stream placeholders stay hidden until content arrives',
+    (tester) async {
+      final repository = FakeNodRepository(
+        history: NodHistory(
+          messages: [
+            ChatFixtures.ownerMessage(),
+            ChatFixtures.assistantMessage(id: 'blank', text: ''),
+            ChatFixtures.assistantMessage(id: 'whitespace', text: '  \n\t'),
+            NodMessage(
+              id: 'attachment-only',
+              role: NodMessageRole.assistant,
+              text: '',
+              createdAt: ChatFixtures.baseTime,
+              attachments: const [
+                NodArtifact(
+                  id: 'synthetic-artifact',
+                  name: 'synthetic.txt',
+                  mimeType: 'text/plain',
+                  size: 16,
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      addTearDown(repository.dispose);
+      await _pumpChat(tester, repository, disableAnimations: true);
+      expect(find.byKey(const ValueKey('blank')), findsNothing);
+      expect(find.byKey(const ValueKey('whitespace')), findsNothing);
+      expect(find.byKey(const ValueKey('attachment-only')), findsOneWidget);
+      repository.emitEvent(const NodActivityEvent(NodTurnState.running));
+      repository.emitEvent(
+        const NodMessageDeltaEvent(messageId: 'stream', text: ''),
+      );
+      await tester.pump();
+      expect(find.byKey(const ValueKey('stream')), findsNothing);
+      repository.emitEvent(
+        const NodMessageDeltaEvent(messageId: 'stream', text: 'Visible reply'),
+      );
+      await tester.pump();
+      expect(find.byKey(const ValueKey('stream')), findsOneWidget);
+      expect(find.text('Visible reply'), findsOneWidget);
+      repository.emitEvent(
+        NodMessageEvent(
+          ChatFixtures.assistantMessage(id: 'stream', text: 'Final reply'),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Final reply'), findsOneWidget);
+      expect(find.byKey(const ValueKey('stream')), findsOneWidget);
+    },
+  );
+
   testWidgets('replays events that arrive while initial state is loading', (
     tester,
   ) async {
@@ -564,7 +618,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Latest reply'), findsNothing);
-    expect(find.byKey(const ValueKey('turn-running')), findsOneWidget);
+    expect(find.byKey(const Key('chat-wave-progress')), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 16));
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(milliseconds: 32));
@@ -927,7 +981,7 @@ void main() {
         final working =
             state == NodTurnState.queued || state == NodTurnState.running;
         expect(
-          find.byKey(const Key('chat-working-activity')),
+          find.byKey(const Key('chat-wave-progress')),
           working ? findsOneWidget : findsNothing,
         );
         expect(find.byKey(const Key('chat-turn-status')), findsNothing);
@@ -939,7 +993,7 @@ void main() {
   );
 
   testWidgets(
-    'working activity animates near composer and disappears when waiting',
+    'wave progress animates above composer and disappears when waiting',
     (tester) async {
       final repository = FakeNodRepository();
       addTearDown(repository.dispose);
@@ -949,12 +1003,10 @@ void main() {
       );
       repository.emitEvent(const NodActivityEvent(NodTurnState.running));
       await tester.pump();
+      expect(find.byType(NodPresence), findsNothing);
+      expect(find.byKey(const Key('chat-working-activity')), findsNothing);
       expect(
-        tester.widget<NodPresence>(find.byType(NodPresence)).state,
-        NodMotionState.working,
-      );
-      expect(
-        tester.getBottomLeft(find.byKey(const Key('chat-working-activity'))).dy,
+        tester.getBottomLeft(find.byKey(const Key('chat-wave-progress'))).dy,
         lessThan(tester.getTopLeft(find.byKey(const Key('chat-composer'))).dy),
       );
       await tester.pump(const Duration(milliseconds: 150));
@@ -1167,10 +1219,7 @@ void main() {
     );
     repository.emitEvent(const NodActivityEvent(NodTurnState.running));
     await tester.pumpAndSettle();
-    expect(
-      tester.widget<NodPresence>(find.byType(NodPresence)).state,
-      NodMotionState.working,
-    );
+    expect(find.byKey(const Key('chat-wave-progress')), findsOneWidget);
     expect(tester.binding.hasScheduledFrame, isFalse);
 
     repository.emitEvent(
