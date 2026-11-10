@@ -112,6 +112,7 @@ if (process.argv.includes('--run')) {
     const mounts = [
       'src',
       'tests',
+      'clients/flutter/test/fixtures/client-api',
       'scripts',
       'public',
       'desktop/main',
