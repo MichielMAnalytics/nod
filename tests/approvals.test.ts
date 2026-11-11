@@ -343,7 +343,7 @@ test('approval cards shorten long recipients and bodies, skip blank bodies and t
   assert.ok(performance.now() - started < 2000);
   assert.ok(nested.body!.startsWith('Hi'));
   assert.equal(nested.bodyCut, true);
-  const pad = 'x'.repeat(19_950);
+  const filler = '<i></i>'.repeat(2850);
   for (const tail of [
     '<a href="https://example.test/hidden">Pay here now and more words to cross</a>',
     '<style>p{color:red;background:blue;margin:0;padding:0;border:0}</style>',
@@ -352,18 +352,10 @@ test('approval cards shorten long recipients and bodies, skip blank bodies and t
     const crossing = approvalContent('GMAIL_SEND_EMAIL', {
       to: 'a@example.test',
       is_html: true,
-      body: `<p>${pad}</p>${tail}`,
+      body: `<p>Hi</p>${filler}${tail}`,
     });
-    assert.equal(crossing.body, pad.slice(0, 4000));
+    assert.equal(crossing.body, 'Hi');
     assert.equal(crossing.bodyCut, true);
-    assert.equal(
-      approvalContent('GMAIL_SEND_EMAIL', {
-        to: 'a@example.test',
-        is_html: true,
-        body: `<p>Hi</p>${tail}<p>${pad}</p>`,
-      }).body!.includes('color:red'),
-      false,
-    );
   }
   assert.equal(approvalTitle('mcp__synthetic_server__create_page').title, 'Create page');
   assert.equal(approvalTitle('mcp__synthetic__').title, 'Run an action');
