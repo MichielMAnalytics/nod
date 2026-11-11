@@ -64,7 +64,9 @@ function chatConfirmationSql(match: string) {
   return `SELECT a.*,u.source AS turn_source,u.status AS turn_status,u.background AS turn_background,u.session_id AS turn_session_id,u.prompt AS turn_prompt
   FROM approvals a JOIN turns u ON u.id=a.turn_id
   WHERE ${match}
-    AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3 AND u.channel=$4
+    AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3
+    AND (u.channel=$4 OR a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
+      WHERE m.id=$5::uuid AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$5::uuid))
     AND EXISTS (SELECT 1 FROM messages c WHERE c.id=a.confirmation_message_id AND c.owner_id=a.owner_id AND c.hidden_at IS NULL)
     AND (to_jsonb(u)->>'task_id' IS NULL OR NOT EXISTS (
       SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.session_id=u.session_id AND n.id<>u.id
@@ -522,7 +524,7 @@ export async function createApprovals(
       await pool.query(
         chatConfirmationSql(`a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
          WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$1)`),
-        [target, ownerId, input.threadId, input.channel],
+        [target, ownerId, input.threadId, input.channel, input.replyToMessageId ?? null],
       )
     ).rows[0];
   }
@@ -553,6 +555,7 @@ export async function createApprovals(
         ownerId,
         input.threadId,
         input.channel,
+        input.replyToMessageId ?? null,
       ])
     ).rows[0];
     if (approval?.status !== 'pending') return undefined;

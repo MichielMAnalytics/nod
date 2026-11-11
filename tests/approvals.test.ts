@@ -540,6 +540,15 @@ test(
         pool: db.pool,
         ownerId,
         review: async (instructions, input) => {
+          if ('expiredConfirmation' in input && 'reply' in input)
+            return {
+              retiredReply:
+                input.reply === 'Send the revised synthetic report to Bob at bob@example.test.' ||
+                input.reply === 'Maybe.'
+                  ? 'new'
+                  : 'stale',
+              probability: input.reply === 'Maybe.' ? 0.5 : 1,
+            };
           if ('reply' in input) {
             replies.push(input);
             await duringReply();
@@ -1159,6 +1168,127 @@ test(
         assert.equal(reviews.at(-1)?.assistantMessageBeforeLatestUserMessage, undefined);
       });
 
+      await t.test('a retired confirmation reply cannot reuse the original request', async (t) => {
+        const turnIds: string[] = [];
+        t.after(async () => {
+          await db.pool.query(
+            'DELETE FROM approvals WHERE turn_id=ANY($1::uuid[]) OR execution_turn_id=ANY($1::uuid[])',
+            [turnIds],
+          );
+          await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [turnIds]);
+          await db.pool.query('DELETE FROM turn_events WHERE turn_id=ANY($1::uuid[])', [turnIds]);
+          await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [turnIds]);
+        });
+        const requestText = 'Send the synthetic report to Ana at ana@example.test.';
+        const args = email('ana@example.test');
+        const original = await begin(requestText);
+        turnIds.push(original.turnId);
+        const approvalId = await propose(original, 'GMAIL_SEND_EMAIL', args);
+        const confirmationId = (await stored(approvalId)).confirmation_message_id as string;
+        const confirmed = await confirm(approvalId, true);
+        assert.ok(confirmed && 'turnId' in confirmed);
+        turnIds.push(confirmed.turnId);
+        await execute(approvalId);
+        assert.equal((await stored(approvalId)).status, 'completed');
+        const sent = calls.length;
+        const reaction = await messages.submit('👍', [], {
+          replyToMessageId: confirmationId,
+          sourceId: `reaction-reply:${randomUUID()}`,
+        });
+        turnIds.push(reaction.turnId);
+        const reacted = await running(reaction.turnId);
+        assert.equal((await row(reaction.turnId)).source, 'user');
+        aligned = () => ({ run: true, because: requestText });
+        assert.deepEqual(await trust.check(reacted, 'GMAIL_SEND_EMAIL', args), {
+          confirm: true,
+          reason: 'unrequested',
+        });
+        assert.deepEqual(
+          reviews.at(-1)?.userMessages.map((item: { text: string }) => item.text),
+          ['👍'],
+        );
+        const typed = await messages.submit('Yes.');
+        turnIds.push(typed.turnId);
+        const typedTurn = await running(typed.turnId);
+        assert.equal((await row(typed.turnId)).source, 'user');
+        aligned = () => ({ run: true, because: 'Yes.' });
+        assert.deepEqual(await trust.check(typedTurn, 'GMAIL_SEND_EMAIL', args), {
+          confirm: true,
+          reason: 'unrequested',
+        });
+        assert.deepEqual(
+          reviews.at(-1)?.userMessages.map((item: { text: string }) => item.text),
+          ['Yes.'],
+        );
+        const uncertain = await messages.submit('Maybe.', [], {
+          replyToMessageId: confirmationId,
+        });
+        turnIds.push(uncertain.turnId);
+        const uncertainTurn = await running(uncertain.turnId);
+        aligned = () => ({ run: true, because: 'Maybe.' });
+        assert.deepEqual(await trust.check(uncertainTurn, 'GMAIL_SEND_EMAIL', args), {
+          confirm: true,
+          reason: 'unrequested',
+        });
+        for (const turn of [reacted, typedTurn, uncertainTurn]) {
+          const proposed = await approvals.request(turn, 'GMAIL_SEND_EMAIL', args);
+          assert.ok(proposed && typeof proposed === 'object' && appConfirmation in proposed);
+        }
+        assert.equal(calls.length, sent);
+        const replacementText = 'Send the revised synthetic report to Bob at bob@example.test.';
+        const replacement = await messages.submit(replacementText, [], {
+          replyToMessageId: confirmationId,
+        });
+        turnIds.push(replacement.turnId);
+        const replacementTurn = await running(replacement.turnId);
+        aligned = () => ({ run: true, because: replacementText });
+        assert.deepEqual(
+          await trust.check(replacementTurn, 'GMAIL_SEND_EMAIL', email('bob@example.test')),
+          {
+            confirm: false,
+            basis: {
+              kind: 'message',
+              messageId: replacement.messageId,
+              quote: replacementText.slice(0, -1),
+            },
+          },
+        );
+        assert.deepEqual(
+          reviews.at(-1)?.userMessages.map((item: { text: string }) => item.text),
+          [replacementText],
+        );
+        await approvals.request(replacementTurn, 'GMAIL_SEND_EMAIL', email('bob@example.test'));
+        assert.equal(calls.length, sent + 1);
+        assert.equal(calls.at(-1)?.args.recipient_email, 'bob@example.test');
+        const expiredRequestText = 'Send the synthetic invoice to Carol at carol@example.test.';
+        const expiredArgs = email('carol@example.test');
+        aligned = false;
+        const expiring = await begin(expiredRequestText);
+        turnIds.push(expiring.turnId);
+        const expiredId = await propose(expiring, 'GMAIL_SEND_EMAIL', expiredArgs);
+        const expiredConfirmationId = (await stored(expiredId)).confirmation_message_id as string;
+        await finish(expiring.turnId, 'waiting');
+        await db.pool.query("UPDATE approvals SET status='expired' WHERE id=$1", [expiredId]);
+        const stale = await messages.submit('👍', [], {
+          replyToMessageId: expiredConfirmationId,
+          sourceId: `reaction-reply:${randomUUID()}`,
+        });
+        turnIds.push(stale.turnId);
+        const staleTurn = await running(stale.turnId);
+        aligned = () => ({ run: true, because: expiredRequestText });
+        assert.deepEqual(await trust.check(staleTurn, 'GMAIL_SEND_EMAIL', expiredArgs), {
+          confirm: true,
+          reason: 'unrequested',
+        });
+        const expiredProposal = await approvals.request(staleTurn, 'GMAIL_SEND_EMAIL', expiredArgs);
+        assert.ok(
+          expiredProposal &&
+            typeof expiredProposal === 'object' &&
+            appConfirmation in expiredProposal,
+        );
+        assert.equal(calls.length, sent + 1);
+      });
+
       await t.test(
         'background work shows the checker only the standing instruction, and a scheduled run only its instruction',
         async () => {
@@ -1462,6 +1592,15 @@ test(
         'saved task authority excludes owner instructions addressed to other work',
         async (t) => {
           const parent = await begin('Read my fixture flight dates.');
+          const preTaskQuestion = randomUUID();
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Should I include the fixture taxes?')",
+            [preTaskQuestion, ownerId, parent.threadId, parent.turnId],
+          );
+          const preTaskReply = await messages.submit('Include the fixture taxes.', [], {
+            replyToMessageId: preTaskQuestion,
+          });
+          await finish(preTaskReply.turnId, 'succeeded');
           const oldStatus = randomUUID();
           t.after(() => finish(parent.turnId, 'cancelled'));
           const source = (await row(parent.turnId)).message_id;
@@ -1501,14 +1640,18 @@ test(
           await tasks.inherit(turn);
           const hotel = await begin('Send the separate hotel request to hotel@example.test.');
           t.after(() => finish(hotel.turnId, 'cancelled'));
+          const summaryMessageId = randomUUID();
           await db.pool.query(
             "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Do you want the fixture summary?')",
-            [randomUUID(), ownerId, hotel.threadId, hotel.turnId],
+            [summaryMessageId, ownerId, hotel.threadId, hotel.turnId],
           );
           await finish(hotel.turnId, 'succeeded');
           await trust.check(turn, 'GMAIL_SEND_EMAIL', { to: 'hotel@example.test' });
           const started = reviews.at(-1)!.userMessages.map((item: { text: string }) => item.text);
-          assert.equal(started.at(-1), 'Read my fixture flight dates.');
+          assert.deepEqual(started.slice(-2), [
+            'Read my fixture flight dates.',
+            'Include the fixture taxes.',
+          ]);
           assert.equal(
             started.includes('Send the separate hotel request to hotel@example.test.'),
             false,
@@ -1518,7 +1661,10 @@ test(
             "INSERT INTO messages(id,owner_id,thread_id,role,text,reply_to_message_id) SELECT $1,$2,thread_id,'assistant','Saved task question',confirmation_message_id FROM approvals WHERE id=$3",
             [oldStatus, ownerId, oldApproval],
           );
-          const mainReply = await begin('Yes.');
+          const mainReplySubmission = await messages.submit('Yes.', [], {
+            replyToMessageId: summaryMessageId,
+          });
+          const mainReply = await running(mainReplySubmission.turnId);
           t.after(() => finish(mainReply.turnId, 'cancelled'));
           await trust.check(mainReply, 'GMAIL_SEND_EMAIL', { to: 'hotel@example.test' });
           assert.equal(
@@ -1546,8 +1692,9 @@ test(
           await db.pool.query("UPDATE approvals SET status='expired' WHERE id=$1", [freshApproval]);
           await trust.check(continued, 'GMAIL_FETCH_EMAILS', {});
           const words = reviews.at(-1)!.userMessages.map((item: { text: string }) => item.text);
-          assert.deepEqual(words.slice(-2), [
+          assert.deepEqual(words.slice(-3), [
             'Read my fixture flight dates.',
+            'Include the fixture taxes.',
             'Use the new fixture flight dates.',
           ]);
           assert.equal(
@@ -1565,6 +1712,7 @@ test(
           await trust.check(chat, 'GMAIL_FETCH_EMAILS', {});
           const chatWords = reviews.at(-1)!.userMessages.map((item: { text: string }) => item.text);
           assert.equal(chatWords.includes('Read my fixture flight dates.'), false);
+          assert.equal(chatWords.includes('Include the fixture taxes.'), false);
           assert.equal(chatWords.includes('Use the new fixture flight dates.'), false);
           await finish(chat.turnId, 'succeeded');
         },

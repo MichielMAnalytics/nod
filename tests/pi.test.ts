@@ -746,6 +746,7 @@ test('a new Pi request follows refreshed owner context after an approval pause',
     assert.equal(next.status, 'succeeded');
     assert.equal(requests.length, 4);
     assert.ok(requests[1]!.includes('Send the synthetic item.'));
+    assert.ok(requests[1]!.includes('Initial synthetic owner context.'));
     assert.ok(requests[1]!.includes('Answer a new fixture question.'));
     assert.ok(requests[1]!.includes('Refreshed synthetic owner context.'));
     const replay = JSON.parse(requests[1]!) as Array<{
@@ -760,6 +761,10 @@ test('a new Pi request follows refreshed owner context after an approval pause',
     );
     assert.equal(replay.at(-1)?.role, 'user');
     assert.ok(JSON.stringify(replay.at(-1)?.content).includes('Answer a new fixture question.'));
+    assert.ok(
+      requests[1]!.lastIndexOf('Initial synthetic owner context.') <
+        requests[1]!.lastIndexOf('Refreshed synthetic owner context.'),
+    );
     assert.ok(
       requests[1]!.lastIndexOf('Refreshed synthetic owner context.') <
         requests[1]!.lastIndexOf('Answer a new fixture question.'),

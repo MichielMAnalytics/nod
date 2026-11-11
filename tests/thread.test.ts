@@ -3894,6 +3894,64 @@ test(
             ).rows[0].count,
             1,
           );
+
+          const channelPending = await thread.submitUserMessage('reaction-approval-fixture', [], {
+            channel: 'telegram:fixture',
+          });
+          await waitFor(settled(channelPending.turnId));
+          const channelApproval = (
+            await db.pool.query<{ id: string; confirmation_message_id: string }>(
+              'SELECT id,confirmation_message_id FROM approvals WHERE owner_id=$1 AND turn_id=$2',
+              [ownerId, channelPending.turnId],
+            )
+          ).rows[0]!;
+          const unrelated = randomUUID();
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Unrelated fixture message.')",
+            [unrelated, ownerId, channelPending.threadId, channelPending.turnId],
+          );
+          assert.equal(
+            await reactionMessages.answer('👍', { channel: 'web', replyToMessageId: unrelated }),
+            undefined,
+          );
+          await thread.reactToAssistantMessage(
+            channelApproval.confirmation_message_id,
+            '👍',
+            true,
+            reactionMessages,
+            'web',
+          );
+          await waitFor(async () => executedByReaction === 2);
+          await waitFor(
+            async () =>
+              (
+                await db.pool.query('SELECT status FROM approvals WHERE id=$1', [
+                  channelApproval.id,
+                ])
+              ).rows[0]?.status === 'completed',
+          );
+          const webReply = (
+            await db.pool.query<{ turn_id: string }>(
+              "SELECT turn_id FROM messages WHERE owner_id=$1 AND role='user' AND reply_to_message_id=$2",
+              [ownerId, channelApproval.confirmation_message_id],
+            )
+          ).rows[0]!;
+          assert.deepEqual(
+            (
+              await db.pool.query('SELECT source,channel,parent_turn_id FROM turns WHERE id=$1', [
+                webReply.turn_id,
+              ])
+            ).rows[0],
+            { source: 'resume', channel: 'web', parent_turn_id: channelPending.turnId },
+          );
+          await thread.reactToAssistantMessage(
+            channelApproval.confirmation_message_id,
+            '👍',
+            true,
+            reactionMessages,
+            'web',
+          );
+          assert.equal(executedByReaction, 2);
         } finally {
           inspectObserver = previousObserver;
           dependencies.executeConfirmation = previousConfirmation;
