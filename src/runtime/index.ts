@@ -188,7 +188,7 @@ export function createAgentRuntime(dependencies: {
     let answerChoices: RuntimeResult['answerChoices'];
     const sites = new Map<string, string>();
     let stopped = false;
-    let modelError: string | undefined;
+    let modelError: { message: string; provider?: string } | undefined;
     let modelIncomplete: 'output' | 'context' | undefined;
     let completed = false;
     let lastReply = '';
@@ -1053,7 +1053,8 @@ export function createAgentRuntime(dependencies: {
             speakNext = false;
             completeStream();
           }
-          if (event.type === 'error') modelError = event.message;
+          if (event.type === 'error')
+            modelError = { message: event.message, provider: event.provider };
           if (event.type === 'final') {
             modelError = undefined;
             modelIncomplete = undefined;
@@ -1119,7 +1120,8 @@ export function createAgentRuntime(dependencies: {
         `Paused at the ${dollars(context.checkIn!.budgetUsd)} check-in. Reply to keep going.`;
       if (modelError)
         throw new ModelRequestError(
-          `The model request failed: ${(dependencies.redactError ?? String)(modelError)}`,
+          `The model request failed: ${(dependencies.redactError ?? String)(modelError.message)}`,
+          modelError.provider,
         );
       if (modelIncomplete && status === 'succeeded')
         throw new Error(

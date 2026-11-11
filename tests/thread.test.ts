@@ -426,7 +426,7 @@ test(
 
     let limitReached = false;
     const interruptedText = 'Synthetic interrupted turn.';
-    const modelErrors = new Map<string, string>();
+    const modelErrors = new Map<string, { message: string; provider?: string }>();
     let beforeRuntimeFailure = async (_context: RuntimeContext) => {};
     let presentInterruption: NonNullable<ThreadDependencies['present']> = async () =>
       interruptedText;
@@ -631,7 +631,7 @@ test(
           stagedReads.set(context.prompt, await readFile(context.attachments[0].path, 'utf8'));
         workspaceListings.set(context.prompt, await readdir(context.workspacePath));
         const modelError = modelErrors.get(context.prompt);
-        if (modelError) throw new ModelRequestError(modelError);
+        if (modelError) throw new ModelRequestError(modelError.message, modelError.provider);
         if (context.prompt === 'runtime-failure') {
           await beforeRuntimeFailure(context);
           throw Object.assign(new Error('Synthetic runtime failure for private-fixture'), {
@@ -8232,6 +8232,7 @@ test(
           const cases: Array<{
             prompt: string;
             error: string;
+            provider?: string;
             guidance?: RegExp;
             terminal?: 'account' | 'workplace';
             constraint?: 'daily' | 'oversized';
@@ -8252,17 +8253,20 @@ test(
                 }),
               guidance: /too large.*tokens per minute/i,
               constraint: 'oversized',
+              provider: 'compatible',
             },
             {
               prompt: 'model-daily-quota-fixture',
               error: dailyQuota,
               guidance: /quota/i,
               constraint: 'daily',
+              provider: 'google',
             },
             {
               prompt: 'model-plain-rate-limit-fixture',
               error: 'The model request failed: 429 Too Many Requests',
               guidance: /rate limit/i,
+              provider: 'synthetic-private-provider',
             },
             {
               prompt: 'model-rate-limit-code-fixture',
@@ -8318,7 +8322,8 @@ test(
             },
           ];
           try {
-            for (const item of cases) modelErrors.set(item.prompt, item.error);
+            for (const item of cases)
+              modelErrors.set(item.prompt, { message: item.error, provider: item.provider });
             for (const item of cases) {
               const submitted = await thread.submitUserMessage(item.prompt);
               await waitFor(settled(submitted.turnId));
@@ -8354,10 +8359,12 @@ test(
                   assert.match(turn.error, /14 seconds/);
                 }
                 if (item.constraint === 'daily') {
+                  assert.match(turn.error, /Google Gemini/);
                   assert.match(turn.error, /23 hours/i);
                   assert.doesNotMatch(turn.error, /try again shortly/i);
                 }
                 if (item.constraint === 'oversized') {
+                  assert.match(turn.error, /OpenAI-compatible/);
                   assert.match(turn.error, /6,?000/);
                   assert.match(turn.error, /12,?000/);
                   assert.match(turn.error, /reduce|shorten|higher limit/i);
@@ -8378,7 +8385,7 @@ test(
                 for (const text of [turn.error, shown])
                   assert.doesNotMatch(
                     text,
-                    /RESOURCE_EXHAUSTED|quotaMetric|synthetic-private-provider-detail|fixture-model/,
+                    /RESOURCE_EXHAUSTED|quotaMetric|synthetic-private-provider-detail|synthetic-private-provider|fixture-model/,
                   );
               } else {
                 assert.equal(turn.error, item.error);

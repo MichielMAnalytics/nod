@@ -60,6 +60,7 @@ import { spendingLimitReached, spendingLimitText } from './ledger.ts';
 import type { ExecutionEvent } from '../shared/execution.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
+import { modelProviderNames } from '../shared/models.ts';
 
 const queue = 'thread-drain';
 const rasterTypes = new Set([
@@ -1058,6 +1059,11 @@ function retryAdvice(seconds: number, quota: boolean) {
 function failureText(error: unknown) {
   const text = error instanceof Error ? error.message || error.name : String(error);
   if (error instanceof ModelRequestError) {
+    const providerName =
+      error.provider && Object.hasOwn(modelProviderNames, error.provider)
+        ? modelProviderNames[error.provider as keyof typeof modelProviderNames]
+        : undefined;
+    const provider = providerName ? `${providerName} provider` : 'model provider';
     const oversized = text.match(
       /\brequest too large\b.{0,250}?\btokens per minute\s*\(TPM\):\s*Limit\s+(\d{1,9}),\s*Requested\s+(\d{1,9})/is,
     );
@@ -1065,18 +1071,18 @@ function failureText(error: unknown) {
       const limit = Number(oversized[1]);
       const requested = Number(oversized[2]);
       if (limit > 0 && requested > limit)
-        return `The model request is too large for the provider's tokens per minute limit (${requested.toLocaleString('en-US')} requested; ${limit.toLocaleString('en-US')} allowed). Reduce the conversation or choose a model with a higher limit.`;
+        return `The ${providerName ? `${providerName} model` : 'model'} request is too large for the provider's tokens per minute limit (${requested.toLocaleString('en-US')} requested; ${limit.toLocaleString('en-US')} allowed). Reduce the conversation or choose a model with a higher limit.`;
     }
     const code = /\b429\b/.test(text) ? ' (HTTP 429)' : '';
     if (/\bsubscription_sharing_workplace_individual_usage_limit_exceeded\b/i.test(text))
-      return `The model provider's workspace usage limit was reached${code}. Ask your workspace admin to review the limit, or wait for it to reset.`;
+      return `The ${provider}'s workspace usage limit was reached${code}. Ask your workspace admin to review the limit, or wait for it to reset.`;
     if (
       /\b(?:GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|subscription_sharing_usage_limit_exceeded)\b/i.test(
         text,
       ) ||
       /["']code["']\s*:\s*["']?1308(?!\d)/i.test(text)
     )
-      return `The model provider's quota was reached${code}. Wait for it to reset, or check the provider account's usage limits and plan.`;
+      return `The ${provider}'s quota was reached${code}. Wait for it to reset, or check the provider account's usage limits and plan.`;
     const daily = /GenerateRequestsPerDay|requests?\s*(?:\/|per\s+)day/i.test(text);
     const quota =
       daily ||
@@ -1095,8 +1101,8 @@ function failureText(error: unknown) {
       const seconds = retry ? Math.ceil(Number(retry[1])) : 0;
       const next = retryAdvice(seconds, quota);
       return quota
-        ? `The model provider's ${daily ? 'daily quota' : 'quota'} was reached${code}. ${next} ${daily ? "Check the provider account's daily allowance if this keeps happening." : "If it keeps happening, check the provider account's usage limits and billing."}`
-        : `The model provider is rate limiting requests${code}. ${next}`;
+        ? `The ${provider}'s ${daily ? 'daily quota' : 'quota'} was reached${code}. ${next} ${daily ? "Check the provider account's daily allowance if this keeps happening." : "If it keeps happening, check the provider account's usage limits and billing."}`
+        : `The ${provider} is rate limiting requests${code}. ${next}`;
     }
   }
   return redactSecretText(text).trim().slice(0, 2_000) || 'Unknown error.';

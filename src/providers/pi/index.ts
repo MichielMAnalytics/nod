@@ -985,6 +985,7 @@ export function createPiAgent(options: {
             input.onEvent({
               type: 'error',
               message: event.message.errorMessage?.trim() || 'The provider gave no reason.',
+              provider: event.message.provider,
             });
           if (event.message.stopReason === 'stop') {
             const blocks = event.message.content.filter((item) => item.type === 'text');

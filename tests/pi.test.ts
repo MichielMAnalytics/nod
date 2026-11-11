@@ -5160,6 +5160,7 @@ test('a failed model request leaves none of its unanswered input for later turns
   const directory = await mkdtemp(join(tmpdir(), 'nod-failed-request-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const requests: string[] = [];
+  const failedProviders: string[] = [];
   const replies: Array<'error' | 'tool' | 'text'> = ['error', 'tool', 'error', 'text', 'text'];
   const agent = createPiAgent({
     provider: 'openai',
@@ -5217,7 +5218,9 @@ test('a failed model request leaves none of its unanswered input for later turns
         },
       ],
       shouldStop: () => false,
-      onEvent() {},
+      onEvent(event) {
+        if (event.type === 'error') failedProviders.push(event.provider ?? 'missing');
+      },
     });
     await session.prompt(prompt, []);
     await session.dispose();
@@ -5245,6 +5248,7 @@ test('a failed model request leaves none of its unanswered input for later turns
   });
   await turn('Thanks');
   assert.equal(requests.length, 5);
+  assert.deepEqual(failedProviders, ['openai', 'openai']);
   assert.ok(!requests[1].includes('Synthetic hostile paste'));
   assert.ok(requests[2].includes('Synthetic hostile tool output'));
   for (const request of requests.slice(3)) {

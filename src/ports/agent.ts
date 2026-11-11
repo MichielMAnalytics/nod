@@ -311,7 +311,7 @@ export type AgentEvent =
   | { type: 'thinking'; title: string }
   | { type: 'final'; text: string }
   | ModelUsageObservation
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string; provider?: string };
 export interface AgentAudio {
   id: string;
   mimeType: string;
@@ -360,4 +360,11 @@ export interface Agent {
   open(options: AgentSessionOptions): Promise<AgentSession>;
   dispose(): void | Promise<void>;
 }
-export class ModelRequestError extends Error {}
+export class ModelRequestError extends Error {
+  constructor(
+    message: string,
+    readonly provider?: string,
+  ) {
+    super(message);
+  }
+}
