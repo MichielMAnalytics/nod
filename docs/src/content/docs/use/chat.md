@@ -15,6 +15,8 @@ Nod follows your latest clear message's language, spoken or typed, including que
 
 Type in the message box and press Enter. Press Shift+Enter for a new line.
 
+In the desktop app, press Command+1 on Mac or Ctrl+1 on Windows and Linux to open Chat. Use the same modifier with 2–6 to open Scheduled, Apps, Channels, Usage, or Vault, even while the chat message box is focused.
+
 Pasted text stays literal. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. An unsent pasted draft keeps them after a reload.
 
 Web and desktop chat limit text message attempts to 120 per minute and audio message attempts to 120 per minute. If you reach either limit, wait and send again.
