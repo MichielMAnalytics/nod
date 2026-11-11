@@ -35,6 +35,19 @@ export interface Message {
   suggestions?: TaskSuggestions | null;
   answerChoices?: AnswerChoices;
   answerChoicesPending?: boolean;
+  choiceAnswer?: { choiceIds: string[]; text?: string };
+  approval?: MessageApproval;
+  cardAnswer?: true;
+}
+export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
+export interface MessageApproval {
+  id: string;
+  state: ApprovalState;
+  title: string;
+  app: string;
+  slug: string;
+  fields?: Array<{ label: string; value: string }>;
+  body?: string;
 }
 export interface SubmitMessageResponse {
   threadId: string;

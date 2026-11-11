@@ -21,6 +21,65 @@ export function actionTitle(action: string) {
   };
 }
 
+const nodActions: Array<[string, string]> = [
+  ['NOD_browser', 'Continue in the browser'],
+  ['NOD_vault_allow', 'Use a saved sign-in'],
+  ['NOD_limits_update', 'Change spending limits'],
+  ['NOD_model_select', 'Change the model'],
+  ['NOD_notification_preferences_update', 'Change notifications'],
+  ['NOD_schedule_', 'Change a schedule'],
+  ['NOD_memory_', 'Change memory'],
+  ['NOD_rules', 'Change your rules'],
+  ['NOD_', 'Change a Nod setting'],
+];
+
+export function approvalTitle(action: string) {
+  const nod = nodActions.find(([prefix]) => action.startsWith(prefix));
+  if (nod) return { title: nod[1], app: '', slug: '' };
+  const { app, label } = actionTitle(action);
+  const title = label ? `${label[0]!.toUpperCase()}${label.slice(1)}` : 'Run an action';
+  if (action.startsWith('CONNECTED_') || action.startsWith('mcp__'))
+    return { title, app: '', slug: '' };
+  return { title, app, slug: action.split('_')[0]!.toLowerCase() };
+}
+
+const fieldKeys: Array<[string, string[]]> = [
+  ['To', ['recipient_email', 'to', 'extra_recipients']],
+  ['Cc', ['cc']],
+  ['Bcc', ['bcc']],
+  ['Channel', ['channel']],
+  ['Subject', ['subject']],
+];
+const bodyKeys = ['body', 'message_body', 'text', 'markdown_text'];
+
+function words(value: unknown): string[] {
+  if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+  return Array.isArray(value) ? value.flatMap(words) : [];
+}
+
+export function approvalContent(action: string, args: unknown) {
+  if (
+    /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
+    !args ||
+    typeof args !== 'object' ||
+    Array.isArray(args)
+  )
+    return {};
+  const input = args as Record<string, unknown>;
+  const fields = fieldKeys.flatMap(([label, keys]) => {
+    const value = keys.flatMap((key) => words(input[key])).join(', ');
+    return value ? [{ label, value: value.slice(0, 500) }] : [];
+  });
+  if (!fields.length) return {};
+  const raw = bodyKeys.map((key) => input[key]).find((value) => typeof value === 'string');
+  const text =
+    typeof raw === 'string' && input.is_html === true
+      ? raw.replace(/<br\s*\/?>|<\/p>/gi, '\n').replace(/<[^>]+>/g, '')
+      : raw;
+  const body = typeof text === 'string' ? text.trim().slice(0, 4000) : '';
+  return { fields, ...(body ? { body } : {}) };
+}
+
 const tools: Record<string, string> = {
   bash: 'Ran a command',
   read: 'Read a file',

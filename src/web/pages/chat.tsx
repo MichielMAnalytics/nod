@@ -559,8 +559,16 @@ export function Chat({
   const streamIds = new Set(streamEntries.map(([id]) => id));
   for (const id of streamTimes.current.keys())
     if (!streamIds.has(id)) streamTimes.current.delete(id);
+  const codeRequests = new Map(
+    (state.verificationRequests ?? []).flatMap((request) => {
+      const target = allMessages.findLast(
+        (message) => message.role === 'assistant' && message.turnId === request.turnId,
+      );
+      return target ? [[target.id, request.kind] as const] : [];
+    }),
+  );
   const displayMessages: Message[] = [
-    ...allMessages,
+    ...allMessages.filter((message) => !message.cardAnswer),
     ...streamEntries.map(([id, value]): Message => {
       if (!streamTimes.current.has(id)) streamTimes.current.set(id, new Date().toISOString());
       return {
@@ -848,17 +856,22 @@ export function Chat({
     value: string,
     attachments: Artifact[],
     reply: ComposerReply | null | undefined = replyTo,
-    source: 'composer' | 'task_card' | 'ask_nod' | 'task_reply' | 'answer_choice' = reply &&
-    reply.id === taskReply.current
-      ? 'task_reply'
-      : 'composer',
+    source:
+      | 'composer'
+      | 'task_card'
+      | 'ask_nod'
+      | 'task_reply'
+      | 'answer_choice'
+      | 'approval_card' = reply && reply.id === taskReply.current ? 'task_reply' : 'composer',
     recording?: File,
     questionAnswer?: QuestionAnswer,
+    approvalAnswer?: { approvalId: string; approved: boolean },
   ): Promise<ComposerSendResult & { error?: string; questionUnavailable?: true }> {
     if (welcoming || spendingPaused) return { sent: false, restoreText: true };
     unreadPositioned.current = currentUnreadVisit.current;
     const replyId = reply?.id;
     questionAnswer ??=
+      !approvalAnswer &&
       reply &&
       !unavailableQuestions.has(reply.id) &&
       (reply.answerQuestion ||
@@ -866,11 +879,13 @@ export function Chat({
         state.pendingAnswerChoiceMessageIds?.includes(reply.id))
         ? { custom: true }
         : undefined;
-    const directAnswer = source === 'answer_choice';
+    const directAnswer = source === 'answer_choice' || source === 'approval_card';
     const captureAnalytics = analyticsForCurrentSession();
     const sentThread = threadId;
     const verificationRequests = (
-      questionAnswer && 'choiceIds' in questionAnswer ? [] : (state.verificationRequests ?? [])
+      (questionAnswer && !('custom' in questionAnswer)) || approvalAnswer
+        ? []
+        : (state.verificationRequests ?? [])
     ).filter(
       (request) =>
         !reply || request.turnId === allMessages.find((message) => message.id === replyId)?.turnId,
@@ -903,6 +918,7 @@ export function Chat({
           reply?.isQuote === true,
           recordingKey ? recordingIds.current.get(recordingKey) : null,
           questionAnswer ?? null,
+          approvalAnswer ?? null,
         ]);
     if (privateVerification) retry.current = null;
     const previousAttempt =
@@ -950,6 +966,7 @@ export function Chat({
       attachments,
       turnId: null,
       createdAt: new Date().toISOString(),
+      ...(questionAnswer || approvalAnswer ? { cardAnswer: true as const } : {}),
       ...(reply
         ? {
             replyToMessageId: reply.id,
@@ -993,6 +1010,7 @@ export function Chat({
           ...(seenMessageId ? { seenMessageId } : {}),
           ...(verificationRequestId ? { verificationRequestId } : {}),
           ...(questionAnswer ? { questionAnswer } : {}),
+          ...(approvalAnswer ? { approvalAnswer } : {}),
         });
       submittedBody = messageBody;
       let body: string | FormData = messageBody;
@@ -1019,8 +1037,8 @@ export function Chat({
         retryableFailure = result.retryable === true;
         questionUnavailable =
           response.status === 409 &&
-          result.code === 'question_unavailable' &&
-          Boolean(questionAnswer && replyId) &&
+          (result.code === 'question_unavailable' || result.code === 'approval_unavailable') &&
+          Boolean((questionAnswer || approvalAnswer) && replyId) &&
           !privateVerification;
         if (response.status === 409 && verificationStatus === undefined)
           void refresh().catch(() => {});
@@ -1625,29 +1643,25 @@ export function Chat({
                           setReplyTo((current) => (current?.id === message.id ? null : current));
                         return result.sent;
                       }}
-                      onWriteAnswer={(value) => {
-                        const input = composer.current;
-                        if (!input) return;
-                        if (replyTo?.id === message.id) {
-                          if (!input.hasDraft()) setText(value);
-                          setReplyTo({ ...replyTo, answerQuestion: true });
-                          setReplyNotice('');
-                        } else if (replyTo || input.hasDraft()) {
-                          setReplyNotice(
-                            'Finish or clear your current draft before answering this question.',
-                          );
-                        } else {
-                          taskReply.current = null;
-                          setReplyTo({
-                            id: message.id,
-                            role: 'assistant',
-                            text: message.text,
-                            answerQuestion: true,
-                          });
-                          setText(value);
-                        }
-                        input.focus();
-                      }}
+                      onApprove={
+                        message.approval
+                          ? async (approved, label) => {
+                              const result = await send(
+                                label,
+                                [],
+                                { id: message.id, role: 'assistant', text: message.text },
+                                'approval_card',
+                                undefined,
+                                undefined,
+                                { approvalId: message.approval!.id, approved },
+                              );
+                              if (result.questionUnavailable) return true;
+                              if (!result.sent && result.error) throw new Error(result.error);
+                              return result.sent;
+                            }
+                          : undefined
+                      }
+                      codeRequest={codeRequests.get(message.id)}
                       pendingAudio={
                         optimistic.find((item) => item.message.id === message.id)?.audio
                       }

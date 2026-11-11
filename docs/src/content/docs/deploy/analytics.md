@@ -87,26 +87,26 @@ Model events use one `provider` property. Onboarding completion and execution st
 
 ### Setup and app interaction
 
-| Event                                             | What it records                                                                                              |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `$pageview`                                       | Normalized app route. URLs use the placeholder `https://app.example` host.                                   |
-| `onboarding_step_viewed`                          | Step (`welcome`, `email`, `brain`, `privacy`) and direction. Native Welcome isn't observed.                  |
-| `onboarding_step_skipped`                         | Skipped `email` step.                                                                                        |
-| `onboarding_completed`                            | First saved completion and selected model provider, when available.                                          |
-| `settings_viewed`, `tab_viewed`                   | Fixed settings section or Apps page tab.                                                                     |
-| `local_setting_changed`                           | Changed, persisted local theme, launch-at-login, or notification choice with a fixed value.                  |
-| `notification_opened`                             | Clicked browser reply notification, without its content. Native notification clicks aren't observed.         |
-| `chat_message_sent`                               | Attachment/reply booleans, text/voice input, and composer/task-card/ask-Nod/task-reply/answer-choice source. |
-| `chat_stop_requested`                             | Stop requested in the app.                                                                                   |
-| `task_card_started`, `task_action`                | Card kind and bounded position, or fixed task control.                                                       |
-| `setup_link_clicked`, `link_opened`               | Setup kind or text/tooltip source and optional bounded position. No link destination.                        |
-| `browser_handoff_action`                          | Successful done, back, reload, expand, or collapse operation.                                                |
-| `message_reaction_changed`, `message_action`      | Fixed reaction/action, input method, and assistant/user role. Copy follows clipboard success.                |
-| `attachment_added`                                | Picker/drop/paste, first-file category, and count bucket (`1`, `2-5`, `6+`).                                 |
-| `app_connect_clicked`, `app_connection_completed` | Entry point and whether access setup was needed, or completed connection flow.                               |
-| `model_selected`                                  | Provider, settings/onboarding entry, and whether the recommendation was chosen.                              |
-| `ui_error`                                        | Fixed area and action, without error text.                                                                   |
-| `feedback_sent`                                   | Bug/feature/other category and attachment/report booleans, without feedback content.                         |
+| Event                                             | What it records                                                                                                            |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `$pageview`                                       | Normalized app route. URLs use the placeholder `https://app.example` host.                                                 |
+| `onboarding_step_viewed`                          | Step (`welcome`, `email`, `brain`, `privacy`) and direction. Native Welcome isn't observed.                                |
+| `onboarding_step_skipped`                         | Skipped `email` step.                                                                                                      |
+| `onboarding_completed`                            | First saved completion and selected model provider, when available.                                                        |
+| `settings_viewed`, `tab_viewed`                   | Fixed settings section or Apps page tab.                                                                                   |
+| `local_setting_changed`                           | Changed, persisted local theme, launch-at-login, or notification choice with a fixed value.                                |
+| `notification_opened`                             | Clicked browser reply notification, without its content. Native notification clicks aren't observed.                       |
+| `chat_message_sent`                               | Attachment/reply booleans, text/voice input, and composer/task-card/ask-Nod/task-reply/answer-choice/approval-card source. |
+| `chat_stop_requested`                             | Stop requested in the app.                                                                                                 |
+| `task_card_started`, `task_action`                | Card kind and bounded position, or fixed task control.                                                                     |
+| `setup_link_clicked`, `link_opened`               | Setup kind or text/tooltip source and optional bounded position. No link destination.                                      |
+| `browser_handoff_action`                          | Successful done, back, reload, expand, or collapse operation.                                                              |
+| `message_reaction_changed`, `message_action`      | Fixed reaction/action, input method, and assistant/user role. Copy follows clipboard success.                              |
+| `attachment_added`                                | Picker/drop/paste, first-file category, and count bucket (`1`, `2-5`, `6+`).                                               |
+| `app_connect_clicked`, `app_connection_completed` | Entry point and whether access setup was needed, or completed connection flow.                                             |
+| `model_selected`                                  | Provider, settings/onboarding entry, and whether the recommendation was chosen.                                            |
+| `ui_error`                                        | Fixed area and action, without error text.                                                                                 |
+| `feedback_sent`                                   | Bug/feature/other category and attachment/report booleans, without feedback content.                                       |
 
 Settings sections are `general`, `notifications`, `models`, `voice`, `memory`, and `privacy`. A section view means it was reached by navigation or scrolling, not that a setting changed. Settings paths normalize to `/settings`. Apps tabs are `all` and `connected`; `/tasks` is the Scheduled page and has no tab events.
 
@@ -217,7 +217,7 @@ Presentation open means expanding the native presentation into its drawer; copy 
 
 `open` and `reveal` follow native API success. `reuse_requested` means the app dispatched a reuse request, not that an attachment was accepted or sent. Reuse locations also cover the command palette (`commands`) and internal file drops (`composer`); artifact views remain limited to message and drawer locations.
 
-Answer-choice views count once per question in a sharing period, while the choices are in the viewport and the app is visible. Selections follow a server-accepted answer. Option toggles, custom composer answers, and failed, rejected, or unavailable submissions are not selections. Accepted choices also emit `chat_message_sent` with `source=answer_choice` and `input=text`. Question and option IDs, labels, selected text, and response content are excluded.
+Answer-choice views count once per question in a sharing period, while the choices are in the viewport and the app is visible. Selections follow a server-accepted answer. Option toggles, answers with only typed text, and failed, rejected, or unavailable submissions are not selections; typed text sent with choices counts only the choices. Accepted choices also emit `chat_message_sent` with `source=answer_choice` and `input=text`. Question and option IDs, labels, selected text, and response content are excluded. An accepted approval-card answer emits `chat_message_sent` with `source=approval_card` and `input=text`; the server's `confirmation_changed` event records whether it approved or declined.
 
 ### Surveys
 

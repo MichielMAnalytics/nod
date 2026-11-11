@@ -124,7 +124,7 @@ async function call(tools: Map<string, AgentTool>, name: string, args: Record<st
 
 test('answer choices remain ordinary questions with runtime-owned IDs and bounded public options', async () => {
   const choices = [
-    { label: 'Work account', description: 'The shared project mailbox' },
+    { label: 'Work account, the shared project mailbox' },
     { label: 'Personal account' },
   ];
   const asked = await fixture(async (tools) => {
@@ -133,6 +133,7 @@ test('answer choices remain ordinary questions with runtime-owned IDs and bounde
       { choices: Array.from({ length: 7 }, () => ({ label: 'Extra account' })) },
       { choices: [{ label: 'Account', action: 'send_email' }] },
       { choices: [{ label: 'Account', id: randomUUID() }] },
+      { choices: [{ label: 'Account', description: 'The shared project mailbox' }] },
     ])
       await assert.rejects(call(tools, 'ask_user', { question: 'Which account?', ...invalid }));
     await call(tools, 'ask_user', {

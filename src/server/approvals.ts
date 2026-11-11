@@ -51,6 +51,7 @@ export interface ChatConfirmationInput {
   sourceId?: string;
   hasAttachments?: boolean;
   answer?: { approvalId: string; approved?: boolean };
+  clicked?: true;
 }
 
 export type ChatConfirmationResult =
@@ -235,22 +236,6 @@ export async function createApprovals(
     });
   };
   await pool.query(`${locksTable};
-  CREATE TABLE IF NOT EXISTS approvals (
-    id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid REFERENCES threads(id),
-    turn_id uuid REFERENCES turns(id), execution_turn_id uuid REFERENCES turns(id),
-    action text NOT NULL, args jsonb NOT NULL, status text NOT NULL DEFAULT 'pending',
-    created_at timestamptz NOT NULL DEFAULT now(),
-    source_message_id uuid REFERENCES messages(id) ON DELETE SET NULL,
-    confirmation_message_id uuid REFERENCES messages(id) ON DELETE SET NULL,
-    result jsonb
-  );
-    ALTER TABLE approvals ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
-      ADD COLUMN IF NOT EXISTS expected_revision integer,
-      ADD COLUMN IF NOT EXISTS details jsonb;
-    CREATE INDEX IF NOT EXISTS approvals_turn ON approvals(turn_id);
-    CREATE INDEX IF NOT EXISTS approvals_execution_turn ON approvals(execution_turn_id);
-    CREATE INDEX IF NOT EXISTS approvals_confirmation_message ON approvals(confirmation_message_id);
-    CREATE INDEX IF NOT EXISTS approvals_memory_save ON approvals(owner_id,source_message_id) WHERE action='NOD_memory_save';
     UPDATE approvals SET status='uncertain' WHERE status='executing';
   `);
 
@@ -517,6 +502,7 @@ export async function createApprovals(
     if (!approval || !input.answer || approval.status !== 'pending') return undefined;
     const approved = input.answer.approvalId === approval.id ? input.answer.approved : undefined;
     const active = ['running', 'waiting'].includes(approval.turn_status);
+    if (input.clicked && (approved === undefined || !active)) return undefined;
     if (approved === undefined) {
       await client.query("UPDATE approvals SET status='expired' WHERE id=$1 AND owner_id=$2", [
         approval.id,
@@ -562,8 +548,16 @@ export async function createApprovals(
       ownerId,
     ]);
     await client.query(
-      "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id) VALUES($1,$2,'user',$3,$4,$5,$6)",
-      [messageId, ownerId, input.text, input.threadId, turnId, input.replyToMessageId ?? null],
+      "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id,approval_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7)",
+      [
+        messageId,
+        ownerId,
+        input.text,
+        input.threadId,
+        turnId,
+        input.replyToMessageId ?? null,
+        input.clicked ? approved : null,
+      ],
     );
     await client.query('UPDATE approvals SET status=$2,execution_turn_id=$3 WHERE id=$1', [
       approval.id,

@@ -1,5 +1,11 @@
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
-import { answerChoicesSchema } from '../shared/answer-choices.ts';
+import {
+  answerChoicesSchema,
+  questionAnswerSchema,
+  writtenAnswer,
+  type AnswerChoice,
+} from '../shared/answer-choices.ts';
+import { approvalContent, approvalTitle } from './action-presentation.ts';
 import Fastify, { type FastifyReply } from 'fastify';
 import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
@@ -40,6 +46,7 @@ import { browserErrorMessage } from '../shared/browser-errors.ts';
 import { browserHandoffInputs } from '../shared/browser-handoff.ts';
 import type {
   Activity,
+  ApprovalState,
   Configuration,
   Message,
   MessageHistoryPage,
@@ -52,25 +59,74 @@ import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } fro
 import { messagePreview } from './message-preview.ts';
 
 const messageFields = `m.id,m.role,m.text,m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
+ (m.role='user' AND (m.question_answer IS NOT NULL OR m.approval_answer IS NOT NULL)) AS "cardAnswer",
+ CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a
+   WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
+ CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'args',a.args,'active',u.status IN ('running','waiting')) FROM approvals a
+   JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id LIMIT 1) END AS "approval",
  CASE WHEN target.id IS NULL THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
 function visualText(presentation: unknown) {
   const visual = presentationSchema.safeParse(presentation);
   return visual.success ? presentationText(visual.data) : '';
 }
 
-function messageView(row: Message & { assistantReaction?: MessageReaction | null }): Message {
+type ApprovalRow = {
+  id: string;
+  status: string;
+  action: string;
+  args: unknown;
+  active: boolean;
+};
+type ChoiceAnswerRow = { answer: unknown; text: string };
+
+function approvalState(row: ApprovalRow): ApprovalState {
+  if (row.status === 'pending') return row.active ? 'pending' : 'expired';
+  if (row.status === 'confirmed' || row.status === 'executing') return 'working';
+  if (row.status === 'completed') return 'done';
+  if (row.status === 'declined' || row.status === 'uncertain') return row.status;
+  return 'expired';
+}
+
+function choiceAnswerView(options: AnswerChoice[], row: ChoiceAnswerRow | null | undefined) {
+  const answer = questionAnswerSchema.safeParse(row?.answer);
+  if (!row || !answer.success) return undefined;
+  if (!('choiceIds' in answer.data)) return { choiceIds: [], text: row.text };
+  const { choiceIds, custom } = answer.data;
+  const text =
+    custom &&
+    writtenAnswer(
+      options.filter((option) => choiceIds.includes(option.id)),
+      row.text,
+    );
+  return { choiceIds, ...(text ? { text } : {}) };
+}
+
+type MessageRow = Omit<Message, 'approval' | 'choiceAnswer' | 'cardAnswer'> & {
+  assistantReaction?: MessageReaction | null;
+  approval?: ApprovalRow | null;
+  choiceAnswer?: ChoiceAnswerRow | null;
+  cardAnswer?: boolean | null;
+};
+
+function messageView(row: MessageRow): Message {
   const {
     assistantReaction,
     presentation,
     audioCaption,
     answerChoices,
     answerChoicesPending,
+    approval,
+    choiceAnswer,
+    cardAnswer,
     ...message
   } = row;
   const visual =
     message.role === 'assistant' ? presentationSchema.safeParse(presentation) : undefined;
   const choices =
     message.role === 'assistant' ? answerChoicesSchema.safeParse(answerChoices) : undefined;
+  const answered = choices?.success
+    ? choiceAnswerView(choices.data.options, choiceAnswer)
+    : undefined;
   return {
     ...message,
     ...(typeof audioCaption === 'string' ? { audioCaption } : {}),
@@ -78,6 +134,18 @@ function messageView(row: Message & { assistantReaction?: MessageReaction | null
     ...(choices?.success
       ? { answerChoices: choices.data, answerChoicesPending: answerChoicesPending === true }
       : {}),
+    ...(answered ? { choiceAnswer: answered } : {}),
+    ...(approval
+      ? {
+          approval: {
+            id: approval.id,
+            state: approvalState(approval),
+            ...approvalTitle(approval.action),
+            ...approvalContent(approval.action, approval.args),
+          },
+        }
+      : {}),
+    ...(cardAnswer ? { cardAnswer: true as const } : {}),
     reactions: [
       ...(message.reaction ? [{ actor: 'user' as const, reaction: message.reaction }] : []),
       ...(assistantReaction ? [{ actor: 'assistant' as const, reaction: assistantReaction }] : []),
@@ -108,9 +176,7 @@ export interface AppDependencies {
 export async function createApp(dependencies: AppDependencies = {}) {
   const publicConfiguration = dependencies.configuration ?? configuration;
   const artifacts = dependencies.artifacts ?? localArtifacts;
-  async function messageViews(
-    rows: Array<Message & { assistantReaction?: MessageReaction | null }>,
-  ) {
+  async function messageViews(rows: MessageRow[]) {
     const replyIds = [
       ...new Set(
         rows.flatMap((row) => (row.replyTo && !row.replyTo.isQuote ? [row.replyTo.id] : [])),
@@ -385,10 +451,18 @@ export async function createApp(dependencies: AppDependencies = {}) {
           !value.questionAnswer ||
           (Boolean(value.replyToMessageId) && !value.verificationRequestId),
       )
+      .refine(
+        (value) =>
+          !value.approvalAnswer ||
+          (Boolean(value.replyToMessageId) &&
+            !value.questionAnswer &&
+            !value.verificationRequestId &&
+            value.attachmentIds.length === 0),
+      )
       .parse(request.body);
     const clientMessageId = input.clientMessageId ?? randomUUID();
     const verification =
-      input.questionAnswer && 'choiceIds' in input.questionAnswer
+      (input.questionAnswer && !('custom' in input.questionAnswer)) || input.approvalAnswer
         ? undefined
         : await dependencies.verification?.accept(input.text, {
             ...input,
@@ -424,6 +498,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         threadId: input.threadId,
         clientMessageId,
         questionAnswer: input.questionAnswer,
+        approvalAnswer: input.approvalAnswer,
       },
     );
     return submitted;

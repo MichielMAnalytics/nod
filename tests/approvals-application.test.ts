@@ -582,6 +582,33 @@ test(
           await waitFor(declined.json().turnId, 'succeeded');
           assert.equal((await approvalsFor(held))[0].status, 'declined');
           assert.equal(sends(), 0);
+
+          const clicked = await propose('GMAIL_SEND_EMAIL', email('click@example.test'), 'apps');
+          const [clickCard] = await approvalsFor(clicked);
+          const click = (approvalId: string) =>
+            request('POST', '/api/messages', {
+              text: 'Send',
+              replyToMessageId: clickCard.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              approvalAnswer: { approvalId, approved: true },
+            });
+          const stale = await click(randomUUID());
+          assert.equal(stale.statusCode, 409, stale.body);
+          assert.equal((await approvalsFor(clicked))[0].status, 'pending');
+          assert.equal(sends(), 0);
+          const accepted = await click(clickCard.id);
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(clicked))[0].status, 'completed');
+          assert.equal(sends(), 1);
+          const answer = await pool.query(
+            'SELECT approval_answer FROM messages WHERE id=$1 AND owner_id=$2',
+            [accepted.json().messageId, ownerId],
+          );
+          assert.equal(answer.rows[0]?.approval_answer, true);
+          const again = await click(clickCard.id);
+          assert.equal(again.statusCode, 409, again.body);
+          assert.equal(sends(), 1);
         },
       );
 

@@ -3580,6 +3580,21 @@ test(
             assert.equal(both.statusCode, 200);
             created.push(both.json().turnId);
             await waitFor(settled(both.json().turnId));
+            const combined = await addQuestion(undefined, true);
+            const picked = [combined.answerChoices.options[0]!];
+            const written = {
+              ...payload(combined),
+              questionAnswer: { choiceIds: [picked[0]!.id], custom: true },
+            };
+            for (const text of [choiceAnswerText(picked), `${choiceAnswerText(picked)}\n `, 'Own'])
+              assert.equal((await sendJson({ ...written, text })).statusCode, 400);
+            const added = await sendJson({
+              ...written,
+              text: `${choiceAnswerText(picked)}\nSynthetic addition`,
+            });
+            assert.equal(added.statusCode, 200);
+            created.push(added.json().turnId);
+            await waitFor(settled(added.json().turnId));
             const superseded = await addQuestion();
             const replacement = await addQuestion(superseded.sessionId);
             assert.equal((await shown(superseded.id)).answerChoicesPending, false);

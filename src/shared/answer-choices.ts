@@ -21,7 +21,9 @@ export const answerChoicesSchema = z
   );
 
 export const questionAnswerSchema = z.union([
-  z.object({ choiceIds: z.array(z.uuid()).min(1).max(6) }).strict(),
+  z
+    .object({ choiceIds: z.array(z.uuid()).min(1).max(6), custom: z.literal(true).optional() })
+    .strict(),
   z.object({ custom: z.literal(true) }).strict(),
 ]);
 
@@ -38,6 +40,11 @@ export function choiceAnswerText(options: AnswerChoice[]) {
         : label.trim();
     })
     .join('\n');
+}
+
+export function writtenAnswer(options: AnswerChoice[], text: string) {
+  const chosen = `${choiceAnswerText(options)}\n`;
+  return text.startsWith(chosen) ? text.slice(chosen.length).trim() : '';
 }
 
 export function questionWithChoices(question: string, choices: AnswerChoices) {

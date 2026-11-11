@@ -7,6 +7,7 @@ import {
 import {
   answerChoicesSchema,
   choiceAnswerText,
+  writtenAnswer,
   questionAnswerSchema,
   questionWithChoices,
   type AnswerChoices,
@@ -109,6 +110,7 @@ interface SubmitUserMessageOptions {
   seenMessageId?: string;
   clientMessageId?: string;
   questionAnswer?: QuestionAnswer;
+  approvalAnswer?: { approvalId: string; approved: boolean };
   audioCaption?: string;
   prompt?: string;
   answer?: ChatConfirmationInput['answer'];
@@ -555,11 +557,21 @@ export async function submitUserMessage(
     sourceId: options.sourceId,
     hasAttachments: attachments.length > 0 || Boolean(options.prepareAttachments),
   };
+  if (
+    options.approvalAnswer &&
+    (options.questionAnswer ||
+      !options.replyToMessageId ||
+      !text.trim() ||
+      confirmation.hasAttachments)
+  )
+    throw httpError('Answer the approval with the button you chose.', 400);
   const answer = options.questionAnswer
     ? undefined
-    : options.client
-      ? options.answer
-      : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
+    : options.approvalAnswer
+      ? options.approvalAnswer
+      : options.client
+        ? options.answer
+        : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
   const submit = async (client: PoolClient): Promise<SubmitUserMessageResult> => {
     const thread = await lockThread(client);
     if (options.threadId !== undefined && options.threadId !== thread.id)
@@ -627,8 +639,8 @@ export async function submitUserMessage(
         if (
           ids.size !== submitted.choiceIds.length ||
           selected.length !== ids.size ||
-          (!choices.multiple && selected.length !== 1) ||
-          text !== choiceAnswerText(selected)
+          (!choices.multiple && (selected.length !== 1 || submitted.custom)) ||
+          (submitted.custom ? !writtenAnswer(selected, text) : text !== choiceAnswerText(selected))
         )
           throw httpError('Choose an available answer or write your own.', 400);
       }
@@ -645,8 +657,13 @@ export async function submitUserMessage(
           ...confirmation,
           threadId: thread.id,
           answer,
+          ...(options.approvalAnswer ? { clicked: true } : {}),
         });
     if (confirmed && 'turnId' in confirmed) return confirmed;
+    if (options.approvalAnswer)
+      throw Object.assign(httpError('This approval is no longer waiting for an answer.', 409), {
+        code: 'approval_unavailable',
+      });
     await localArtifacts.retainArtifacts(
       attachments.map((attachment) => attachment.id),
       client,
