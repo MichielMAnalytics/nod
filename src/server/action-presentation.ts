@@ -112,6 +112,20 @@ function without(text: string, pattern: RegExp) {
 const hidden = /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
 const tag = /<[^>]+>/g;
 
+function start(html: string) {
+  if (html.length <= 20_000) return html;
+  let part = html.slice(0, 20_000);
+  const open = new Map<string, number>();
+  for (const match of part.matchAll(/<(\/?)(style|script|head|title|a)\b/gi)) {
+    const name = match[2]!.toLowerCase();
+    if (match[1]) open.delete(name);
+    else if (!open.has(name)) open.set(name, match.index);
+  }
+  if (open.size) part = part.slice(0, Math.min(...open.values()));
+  const tagStart = part.lastIndexOf('<');
+  return tagStart > part.lastIndexOf('>') ? part.slice(0, tagStart) : part;
+}
+
 function plainText(html: string) {
   return without(
     without(html, hidden)
@@ -158,7 +172,7 @@ export function approvalContent(
     .find((value) => typeof value === 'string' && value.trim());
   if (typeof raw !== 'string') return { fields };
   const html = input.is_html === true;
-  const text = (html ? plainText(raw.slice(0, 20_000)) : raw).trim();
+  const text = (html ? plainText(start(raw)) : raw).trim();
   const cut = text.length > 4000 || (html && raw.length > 20_000);
   return {
     fields,
