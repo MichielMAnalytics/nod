@@ -6,6 +6,7 @@ import type { MemoryBrief } from '../ports/memory-recall.ts';
 import type { MemoryService } from './memory.ts';
 import { createHistorySearch } from './history.ts';
 import { unsafe } from './memory-tree.ts';
+import { withdrawnSql } from './turn-chain.ts';
 
 const planSchema = z.object({
   mode: z.enum(['none', 'personalize', 'recall', 'aggregate']),
@@ -146,7 +147,17 @@ export function createMemoryRecall(options: {
       }
       if (messages.size >= 100) break;
     }
-    let candidates = [...messages.values()];
+    const withdrawn = new Set(
+      messages.size
+        ? (
+            await options.pool.query<{ id: string }>(
+              `SELECT m.id FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND ${withdrawnSql('m')}`,
+              [options.ownerId, [...messages.keys()]],
+            )
+          ).rows.map(({ id }) => id)
+        : [],
+    );
+    let candidates = [...messages.values()].filter(({ id }) => !withdrawn.has(id));
     const ranked = rankSchema.safeParse(
       options.curator.configured && canContinue() && (facts.length || candidates.length)
         ? await ask(

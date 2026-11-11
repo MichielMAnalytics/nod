@@ -1050,6 +1050,42 @@ test(
       );
 
       await t.test(
+        'a request the owner stopped is never owner words for a later action',
+        async () => {
+          const answered = await begin('Email Ana the answered invoice.');
+          await finish(answered.turnId);
+          await finish((await begin('Thanks, that is all.')).turnId, 'succeeded');
+          await begin('Email Bob the stopped invoice.');
+          await thread.stopThread();
+          const later = await begin('What is on my calendar today?');
+          aligned = (input) =>
+            input.userMessages.some((message: { text: string }) =>
+              message.text.includes('Bob the stopped invoice'),
+            );
+          try {
+            assert.deepEqual(
+              await trust.check(later, 'GMAIL_SEND_EMAIL', email('bob@example.test')),
+              {
+                confirm: true,
+                reason: 'unrequested',
+              },
+            );
+            const seen = reviews
+              .at(-1)!
+              .userMessages.map((message: { text: string }) => message.text);
+            assert.deepEqual(seen.slice(-3), [
+              'Email Ana the answered invoice.',
+              'Thanks, that is all.',
+              'What is on my calendar today?',
+            ]);
+            assert.ok(!seen.some((text: string) => text.includes('stopped invoice')));
+          } finally {
+            await finish(later.turnId, 'cancelled');
+          }
+        },
+      );
+
+      await t.test(
         'background work shows the checker only the standing instruction, and a scheduled run only its instruction',
         async () => {
           const setRule = (rule: string) =>

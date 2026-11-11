@@ -22,7 +22,7 @@ import { PgBoss } from 'pg-boss';
 import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
-import { laterSupersedingTurnSql, turnChainSql } from './turn-chain.ts';
+import { laterSupersedingTurnSql, turnChainSql, withdrawnSql } from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -717,8 +717,8 @@ export async function submitUserMessage(
         ).rows[0]
       : undefined;
     await client.query(
-      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at)
-       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END)`,
+      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at,withdrawn)
+       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END,$11='cancelled')`,
       [
         turnId,
         ownerId,
@@ -797,8 +797,9 @@ export async function cancelTurns(
   );
   abortTurns(candidates.rows.map(({ id }) => id));
   const current = await client.query(
-    "UPDATE turns SET status='cancelled',finished_at=now() WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND (NOT $4 OR session_id<>$1) AND status IN ('queued','running','waiting') RETURNING id,session_id",
-    values,
+    `UPDATE turns u SET status='cancelled',finished_at=now(),withdrawn=$5 AND (u.status<>'waiting' OR NOT ${laterSupersedingTurnSql})
+     WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND (NOT $4 OR u.session_id<>$1) AND u.status IN ('queued','running','waiting') RETURNING u.id,u.session_id`,
+    [...values, actor === 'owner'],
   );
   const taskIds = (
     await client.query(
@@ -1016,16 +1017,22 @@ async function finishTurn(
   client: PoolClient,
   turnId: string,
   status: string,
-  fields: { waitingReason?: string; error?: string; handoffBrowserId?: string } = {},
+  fields: {
+    waitingReason?: string;
+    error?: string;
+    handoffBrowserId?: string;
+    withdrawn?: boolean;
+  } = {},
 ) {
   const updated = await client.query(
-    "UPDATE turns SET status=$2,waiting_reason=$3,error=$4,handoff_browser_id=$5,finished_at=now() WHERE id=$1 AND status='running' RETURNING id",
+    "UPDATE turns SET status=$2,waiting_reason=$3,error=$4,handoff_browser_id=$5,withdrawn=$6,finished_at=now() WHERE id=$1 AND status='running' RETURNING id",
     [
       turnId,
       status,
       fields.waitingReason ?? null,
       fields.error ?? null,
       fields.handoffBrowserId ?? null,
+      fields.withdrawn ?? false,
     ],
   );
   if (updated.rowCount)
@@ -1089,7 +1096,7 @@ async function failTurn(
   turnId: string,
   present: ThreadDependencies['present'],
   error = interrupted,
-  next?: string,
+  { next, withdrawn }: { next?: string; withdrawn?: boolean } = {},
 ) {
   const turn = await transaction(async (client) => {
     const thread = await lockThread(client);
@@ -1118,7 +1125,7 @@ async function failTurn(
       )
     ).rows[0];
     if (!turn) return;
-    await finishTurn(client, turnId, 'failed', { error });
+    await finishTurn(client, turnId, 'failed', { error, withdrawn });
     const task = turn.task_id
       ? (
           await client.query('SELECT message_id FROM tasks WHERE id=$1 AND owner_id=$2', [
@@ -1180,7 +1187,7 @@ function failAtLimit(turnId: string, monthlyUsd?: number) {
     turnId,
     undefined,
     monthlyUsd === undefined ? spendingLimitReached : spendingLimitText(monthlyUsd),
-    'Raise or remove it in [Usage](/usage), or tell me here.',
+    { next: 'Raise or remove it in [Usage](/usage), or tell me here.' },
   );
 }
 
@@ -1379,14 +1386,15 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        FROM messages m CROSS JOIN seen CROSS JOIN boundary
        LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.id IS DISTINCT FROM $3::uuid
+       AND NOT ${withdrawnSql('m')}
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
       [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],
     ),
-    pool.query<{ status: string; error: string | null }>(
-      `SELECT status,error FROM turns WHERE owner_id=$1 AND session_id=$2 AND id<>$3
+    pool.query<{ status: string; error: string | null; withdrawn: boolean }>(
+      `SELECT status,error,withdrawn FROM turns WHERE owner_id=$1 AND session_id=$2 AND id<>$3 AND started_at IS NOT NULL
          AND (created_at,id)<(SELECT created_at,id FROM turns WHERE id=$3)
          ORDER BY created_at DESC,id DESC LIMIT 1`,
       [ownerId, turn.session_id, turn.id],
@@ -1434,6 +1442,12 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       memory: memory ?? '',
       ...(previous.rows[0]?.status === 'failed' && previous.rows[0].error
         ? { previousFailure: previous.rows[0].error }
+        : {}),
+      ...(previous.rows[0]?.withdrawn
+        ? {
+            withdrawnRequest:
+              previous.rows[0].status === 'failed' ? ('failed' as const) : ('stopped' as const),
+          }
         : {}),
       ...(confirmedActions?.length ? { confirmedActions } : {}),
       ...(related.length ? { relatedConversation: related } : {}),
@@ -2122,7 +2136,11 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       await failAtLimit(turnId, limit?.monthlyUsd);
     } else {
       failure = error instanceof ModelRequestError ? 'model' : 'unknown';
-      if (await failTurn(turnId, dependencies.present, failureText(error)))
+      if (
+        await failTurn(turnId, dependencies.present, failureText(error), {
+          withdrawn: failure === 'model',
+        })
+      )
         logFailure('turn_failed', error, { threadId, turnId, sessionId: turn.session_id });
     }
   } finally {

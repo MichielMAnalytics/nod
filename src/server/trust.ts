@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import type { DecisionModel, DecisionQuestion, ModelReview } from '../ports/decisions.ts';
 import { withTurnLock, type TurnRef } from './thread.ts';
 import { turnOrigin } from './approvals.ts';
+import { withdrawnSql } from './turn-chain.ts';
 import { trustBasis, type TrustBasis, type TrustWords } from './trust-basis.ts';
 
 import { createTrustReview } from './trust-review.ts';
@@ -55,6 +56,7 @@ export function createTrust(options: {
              NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.message_id=messages.id OR u.id=messages.turn_id)
                AND to_jsonb(u)->>'task_id' IS NOT NULL) AS chat
            FROM messages WHERE owner_id=$1 AND thread_id=$2 AND role='user' AND text<>''
+             AND NOT ${withdrawnSql('messages')}
              AND (created_at>$5 OR id=ANY($3::uuid[])) AND text NOT IN (
              SELECT task->>'title' FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title' IS NOT NULL)),
