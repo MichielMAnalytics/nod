@@ -101,11 +101,12 @@ function character(code: number, fallback: string) {
 }
 
 function without(text: string, pattern: RegExp) {
-  for (;;) {
+  for (let pass = 0; pass < 8; pass++) {
     const next = text.replace(pattern, '');
     if (next === text) return text;
     text = next;
   }
+  return text.replaceAll('<', '');
 }
 
 const hidden = /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
@@ -135,7 +136,10 @@ function plainText(html: string) {
     .replace(/\n{3,}/g, '\n\n');
 }
 
-export function approvalContent(action: string, args: unknown) {
+export function approvalContent(
+  action: string,
+  args: unknown,
+): { fields?: Array<{ label: string; value: string }>; body?: string; bodyCut?: true } {
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
     !args ||
@@ -152,12 +156,15 @@ export function approvalContent(action: string, args: unknown) {
   const raw = bodyKeys
     .map((key) => input[key])
     .find((value) => typeof value === 'string' && value.trim());
-  const text =
-    typeof raw === 'string' ? (input.is_html === true ? plainText(raw) : raw).trim() : '';
-  if (!text) return { fields };
-  return text.length > 4000
-    ? { fields, body: text.slice(0, 4000), bodyCut: true as const }
-    : { fields, body: text };
+  if (typeof raw !== 'string') return { fields };
+  const html = input.is_html === true;
+  const text = (html ? plainText(raw.slice(0, 20_000)) : raw).trim();
+  const cut = text.length > 4000 || (html && raw.length > 20_000);
+  return {
+    fields,
+    ...(text ? { body: text.slice(0, 4000) } : {}),
+    ...(cut ? { bodyCut: true as const } : {}),
+  };
 }
 
 const tools: Record<string, string> = {

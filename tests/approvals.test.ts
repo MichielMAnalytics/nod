@@ -334,6 +334,15 @@ test('approval cards shorten long recipients and bodies, skip blank bodies and t
     }).body,
     'Hi there',
   );
+  const started = performance.now();
+  const nested = approvalContent('GMAIL_SEND_EMAIL', {
+    to: 'a@example.test',
+    is_html: true,
+    body: `Hi${'<scr'.repeat(100_000)}<script></script>${'ipt></script>'.repeat(100_000)}`,
+  });
+  assert.ok(performance.now() - started < 2000);
+  assert.ok(nested.body!.startsWith('Hi'));
+  assert.equal(nested.bodyCut, true);
   assert.equal(approvalTitle('mcp__synthetic_server__create_page').title, 'Create page');
   assert.equal(approvalTitle('mcp__synthetic__').title, 'Run an action');
 });
