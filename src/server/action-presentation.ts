@@ -100,21 +100,31 @@ function character(code: number, fallback: string) {
     : fallback;
 }
 
+function without(text: string, pattern: RegExp) {
+  for (;;) {
+    const next = text.replace(pattern, '');
+    if (next === text) return text;
+    text = next;
+  }
+}
+
+const hidden = /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const tag = /<[^>]+>/g;
+
 function plainText(html: string) {
-  return html
-    .replace(/<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(
-      /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
-      (_, double, single, bare, label) => {
-        const address = String(double ?? single ?? bare ?? '').trim();
-        const shown = String(label)
-          .replace(/<[^>]+>/g, '')
-          .trim();
-        return !address || shown === address ? shown || address : `${shown} (${address})`;
-      },
-    )
-    .replace(/<br\s*\/?>|<\/(p|div|li|tr|h[1-6])\s*>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  return without(
+    without(html, hidden)
+      .replace(
+        /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
+        (_, double, single, bare, label) => {
+          const address = String(double ?? single ?? bare ?? '').trim();
+          const shown = without(String(label), tag).trim();
+          return !address || shown === address ? shown || address : `${shown} (${address})`;
+        },
+      )
+      .replace(/<br\s*\/?>|<\/(p|div|li|tr|h[1-6])\s*>/gi, '\n'),
+    tag,
+  )
     .replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (match, decimal, hex, name) =>
       decimal
         ? character(Number(decimal), match)

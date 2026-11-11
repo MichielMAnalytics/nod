@@ -326,6 +326,14 @@ test('approval cards shorten long recipients and bodies, skip blank bodies and t
     approvalContent('GMAIL_SEND_EMAIL', { to: 'a@example.test', body: '  ', text: 'Hi' }),
     { fields: [{ label: 'To', value: 'a@example.test' }], body: 'Hi' },
   );
+  assert.equal(
+    approvalContent('GMAIL_SEND_EMAIL', {
+      to: 'a@example.test',
+      is_html: true,
+      body: '<scr<script>x</script>ipt>y</script>Hi there',
+    }).body,
+    'Hi there',
+  );
   assert.equal(approvalTitle('mcp__synthetic_server__create_page').title, 'Create page');
   assert.equal(approvalTitle('mcp__synthetic__').title, 'Run an action');
 });
