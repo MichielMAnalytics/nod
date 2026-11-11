@@ -1713,6 +1713,12 @@ async function initializeApplication(
       return submittedMessages.submit(...args);
     },
   };
+  const reactToMessage = (
+    messageId: string,
+    reaction: Parameters<typeof reactToAssistantMessage>[1],
+    wake = adapters.model.configured,
+    replyChannel?: string,
+  ) => reactToAssistantMessage(messageId, reaction, wake, userMessages, replyChannel);
   if (options.workers !== false) {
     if (options.heartbeat !== false) await triage.initializeHeartbeat();
     await initializeMemoryLearning({
@@ -2195,6 +2201,7 @@ async function initializeApplication(
     admission,
     artifacts,
     submitMessage: userMessages.submit,
+    reactToMessage,
     speech,
     attributeAudioUsage: ledger.attributeMediaUsage,
     verification: chatVerification,
@@ -2355,8 +2362,7 @@ async function initializeApplication(
       isRetirableScheduleConfirmation: approvals.isRetirableScheduleConfirmation,
       classifyRetiredReply: trust.classifyRetiredReply,
       acceptVerification: (text, input) => chatVerification.accept(text, input),
-      reacted: (messageId, reaction) =>
-        reactToAssistantMessage(messageId, reaction, adapters.model.configured),
+      reacted: (messageId, reaction) => reactToMessage(messageId, reaction),
       activeThread: (client) => lockThread(client),
       activity: activity.read,
       taskCommand: tasks.chatCommand,

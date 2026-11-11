@@ -46,6 +46,7 @@ export function createTrust(options: {
     originMessageIds: string[],
     taskId: string | null,
     since: Date,
+    currentTurnId: string,
   ): Promise<{ ids: string[]; words: TrustWords } | undefined> {
     const users = (
       await pool.query<{ id: string; text: string; created_at: Date }>(
@@ -55,6 +56,11 @@ export function createTrust(options: {
              NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.message_id=messages.id OR u.id=messages.turn_id)
                AND to_jsonb(u)->>'task_id' IS NOT NULL) AS chat
            FROM messages WHERE owner_id=$1 AND thread_id=$2 AND role='user' AND text<>''
+             AND (id=ANY($3::uuid[]) OR turn_id=$6::uuid OR EXISTS (
+               SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.message_id=messages.id OR u.id=messages.turn_id)
+                 AND to_jsonb(u)->>'task_id'=$4::text) OR (reply_to_message_id IS NULL AND NOT EXISTS (
+               SELECT 1 FROM turns r WHERE r.owner_id=$1 AND r.message_id=messages.id
+                 AND r.source_id LIKE 'reaction-reply:%')))
              AND (created_at>$5 OR id=ANY($3::uuid[])) AND text NOT IN (
              SELECT task->>'title' FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title' IS NOT NULL)),
@@ -66,7 +72,7 @@ export function createTrust(options: {
            ORDER BY said.created_at DESC,said.id DESC LIMIT 5)
          UNION SELECT id,text,created_at FROM said WHERE id=ANY($3::uuid[])
          ORDER BY created_at DESC,id DESC`,
-        [ownerId, threadId, originMessageIds, taskId, since],
+        [ownerId, threadId, originMessageIds, taskId, since, currentTurnId],
       )
     ).rows;
     const latest = users[0];
@@ -82,15 +88,20 @@ export function createTrust(options: {
                  AND (a.id=latest.reply_to_message_id OR (latest.reply_to_message_id IS NULL
                    AND EXISTS (SELECT 1 FROM turns c WHERE c.id=a.turn_id AND c.owner_id=$1 AND c.channel=latest.channel)))
                ORDER BY a.created_at DESC,a.id DESC LIMIT 1)
-             SELECT text FROM answered WHERE EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=answered.turn_id AND to_jsonb(u)->>'task_id'=$4::text)
-               OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1 AND t.message_id=answered.id)`,
+             SELECT text FROM answered WHERE (EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=answered.turn_id AND to_jsonb(u)->>'task_id'=$4::text)
+               OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1 AND t.message_id=answered.id))
+               AND NOT EXISTS (SELECT 1 FROM approvals p WHERE p.owner_id=$1 AND p.confirmation_message_id=answered.id)`,
             [ownerId, threadId, latest.id, taskId, since],
           )
         : await pool.query<{ text: string }>(
-            `SELECT text FROM messages WHERE owner_id=$1 AND thread_id=$2 AND role='assistant' AND text<>'' AND hidden_at IS NULL
-             AND created_at>$5 AND (created_at,id)<($3,$4)
-             AND turn_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=messages.turn_id AND to_jsonb(u)->>'task_id' IS NOT NULL)
-             ORDER BY created_at DESC,id DESC LIMIT 1`,
+            `WITH latest AS (SELECT reply_to_message_id FROM messages WHERE id=$4 AND owner_id=$1 AND thread_id=$2),
+             answered AS (SELECT m.id,m.text FROM messages m CROSS JOIN latest
+               WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
+                 AND m.created_at>$5 AND (m.created_at,m.id)<($3,$4)
+                 AND (latest.reply_to_message_id IS NULL OR m.id=latest.reply_to_message_id)
+                 AND m.turn_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=m.turn_id AND to_jsonb(u)->>'task_id' IS NOT NULL)
+               ORDER BY m.created_at DESC,m.id DESC LIMIT 1)
+             SELECT text FROM answered WHERE NOT EXISTS (SELECT 1 FROM approvals p WHERE p.owner_id=$1 AND p.confirmation_message_id=answered.id)`,
             [ownerId, threadId, latest.created_at, latest.id, since],
           )
     ).rows[0];
@@ -127,7 +138,7 @@ export function createTrust(options: {
       const rules = preferences?.rules.trim();
       const said =
         origin.source === 'user'
-          ? await conversation(turn.threadId, origin.messageIds, origin.taskId, since)
+          ? await conversation(turn.threadId, origin.messageIds, origin.taskId, since, turn.turnId)
           : undefined;
       const words: TrustWords = {
         timeZone: preferences?.time_zone ?? 'UTC',
@@ -239,6 +250,8 @@ export function createTrust(options: {
   }
 
   async function answer(reply: string) {
+    const thumb = /^(👍|👎)\uFE0F?\p{Emoji_Modifier}?$/u.exec(reply.trim());
+    if (thumb) return thumb[1] === '👍';
     const question: DecisionQuestion = {
       minProbability: 0.99,
       uncertainValue: 'other',
