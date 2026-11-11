@@ -13,7 +13,6 @@ import type { MessagingTransport } from '../src/ports/messaging.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
-import { approvalContent } from '../src/server/action-presentation.ts';
 import { createDecisionModel } from '../src/providers/decisions.ts';
 import { BrowserActionError, type CredentialInput } from '../src/ports/computer.ts';
 import { authenticatorKey } from '../src/shared/authenticator-key.ts';
@@ -623,26 +622,6 @@ test(
             ],
             body: 'Synthetic forwarded content.',
           });
-          const many = Array.from({ length: 40 }, (_, index) => `person${index}@example.test`);
-          const long = approvalContent('GMAIL_SEND_EMAIL', {
-            to: many,
-            subject: 'Synthetic',
-            is_html: true,
-            body: `<style>p{color:red}</style><p>Tom &amp; Ann&#39;s <a href="https://example.test/pay">invoice</a></p>${'x'.repeat(5000)}`,
-          });
-          const shownTo = long.fields![0]!.value;
-          const kept = shownTo.split(' and ')[0]!.split(', ');
-          assert.deepEqual(kept, many.slice(0, kept.length));
-          assert.ok(shownTo.endsWith(` and ${many.length - kept.length} more`));
-          assert.ok(long.body!.startsWith("Tom & Ann's invoice (https://example.test/pay)\n"));
-          assert.equal(long.bodyCut, true);
-          assert.deepEqual(
-            approvalContent('GMAIL_SEND_EMAIL', { to: 'a@example.test', body: 'Hi' }),
-            {
-              fields: [{ label: 'To', value: 'a@example.test' }],
-              body: 'Hi',
-            },
-          );
           const click = (approvalId: string) =>
             request('POST', '/api/messages', {
               text: 'Send',

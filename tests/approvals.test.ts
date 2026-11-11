@@ -28,6 +28,7 @@ import {
 import { appConfirmation } from '../src/ports/agent.ts';
 import type { ApprovalDescription, ApprovalExecutionContext } from '../src/server/approvals.ts';
 import { serverNetwork } from '../src/server/network.ts';
+import { approvalContent, approvalTitle } from '../src/server/action-presentation.ts';
 
 test('server configuration refuses remote exposure without a valid token and an exact secure public origin', () => {
   const key = randomBytes(32).toString('base64url');
@@ -301,6 +302,32 @@ test('localhost access requires the owner key and rejects foreign Host, Origin a
     await app.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('approval cards shorten long recipients and bodies, skip blank bodies and title MCP tools', () => {
+  const many = Array.from({ length: 40 }, (_, index) => `person${index}@example.test`);
+  const long = approvalContent('GMAIL_SEND_EMAIL', {
+    to: many,
+    subject: 'Synthetic',
+    is_html: true,
+    body: `<style>p{color:red}</style><p>Tom &amp; Ann&#39;s <a href="https://example.test/pay">invoice</a></p>${'x'.repeat(5000)}`,
+  });
+  const shownTo = long.fields![0]!.value;
+  const kept = shownTo.split(' and ')[0]!.split(', ');
+  assert.deepEqual(kept, many.slice(0, kept.length));
+  assert.ok(shownTo.endsWith(` and ${many.length - kept.length} more`));
+  assert.ok(long.body!.startsWith("Tom & Ann's invoice (https://example.test/pay)\n"));
+  assert.equal(long.bodyCut, true);
+  assert.deepEqual(approvalContent('GMAIL_SEND_EMAIL', { to: 'a@example.test', body: 'Hi' }), {
+    fields: [{ label: 'To', value: 'a@example.test' }],
+    body: 'Hi',
+  });
+  assert.deepEqual(
+    approvalContent('GMAIL_SEND_EMAIL', { to: 'a@example.test', body: '  ', text: 'Hi' }),
+    { fields: [{ label: 'To', value: 'a@example.test' }], body: 'Hi' },
+  );
+  assert.equal(approvalTitle('mcp__synthetic_server__create_page').title, 'Create page');
+  assert.equal(approvalTitle('mcp__synthetic__').title, 'Run an action');
 });
 
 test(

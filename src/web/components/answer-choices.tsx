@@ -253,11 +253,11 @@ export function ChoiceAnswer({
   title: ReactNode;
 }) {
   return (
-    <section className="action-card action-card-settled choice-card">
+    <section className="action-card action-card-settled choice-card" data-analytics-private>
       <div className="choice-card-heading">
         <div className="choice-card-title">{title}</div>
       </div>
-      <div className="choice-card-list" aria-label="Your answer">
+      <div className="choice-card-list" role="group" aria-label="Your answer">
         {choices.options.map(
           (option, index) =>
             answer.choiceIds.includes(option.id) && (

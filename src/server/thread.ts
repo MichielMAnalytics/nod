@@ -614,7 +614,7 @@ export async function submitUserMessage(
     if (options.clientMessageId) {
       const previous = (
         await client.query(
-          'SELECT id,owner_id,role,text,display_text,audio_caption,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,question_answer FROM messages WHERE id=$1',
+          'SELECT id,owner_id,role,text,display_text,audio_caption,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,question_answer,approval_answer FROM messages WHERE id=$1',
           [options.clientMessageId],
         )
       ).rows[0];
@@ -630,6 +630,7 @@ export async function submitUserMessage(
           previous.reply_quote !== (options.replyQuote ?? null) ||
           JSON.stringify(previous.question_answer) !==
             JSON.stringify(options.questionAnswer ?? null) ||
+          previous.approval_answer !== (options.approvalAnswer?.approved ?? null) ||
           JSON.stringify((previous.attachments as Artifact[]).map((item) => item.id)) !==
             JSON.stringify(attachments.map((item) => item.id))
         )

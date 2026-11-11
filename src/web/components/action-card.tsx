@@ -22,7 +22,11 @@ export function ActionCard({
   children: ReactNode;
 }) {
   return (
-    <section className={`action-card${settled ? ' action-card-settled' : ''}`} aria-label={label}>
+    <section
+      className={`action-card${settled ? ' action-card-settled' : ''}`}
+      aria-label={label}
+      data-analytics-private
+    >
       {title && (
         <>
           <header className="action-card-header">
@@ -87,8 +91,17 @@ function useApproval(approval: MessageApproval, disabled: boolean, onAnswer?: An
     if (!onAnswer || busy || disabled) return;
     setBusy(true);
     setError('');
+    const focused = document.activeElement;
+    const message = focused?.closest<HTMLElement>('[data-message-id]');
     try {
       const sent = await onAnswer(approved, label);
+      if (
+        sent === true &&
+        message?.isConnected &&
+        (document.activeElement === focused ||
+          (document.activeElement === document.body && !focused?.isConnected))
+      )
+        message.focus({ preventScroll: true });
       if (!mounted.current) return;
       if (sent === 'unavailable') setError('This can no longer be answered here.');
       else if (sent) setAnswered(approved ? 'working' : 'declined');
@@ -164,6 +177,7 @@ export function ApprovalChoiceCard({
     <section
       className={`action-card choice-card${state === 'pending' ? '' : ' action-card-settled'}`}
       aria-labelledby={`${id}-question`}
+      data-analytics-private
     >
       <div className="choice-card-heading">
         <div id={`${id}-question`} className="choice-card-title">
@@ -186,7 +200,7 @@ export function ApprovalChoiceCard({
           ))}
         </div>
       ) : (
-        <div className="choice-card-list" aria-label="Your answer">
+        <div className="choice-card-list" role="group" aria-label="Your answer">
           <div className="choice-card-row choice-card-chosen">
             {state !== 'expired' && <ChoiceBadge index={chosen} on />}
             <ChoiceCopy label={state === 'expired' ? 'Expired' : rows[chosen]!} />

@@ -41,10 +41,20 @@ const nodActions: Array<[string, string]> = [
 export function approvalTitle(action: string) {
   const nod = nodActions.find(([prefix]) => action.startsWith(prefix));
   if (nod) return { title: nod[1], app: '', slug: '' };
-  const { app, label } = actionTitle(action);
+  const mcp = action.startsWith('mcp__');
+  const { app, label } = mcp
+    ? {
+        app: '',
+        label: action
+          .split('__')
+          .slice(2)
+          .join(' ')
+          .replace(/[_\s]+/g, ' ')
+          .trim(),
+      }
+    : actionTitle(action);
   const title = label ? `${label[0]!.toUpperCase()}${label.slice(1)}` : 'Run an action';
-  if (action.startsWith('CONNECTED_') || action.startsWith('mcp__'))
-    return { title, app: '', slug: '' };
+  if (mcp || action.startsWith('CONNECTED_')) return { title, app: '', slug: '' };
   return { title, app, slug: action.split('_')[0]!.toLowerCase() };
 }
 
@@ -129,7 +139,9 @@ export function approvalContent(action: string, args: unknown) {
     return value ? [{ label, value }] : [];
   });
   if (!fields.length) return {};
-  const raw = bodyKeys.map((key) => input[key]).find((value) => typeof value === 'string');
+  const raw = bodyKeys
+    .map((key) => input[key])
+    .find((value) => typeof value === 'string' && value.trim());
   const text =
     typeof raw === 'string' ? (input.is_html === true ? plainText(raw) : raw).trim() : '';
   if (!text) return { fields };
