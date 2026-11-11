@@ -8176,7 +8176,11 @@ test(
         'model provider limits show concise recovery guidance in failed turns',
         async () => {
           const previousPresenter = presentInterruption;
-          presentInterruption = async () => '';
+          const presentedFailures: string[] = [];
+          presentInterruption = async (_threadId, input) => {
+            if (input.kind === 'failed') presentedFailures.push(input.error);
+            return '';
+          };
           const nestedQuota =
             'The model request failed: ' +
             JSON.stringify({
@@ -8200,6 +8204,28 @@ test(
                 },
               },
             });
+          const dailyQuota =
+            'The model request failed: ' +
+            JSON.stringify({
+              error: {
+                code: 429,
+                status: 'Too Many Requests',
+                message: {
+                  error: {
+                    code: 429,
+                    status: 'RESOURCE_EXHAUSTED',
+                    message: 'You exceeded your current quota. Please retry in 23h0m0s.',
+                    details: [
+                      {
+                        quotaId: 'GenerateRequestsPerDay-FreeTier',
+                        retryDelay: '82800s',
+                        detail: 'synthetic-private-provider-detail',
+                      },
+                    ],
+                  },
+                },
+              },
+            });
           const usageCap = (error: Record<string, unknown>) =>
             'The model request failed: 429 Too Many Requests: ' +
             JSON.stringify({ error: { ...error, detail: 'synthetic-private-provider-detail' } });
@@ -8208,8 +8234,31 @@ test(
             error: string;
             guidance?: RegExp;
             terminal?: 'account' | 'workplace';
+            constraint?: 'daily' | 'oversized';
           }> = [
             { prompt: 'model-gemini-quota-fixture', error: nestedQuota, guidance: /quota/i },
+            {
+              prompt: 'model-oversized-tpm-fixture',
+              error:
+                'The model request failed: 413 ' +
+                JSON.stringify({
+                  error: {
+                    type: 'tokens',
+                    code: 'rate_limit_exceeded',
+                    message:
+                      'Request too large for fixture-model on tokens per minute (TPM): Limit 6000, Requested 12000; please reduce your message size.',
+                    detail: 'synthetic-private-provider-detail',
+                  },
+                }),
+              guidance: /too large.*tokens per minute/i,
+              constraint: 'oversized',
+            },
+            {
+              prompt: 'model-daily-quota-fixture',
+              error: dailyQuota,
+              guidance: /quota/i,
+              constraint: 'daily',
+            },
             {
               prompt: 'model-plain-rate-limit-fixture',
               error: 'The model request failed: 429 Too Many Requests',
@@ -8295,6 +8344,7 @@ test(
                 )
               ).rows[0].text as string;
               assert.equal(turn.status, 'failed');
+              assert.equal(presentedFailures.at(-1), turn.error);
               assert.ok(shown.endsWith(turn.error));
               if (item.guidance) {
                 assert.ok(turn.error.length < 240);
@@ -8302,6 +8352,16 @@ test(
                 if (item.prompt === 'model-gemini-quota-fixture') {
                   assert.match(turn.error, /HTTP 429/);
                   assert.match(turn.error, /14 seconds/);
+                }
+                if (item.constraint === 'daily') {
+                  assert.match(turn.error, /23 hours/i);
+                  assert.doesNotMatch(turn.error, /try again shortly/i);
+                }
+                if (item.constraint === 'oversized') {
+                  assert.match(turn.error, /6,?000/);
+                  assert.match(turn.error, /12,?000/);
+                  assert.match(turn.error, /reduce|shorten|higher limit/i);
+                  assert.doesNotMatch(turn.error, /try again shortly/i);
                 }
                 if (item.terminal) {
                   assert.match(turn.error, /HTTP 429/);
@@ -8313,11 +8373,12 @@ test(
                     assert.match(turn.error, /admin/i);
                     assert.doesNotMatch(turn.error, /billing/i);
                   } else assert.match(turn.error, /check|reset|billing|upgrade|enable/i);
-                } else assert.match(turn.error, /wait|retry|try again/i);
+                } else if (item.constraint !== 'oversized')
+                  assert.match(turn.error, /wait|retry|try again/i);
                 for (const text of [turn.error, shown])
                   assert.doesNotMatch(
                     text,
-                    /RESOURCE_EXHAUSTED|quotaMetric|synthetic-private-provider-detail/,
+                    /RESOURCE_EXHAUSTED|quotaMetric|synthetic-private-provider-detail|fixture-model/,
                   );
               } else {
                 assert.equal(turn.error, item.error);

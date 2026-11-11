@@ -1044,9 +1044,29 @@ async function finishTurn(
 
 const interrupted = 'Interrupted.';
 
+function retryAdvice(seconds: number, quota: boolean) {
+  if (!seconds) return quota ? 'Try again later.' : 'Try again shortly.';
+  if (seconds <= 120) return `Try again in about ${seconds} second${seconds === 1 ? '' : 's'}.`;
+  if (seconds < 3600) return `Try again in about ${Math.ceil(seconds / 60)} minutes.`;
+  if (seconds < 172800) {
+    const hours = Math.ceil(seconds / 3600);
+    return `Try again in about ${hours} hour${hours === 1 ? '' : 's'}.`;
+  }
+  return `Try again in about ${Math.ceil(seconds / 86400)} days.`;
+}
+
 function failureText(error: unknown) {
   const text = error instanceof Error ? error.message || error.name : String(error);
   if (error instanceof ModelRequestError) {
+    const oversized = text.match(
+      /\brequest too large\b.{0,250}?\btokens per minute\s*\(TPM\):\s*Limit\s+(\d{1,9}),\s*Requested\s+(\d{1,9})/is,
+    );
+    if (oversized) {
+      const limit = Number(oversized[1]);
+      const requested = Number(oversized[2]);
+      if (limit > 0 && requested > limit)
+        return `The model request is too large for the provider's tokens per minute limit (${requested.toLocaleString('en-US')} requested; ${limit.toLocaleString('en-US')} allowed). Reduce the conversation or choose a model with a higher limit.`;
+    }
     const code = /\b429\b/.test(text) ? ' (HTTP 429)' : '';
     if (/\bsubscription_sharing_workplace_individual_usage_limit_exceeded\b/i.test(text))
       return `The model provider's workspace usage limit was reached${code}. Ask your workspace admin to review the limit, or wait for it to reset.`;
@@ -1057,7 +1077,9 @@ function failureText(error: unknown) {
       /["']code["']\s*:\s*["']?1308(?!\d)/i.test(text)
     )
       return `The model provider's quota was reached${code}. Wait for it to reset, or check the provider account's usage limits and plan.`;
+    const daily = /GenerateRequestsPerDay|requests?\s*(?:\/|per\s+)day/i.test(text);
     const quota =
+      daily ||
       /\b(?:insufficient[_ -]?quota|quota[_ -]?(?:exceeded|exhausted|reached)|exceeded\s+(?:your\s+)?(?:current\s+)?quota)\b/i.test(
         text,
       );
@@ -1067,18 +1089,13 @@ function failureText(error: unknown) {
         text,
       )
     ) {
-      const retry = text.match(
-        /\b(?:please\s+)?retry\s+in\s+(\d{1,3}(?:\.\d{1,9})?)\s*s(?:econds?)?\b/i,
-      );
+      const retry =
+        text.match(/\b(?:please\s+)?retry\s+in\s+(\d{1,6}(?:\.\d{1,9})?)\s*s(?:econds?)?\b/i) ??
+        text.match(/\bretryDelay["']?\s*:\s*["']?(\d{1,6}(?:\.\d{1,9})?)s\b/i);
       const seconds = retry ? Math.ceil(Number(retry[1])) : 0;
-      const next =
-        seconds > 0 && seconds <= 120
-          ? `Try again in about ${seconds} second${seconds === 1 ? '' : 's'}.`
-          : quota
-            ? 'Try again later.'
-            : 'Try again shortly.';
+      const next = retryAdvice(seconds, quota);
       return quota
-        ? `The model provider's quota was reached${code}. ${next} If it keeps happening, check the provider account's usage limits and billing.`
+        ? `The model provider's ${daily ? 'daily quota' : 'quota'} was reached${code}. ${next} ${daily ? "Check the provider account's daily allowance if this keeps happening." : "If it keeps happening, check the provider account's usage limits and billing."}`
         : `The model provider is rate limiting requests${code}. ${next}`;
     }
   }
