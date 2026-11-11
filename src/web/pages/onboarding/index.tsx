@@ -27,6 +27,8 @@ import { Welcome } from './steps/welcome';
 import { Brain } from './steps/brain';
 import { Email } from './steps/email';
 import { Privacy } from './steps/privacy';
+import { About } from './steps/about';
+import { Join } from './steps/join';
 import { OnboardingFrame } from './frame';
 
 export type StepProps = {
@@ -37,14 +39,17 @@ export type StepProps = {
   onSkip?(): void;
   nextLabel?: string;
   usageShared?: boolean;
+  updatesEmail?: boolean;
   traces?: { enabled: boolean; onChange(enabled: boolean): Promise<void> };
 };
 
 const screens: Record<OnboardingStep, ComponentType<StepProps>> = {
   welcome: Welcome,
+  about: About,
   email: Email,
   brain: Brain,
   privacy: Privacy,
+  join: Join,
 };
 
 function mineEmail() {
@@ -58,6 +63,7 @@ export function Onboarding({
   onComplete,
   onFeedback,
   usageShared = false,
+  updatesEmail = false,
   traces,
   onTraces,
 }: {
@@ -65,6 +71,7 @@ export function Onboarding({
   onComplete(): Promise<void>;
   onFeedback?(): void;
   usageShared?: boolean;
+  updatesEmail?: boolean;
   traces?: boolean;
   onTraces?(enabled: boolean): Promise<void>;
 }) {
@@ -152,6 +159,11 @@ export function Onboarding({
       });
     }
   }, [step, user.id]);
+
+  useEffect(() => {
+    if (step !== 'privacy') return;
+    void api('/api/account/model-setup', { method: 'POST', body: '{}' }).catch(() => {});
+  }, [step, user.id, usageShared]);
 
   useLayoutEffect(() => {
     if (main.current) {
@@ -318,13 +330,12 @@ export function Onboarding({
   function next() {
     if (step === 'email') {
       setMining(!emailSkipped.current);
-      if (!emailSkipped.current) mineEmail();
       emailSkipped.current = false;
     }
+    if (step === 'about' && mining) mineEmail();
     if (step === 'brain' && mining) mineEmail();
-    if (step !== 'privacy' && step !== 'preferences') return void go(1);
-    if (desktop && step === 'privacy')
-      return setPosition({ step: 'preferences', arrived: 'forward' });
+    if (step !== 'join' && step !== 'preferences') return void go(1);
+    if (desktop && step === 'join') return setPosition({ step: 'preferences', arrived: 'forward' });
     if (finishing) return;
     setWaitingForServices(preparation !== 'ready' || Boolean(runtimeError));
     setError('');
@@ -408,10 +419,11 @@ export function Onboarding({
           onNext={next}
           onBack={() => void go(-1)}
           onSkip={skipped}
-          nextLabel={!desktop && step === 'privacy' ? 'Start chatting' : undefined}
+          nextLabel={!desktop && step === 'join' ? 'Start chatting' : undefined}
           usageShared={usageShared}
+          updatesEmail={updatesEmail}
           traces={
-            step === 'privacy' && traces !== undefined && onTraces
+            (step === 'privacy' || step === 'welcome') && traces !== undefined && onTraces
               ? { enabled: traces, onChange: onTraces }
               : undefined
           }

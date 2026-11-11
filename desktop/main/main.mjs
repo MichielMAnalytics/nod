@@ -13,6 +13,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  screen,
   session,
   shell,
   Tray,
@@ -20,7 +21,6 @@ import {
 } from 'electron';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -46,7 +46,7 @@ import { saveArtifactDownload } from './downloads.mjs';
 import { createDesktopLifecycle, startupErrorDetails } from './lifecycle.mjs';
 import { createMacEncryption } from './mac-encryption.mjs';
 import { createDesktopUpdater, createUpdateSource, startDesktopUpdateChecks } from './updates.mjs';
-import { windowsInstallCommand } from './windows-update.mjs';
+import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,6 +55,11 @@ const engineRoot = app.isPackaged
   : resolve(desktopRoot, '..');
 const notificationIcon = join(engineRoot, app.isPackaged ? 'dist/web' : 'public', 'nod-logo.png');
 const appPages = JSON.parse(readFileSync(join(engineRoot, 'src/shared/app-pages.json'), 'utf8'));
+const posthogConfig = JSON.parse(
+  readFileSync(join(engineRoot, 'src/shared/posthog-host.json'), 'utf8'),
+);
+const posthogHost = posthogConfig.host;
+const appContentPolicy = desktopContentPolicy(posthogHost);
 let pendingAppPath = process.argv.map((value) => appOpenPath(value, appPages)).find(Boolean);
 let appLinksReady = false;
 app.on('open-url', (event, value) => {
@@ -102,6 +107,12 @@ app.setPath(
   developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
 );
 const profileRoot = join(app.getPath('userData'), 'profiles', 'local');
+const freshLocalProfile = await stat(profileRoot).then(
+  () => false,
+  (error) => error.code === 'ENOENT',
+);
+const resumePath = join(profileRoot, 'update-resume.json');
+const resumeRead = readFile(resumePath, 'utf8').catch(() => undefined);
 const windowsUpdates = join(process.env.LOCALAPPDATA || app.getPath('temp'), 'nod', 'updates');
 const settings = createSettingsStore(
   join(profileRoot, 'settings.json'),
@@ -111,11 +122,27 @@ const settings = createSettingsStore(
 );
 const analyticsConfiguration = createDesktopAnalytics(join(profileRoot, 'analytics-id'), {
   packaged: app.isPackaged,
+  env: process.env,
 });
+let appOpeningAt;
+let freshAppOpening;
+let freshAppOpenCapture;
+let appOpeningDeferred = false;
+let appOpeningConsentVersion = 0;
+const claimedAppOpens = new Set();
+const appUIOpenings = new Map();
+function deferAppOpening() {
+  appOpeningDeferred = true;
+  appOpeningConsentVersion++;
+  freshAppOpening = undefined;
+  appUIOpenings.clear();
+}
 let setupWindow;
 let setupWindowLoaded;
 let engineWindow;
 let engineFocusRequested = false;
+let resumeWindow;
+let resumePort;
 let pendingFeedback = false;
 let engine;
 let engineFailure;
@@ -138,6 +165,7 @@ let updateRequestedManually = false;
 let updatePhase = 'idle';
 let updateProgress;
 let updateFailed = false;
+let dismissedUpdateVersion;
 let pendingPreload;
 let stopUpdateChecks;
 let disposeArtifactFiles;
@@ -275,6 +303,10 @@ function foregroundWindow() {
   return [setupWindow, ...engineWindows].some(
     (window) => window && !window.isDestroyed() && window.isFocused(),
   );
+}
+
+function focusedEngineWindow() {
+  return [...engineWindows].some((window) => !window.isDestroyed() && window.isFocused());
 }
 
 function updateReadinessNotice() {
@@ -679,10 +711,11 @@ function showSettings(section = 'general', loading = false) {
       window.webContents.send('nod:status', status);
     });
   }
+  const resumed = resumeWindow;
+  resumeWindow = undefined;
   setupWindow = new BrowserWindow({
     show: false,
-    width: 1200,
-    height: 860,
+    ...(resumed?.bounds ?? { width: 1200, height: 860 }),
     minWidth: 700,
     minHeight: 600,
     title: 'Nod',
@@ -714,7 +747,21 @@ function showSettings(section = 'general', loading = false) {
   waitForRenderer(
     window,
     () => {
-      if (!quitting && !window.isDestroyed()) window.show();
+      if ((!quitting || status.phase === 'updating') && !window.isDestroyed()) {
+        window.show();
+        if (
+          section === 'general' &&
+          !onboardingCompleted &&
+          !welcomePassed &&
+          !remoteConnection &&
+          !connectionSettingsOpen &&
+          !onboardingSetupOpen
+        ) {
+          appOpeningAt ??= Date.now();
+          captureFreshAppOpen();
+        }
+        if (resumed?.maximized) window.maximize();
+      }
       presented();
     },
     failed,
@@ -834,6 +881,7 @@ function showEngine({ focus = true } = {}) {
         else if (startup.isVisible() || waiting) {
           if (startup.isFocused() || waiting) window.show();
           else window.showInactive();
+          if (startup.isMaximized()) window.maximize();
         }
         startup.destroy();
       } else if (!previousSetup || engineFocusRequested) {
@@ -950,11 +998,11 @@ async function captureFeedbackScreenshot(event) {
   return bytes.length && bytes.length <= 2 * 1024 * 1024 ? bytes : null;
 }
 
-function availablePort() {
+function availablePort(preferred = 0) {
   return new Promise((accept, reject) => {
     const socket = createServer();
     socket.once('error', reject);
-    socket.listen(0, '127.0.0.1', () => {
+    socket.listen(preferred, '127.0.0.1', () => {
       const port = socket.address().port;
       socket.close((error) => (error ? reject(error) : accept(port)));
     });
@@ -984,6 +1032,7 @@ function baseEnvironment() {
       'NOD_FEEDBACK_RECEIPT_URL_PREFIX',
       'NOD_TRACES_URL',
       'NOD_TRACES_TOKEN',
+      'NOD_ONBOARDING_EMAIL_URL',
       'OTEL_EXPORTER_OTLP_ENDPOINT',
     ]
       .filter((key) => typeof process.env[key] === 'string')
@@ -1012,6 +1061,16 @@ function openOnePassword(owner) {
   helper.postMessage({ type: 'nod-1password-port' }, [port2]);
   owner.postMessage({ type: 'nod-1password-port' }, [port1]);
   owner.once('exit', () => helper.kill());
+}
+
+async function moveToTrash(child, { id, path }) {
+  if (typeof id !== 'string' || typeof path !== 'string' || !isAbsolute(path)) return;
+  const error = await shell.trashItem(path).then(
+    () => undefined,
+    () => 'The item could not be moved to the Trash.',
+  );
+  if (engine === child)
+    child.postMessage({ type: 'nod-trash-result', id, ...(error ? { error } : {}) });
 }
 
 async function profileOwner() {
@@ -1069,6 +1128,139 @@ function analyticsEnvironment(metadata) {
     : 'development';
 }
 
+async function captureNativeAnalytics({
+  event,
+  distinctId,
+  openedAt,
+  uuid,
+  properties,
+  verifyConsent,
+}) {
+  try {
+    const route = event === 'server_connection_verified' ? '/server' : '/onboarding';
+    const { nodBuild } = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
+    const saved = await settings.get();
+    if (saved.welcome?.usageData === false) deferAppOpening();
+    if (appOpeningDeferred) return false;
+    if (verifyConsent && !(await verifyConsent())) return false;
+    if (appOpeningDeferred) return false;
+    const response = await fetch(`${posthogConfig.host}/i/v0/e/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(3_000),
+      body: JSON.stringify({
+        api_key: posthogConfig.key,
+        event,
+        distinct_id: distinctId,
+        uuid,
+        timestamp: new Date(openedAt).toISOString(),
+        properties: {
+          analytics_schema: posthogConfig.schemaVersion,
+          environment: analyticsEnvironment(nodBuild),
+          surface: 'desktop',
+          app_version: app.getVersion(),
+          ...properties,
+          route,
+          $current_url: `https://app.example${route}`,
+          $pathname: route,
+          $host: 'app.example',
+          $process_person_profile: false,
+          $geoip_disable: true,
+        },
+      }),
+    });
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {});
+      return false;
+    }
+    const result = await response.json();
+    const limited = result?.quota_limited;
+    const accepted =
+      result?.status === 'Ok' &&
+      (limited == null ||
+        limited === '' ||
+        (Array.isArray(limited) && limited.length === 0) ||
+        (typeof limited === 'object' && Object.keys(limited).length === 0));
+    return accepted;
+  } catch {
+    return false;
+  }
+}
+
+function captureFreshAppOpen() {
+  if (
+    !freshLocalProfile ||
+    !app.isPackaged ||
+    testInstall ||
+    process.env.NOD_ANALYTICS_ENABLED === 'false' ||
+    process.env.NOD_ANALYTICS_ID ||
+    freshAppOpenCapture
+  )
+    return;
+  freshAppOpenCapture = (async () => {
+    const saved = await settings.get().catch(() => null);
+    if (
+      !saved ||
+      saved.serverUrl ||
+      saved.onboardingCompleted ||
+      saved.welcome ||
+      remoteConnection ||
+      onboardingCompleted ||
+      welcomePassed ||
+      connectionSettingsOpen ||
+      onboardingSetupOpen
+    )
+      return false;
+    const analytics = await analyticsConfiguration().catch(() => null);
+    if (!analytics?.enabled || !analytics.distinctId) return false;
+    const openedAt = appOpeningAt ?? Date.now();
+    const uuid = randomUUID();
+    freshAppOpening = { distinctId: analytics.distinctId, openedAt, uuid };
+    const accepted = await captureNativeAnalytics({
+      event: 'app_opened',
+      distinctId: analytics.distinctId,
+      openedAt,
+      uuid,
+      properties: { entry: 'native_setup', server_connection_telemetry_available: true },
+    });
+    if (accepted) claimedAppOpens.add(analytics.distinctId);
+    return accepted;
+  })().catch(() => false);
+}
+
+function captureStartupPath(path) {
+  if (appOpeningDeferred || onboardingCompleted || welcomePassed || remoteConnection) return;
+  const openedAt = Date.now();
+  return Promise.resolve(freshAppOpenCapture)
+    .then(async () => {
+      if (appOpeningDeferred) return;
+      const saved = await settings.get();
+      if (
+        appOpeningDeferred ||
+        saved.welcome?.usageData === false ||
+        saved.welcome?.continued === true
+      )
+        return;
+      if (
+        saved.welcome?.usageData !== true &&
+        !(freshLocalProfile && freshAppOpening && !saved.welcome)
+      )
+        return;
+      const analytics = await analyticsConfiguration();
+      if (!analytics.enabled || !analytics.distinctId) return;
+      if (freshAppOpening && freshAppOpening.distinctId !== analytics.distinctId) return;
+      return captureNativeAnalytics({
+        event: 'startup_path_selected',
+        distinctId: analytics.distinctId,
+        openedAt,
+        uuid: randomUUID(),
+        properties: { path },
+      });
+    })
+    .catch(() => {});
+}
+
 async function engineRequest(path, options = {}) {
   if (!engineBound) throw new Error('Nod is not ready.');
   return fetch(`${engineOrigin}${path}`, {
@@ -1094,7 +1286,7 @@ function configureAppSession() {
       const name =
         Object.keys(headers).find((key) => key.toLowerCase() === 'content-security-policy') ??
         'Content-Security-Policy';
-      headers[name] = [...(headers[name] ?? []), desktopContentPolicy];
+      headers[name] = [...(headers[name] ?? []), appContentPolicy];
       callback({ responseHeaders: headers });
     });
   appSession.setPermissionCheckHandler((sender, permission, origin, details) => {
@@ -1144,6 +1336,7 @@ function configureAppSession() {
 function showConnectionSettings() {
   if (quitting) return;
   const returnToOnboarding = onboardingSetupOpen;
+  captureStartupPath('remote');
   if (setupWindow && !setupWindow.isDestroyed()) setupWindow.destroy();
   connectionReturnsToOnboarding = returnToOnboarding;
   connectionSettingsOpen = true;
@@ -1180,14 +1373,27 @@ async function checkRemoteConnection(connection) {
     typeof account.settings?.onboardingCompleted !== 'boolean'
   )
     throw new Error('This address did not respond as a Nod server.');
-  return { url, token: connection.token, owner: account.user.id };
+  const revision = account.settings.usageDataRevision;
+  const usageDataRevision =
+    typeof revision === 'string' && /^(?:0|[1-9]\d{0,18})$/.test(revision) ? revision : null;
+  return {
+    url,
+    token: connection.token,
+    owner: account.user.id,
+    usageDataRevision,
+    analyticsAllowed:
+      usageDataRevision !== null &&
+      account.settings.usageData === true &&
+      account.analytics?.enabled === true,
+  };
 }
 
 async function startRemote(connection) {
   update({ remote: true, phase: 'starting', message: 'Connecting to your server.' });
   const connected = await checkRemoteConnection(connection);
   if (quitting) return;
-  remoteConnection = connected;
+  remoteConnection = { url: connected.url, token: connected.token, owner: connected.owner };
+  const activeConnection = remoteConnection;
   engineOrigin = connected.url;
   authToken = connected.token;
   engineBound = true;
@@ -1217,6 +1423,30 @@ async function startRemote(connection) {
   });
   synchronizeNotifications();
   showEngine();
+  if (connected.analyticsAllowed && !testInstall)
+    void analyticsConfiguration()
+      .then((analytics) => {
+        if (!analytics.enabled || !analytics.distinctId || quitting) return;
+        return captureNativeAnalytics({
+          event: 'server_connection_verified',
+          distinctId: analytics.distinctId,
+          openedAt: Date.now(),
+          uuid: randomUUID(),
+          properties: {},
+          verifyConsent: async () => {
+            if (quitting || remoteConnection !== activeConnection) return false;
+            const current = await checkRemoteConnection(activeConnection);
+            return (
+              !quitting &&
+              remoteConnection === activeConnection &&
+              current.owner === connected.owner &&
+              current.analyticsAllowed &&
+              current.usageDataRevision === connected.usageDataRevision
+            );
+          },
+        });
+      })
+      .catch(() => {});
   return status;
 }
 
@@ -1360,6 +1590,22 @@ async function finishEnginePreparation(pending = false) {
   return status;
 }
 
+function publicUpdateStatus() {
+  return {
+    phase: updatePhase,
+    checking: Boolean(checkingUpdates),
+    ...(updateProgress === undefined ? {} : { progress: updateProgress }),
+    ...(updates?.ready ? { readyVersion: updates.ready.version } : {}),
+    ...(dismissedUpdateVersion ? { dismissedVersion: dismissedUpdateVersion } : {}),
+  };
+}
+
+function publishUpdateStatus() {
+  const value = publicUpdateStatus();
+  for (const window of engineWindows)
+    if (!window.isDestroyed()) window.webContents.send('nod:updates:status', value);
+}
+
 function refreshUpdateMenu() {
   if (quitting) return;
   const label =
@@ -1405,6 +1651,7 @@ function refreshUpdateMenu() {
         { label: 'Quit Nod', click: () => app.quit() },
       ]),
     );
+  publishUpdateStatus();
 }
 
 async function checkForUpdates(manual = true, restartReady = false) {
@@ -1475,8 +1722,20 @@ async function checkForUpdates(manual = true, restartReady = false) {
 }
 
 async function notifyUpdate(candidate) {
-  if (!preferences.notifications || !Notification.isSupported()) return false;
-  if (isQuietTime((await appPreferences.get()).preferences)) return true;
+  if (
+    !preferences.notifications ||
+    !Notification.isSupported() ||
+    quitting ||
+    focusedEngineWindow()
+  )
+    return false;
+  if (
+    isQuietTime((await appPreferences.get()).preferences) ||
+    !preferences.notifications ||
+    quitting ||
+    focusedEngineWindow()
+  )
+    return true;
   const notification = new Notification({
     title: `Nod ${candidate.version} is ready`,
     icon: notificationIcon,
@@ -1484,7 +1743,12 @@ async function notifyUpdate(candidate) {
   });
   displayedNotifications.add(notification);
   notification.on('show', () => {
-    if (!displayedNotifications.has(notification) || !preferences.notifications || quitting)
+    if (
+      !displayedNotifications.has(notification) ||
+      !preferences.notifications ||
+      quitting ||
+      focusedEngineWindow()
+    )
       notification.close();
   });
   notification.on('click', () => {
@@ -1508,7 +1772,50 @@ async function preloadUpdateImages(assets, signal) {
 async function restartForUpdate() {
   if (quitting || !(await confirmRestart())) return;
   update({ phase: 'updating', message: 'Updating…' });
+  const window = [engineWindow, setupWindow].find((item) => item && !item.isDestroyed());
+  if (engineWindow && !engineWindow.isDestroyed()) engineWindow.show();
+  else await showSettings('general', true);
+  await rememberState(window);
   await quit(installUpdate);
+}
+
+async function rememberState(window) {
+  session.fromPartition(clientPartition).flushStorageData();
+  const state = JSON.stringify({
+    path: URL.parse(window?.webContents.getURL() ?? '')?.pathname,
+    bounds: window?.getNormalBounds(),
+    maximized: window?.isMaximized(),
+    port: remoteConnection ? undefined : Number(URL.parse(engineOrigin)?.port) || undefined,
+  });
+  await mkdir(profileRoot, { recursive: true, mode: 0o700 })
+    .then(() => writeFile(resumePath, state, { mode: 0o600 }))
+    .catch(() => {});
+}
+
+async function resumeState() {
+  const text = await resumeRead;
+  if (text === undefined) return;
+  await rm(resumePath, { force: true }).catch(() => {});
+  try {
+    const saved = JSON.parse(text);
+    pendingAppPath ||= appOpenPath(`nod://open${saved.path}`, appPages) || undefined;
+    if (Number.isInteger(saved.port) && saved.port > 1023 && saved.port < 65536)
+      resumePort = saved.port;
+    const { x, y, width, height } = saved.bounds;
+    if (
+      [x, y, width, height].every(Number.isInteger) &&
+      screen
+        .getAllDisplays()
+        .some(
+          ({ workArea: area }) =>
+            x < area.x + area.width &&
+            x + width > area.x &&
+            y < area.y + area.height &&
+            y + height > area.y,
+        )
+    )
+      resumeWindow = { bounds: { x, y, width, height }, maximized: saved.maximized === true };
+  } catch {}
 }
 
 async function confirmRestart() {
@@ -1548,23 +1855,17 @@ async function confirmRestart() {
   return response === 0 && !quitting;
 }
 
-function installUpdate() {
+async function installUpdate() {
   if (process.platform === 'win32') {
-    const { command, args, env } = windowsInstallCommand({
+    await startWindowsInstall({
       directory: join(windowsUpdates, updates.ready.version),
       appPath: process.execPath,
       pid: process.pid,
       systemRoot: process.env.SystemRoot,
     });
-    spawn(command, args, {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      env: { ...process.env, ...env },
-    }).unref();
     installingUpdate = true;
     app.exit();
-    return Promise.resolve();
+    return;
   }
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -1680,7 +1981,7 @@ async function startEngine({ runtime, signal, pending = false }) {
   if (quitting || signal.aborted) throw new Error('Nod is closing.');
   if (startup?.isDestroyed() || status.windowError)
     throw new Error('Nod could not open setup. Reopen the window, then try again.');
-  const port = await availablePort();
+  const port = await availablePort(resumePort).catch(() => availablePort());
   if (quitting || signal.aborted) throw new Error('Nod is closing.');
   engineBound = false;
   authToken = randomBytes(32).toString('base64url');
@@ -1744,6 +2045,7 @@ async function startEngine({ runtime, signal, pending = false }) {
       engineBound = true;
     }
     if (engine === child && message?.type === 'nod-1password-open') openOnePassword(child);
+    if (engine === child && message?.type === 'nod-trash') void moveToTrash(child, message);
   });
   child.stdout?.resume();
   let diagnostics = '';
@@ -1780,8 +2082,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     authToken = '';
     engineRuntimeReady = false;
     update({ engineReady: false });
-    for (const window of engineWindows) if (!window.isDestroyed()) window.destroy();
-    engineWindows.clear();
+    if (status.phase !== 'updating') {
+      for (const window of engineWindows) if (!window.isDestroyed()) window.destroy();
+      engineWindows.clear();
+    }
     if (!quitting && !closingEngine) {
       engineFailure = failure;
       update({
@@ -2117,6 +2421,22 @@ else {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         return status;
       });
+      ipcMain.handle('nod:updates:status', (event) => {
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        return publicUpdateStatus();
+      });
+      ipcMain.handle('nod:updates:dismiss', (event, version) => {
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        if (typeof version !== 'string' || updates?.ready?.version !== version) return;
+        dismissedUpdateVersion = version;
+        publishUpdateStatus();
+      });
+      ipcMain.handle('nod:updates:restart', async (event) => {
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        if ((!updates?.ready && !checkingUpdates) || quitting)
+          throw new Error('No desktop update is ready.');
+        await checkForUpdates(true, true);
+      });
       ipcMain.handle('nod:settings:get', (event) => {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         return readDesktopSettings();
@@ -2136,6 +2456,7 @@ else {
       ipcMain.handle('nod:connection:close', (event) => {
         allowSetup(event);
         const returnToOnboarding = connectionSettingsOpen && connectionReturnsToOnboarding;
+        captureStartupPath('welcome');
         setupWindow.destroy();
         if (returnToOnboarding) replayOnboarding();
         else showEngine();
@@ -2154,6 +2475,44 @@ else {
       ipcMain.handle('nod:feedback:capture', (event) => {
         if (!isEngine(event)) throw new Error('This action is unavailable.');
         return captureFeedbackScreenshot(event).catch(() => null);
+      });
+      ipcMain.handle('nod:analytics:opening', async (event, consented, distinctId) => {
+        if (
+          !isEngine(event) ||
+          event.sender !== engineWindow?.webContents ||
+          typeof consented !== 'boolean'
+        )
+          throw new Error('This action is unavailable.');
+        if (!consented) {
+          deferAppOpening();
+          return null;
+        }
+        if (
+          typeof distinctId !== 'string' ||
+          !/^local:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            distinctId,
+          )
+        )
+          throw new Error('The analytics installation ID is invalid.');
+        const consentVersion = appOpeningConsentVersion;
+        await freshAppOpenCapture;
+        if (consentVersion !== appOpeningConsentVersion) return null;
+        if (claimedAppOpens.has(distinctId)) return null;
+        const native =
+          !remoteConnection && !appOpeningDeferred && freshAppOpening?.distinctId === distinctId
+            ? freshAppOpening
+            : null;
+        let opening = appUIOpenings.get(distinctId);
+        if (!opening) {
+          opening = {
+            openedAt: native?.openedAt ?? Date.now(),
+            uuid: native?.uuid ?? randomUUID(),
+            entry: native ? 'native_setup' : 'app_ui',
+            ...(native ? { serverConnectionTelemetryAvailable: true } : {}),
+          };
+          appUIOpenings.set(distinctId, opening);
+        }
+        return opening;
       });
       ipcMain.handle('nod:preferences:get', (event) => {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
@@ -2237,6 +2596,8 @@ else {
           }
           throw error;
         }
+        if (value.welcome?.usageData === false) deferAppOpening();
+        if (value.welcome?.continued === false) captureStartupPath('local');
         onboardingCompleted = remoteConnection ? true : saved.onboardingCompleted;
         if (onboardingCompleted) nativePreferencesPending = false;
         const confirmNotifications = value.notifications === true && !preferences.notifications;
@@ -2327,6 +2688,7 @@ else {
       });
       try {
         const saved = await settings.get();
+        await resumeState();
         const removeData = Menu.getApplicationMenu?.()?.getMenuItemById('remove-local-data');
         if (removeData) removeData.enabled = !saved.serverUrl;
         onboardingCompleted = Boolean(saved.serverUrl) || saved.onboardingCompleted;

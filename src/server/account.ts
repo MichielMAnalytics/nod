@@ -10,7 +10,7 @@ const surveyActiveDays = 3;
 const accountUpdate = z
   .object({
     theme: z.enum(['light', 'dark', 'system']).optional(),
-    onboardingCompleted: z.boolean().optional(),
+    onboardingCompleted: z.literal(true).optional(),
     usageData: z.boolean().optional(),
     traces: z.boolean().optional(),
   })
@@ -27,6 +27,7 @@ export function createAccountSession(options: {
   onboardingMissing?(): Promise<'brain' | 'email' | null>;
   traces?: boolean;
   onTraces?(enabled: boolean): void;
+  updatesEmail?: boolean;
   prepare?(signal: AbortSignal): Promise<void>;
 }) {
   const origin = new URL(options.origin).origin;
@@ -62,7 +63,7 @@ export function createAccountSession(options: {
       if (accountVersion !== version || pending) continue;
       applyConsent(consent);
       options.onTraces?.(account.traces);
-      return { ...account, usageData: consent.enabled };
+      return { ...account, usageData: consent.enabled, usageDataRevision: consent.revision };
     }
   }
   async function updateAccount(input: AccountUpdate) {
@@ -123,11 +124,13 @@ export function createAccountSession(options: {
           theme: account.theme,
           onboardingCompleted: account.onboardingCompleted,
           usageData: account.usageData,
+          usageDataRevision: account.usageDataRevision,
           traces: account.traces,
         },
         capabilities: {
           developer: Boolean(options.developerIds?.has(owner)),
           traces: options.traces === true,
+          updatesEmail: options.updatesEmail === true,
         },
         ...(analytics && {
           analytics: analytics.enabled ? { ...analytics, surveys } : analytics,
@@ -183,6 +186,26 @@ export function createAccountSession(options: {
       await prepare(reply);
       return { ok: true };
     });
+    app.post('/api/account/model-setup', async (request, reply) => {
+      if (!guard(request, reply)) return;
+      z.object({})
+        .strict()
+        .parse(request.body ?? {});
+      if ((await readAccount()).onboardingCompleted)
+        return reply.code(409).send({ error: 'Setup is already complete.' });
+      const model = options.model?.();
+      if (!model?.configured)
+        return reply.code(409).send({ error: 'Connect an AI provider before continuing.' });
+      const selected = analyticsModel(model.provider, model.name);
+      if (!selected.model)
+        return reply.code(409).send({ error: 'Choose an AI model before continuing.' });
+      snapshotAnalytics(options.analytics?.forOwner(owner))?.({
+        event: 'model_setup_completed',
+        properties: { provider: selected.provider, model: selected.model },
+      });
+      reply.header('cache-control', 'no-store');
+      return { ok: true };
+    });
     app.patch('/api/account', async (request, reply) => {
       if (!guard(request, reply)) return;
       const input = accountUpdate.parse(request.body);
@@ -219,11 +242,16 @@ export function createAccountSession(options: {
       } else await updateAccount(input);
       if (onboardingCompletedNow) {
         const model = options.model?.();
-        options.analytics?.capture(owner, {
+        const selected = model?.configured ? analyticsModel(model.provider, model.name) : undefined;
+        const completed = snapshotAnalytics(options.analytics?.forOwner(owner));
+        if (selected?.model)
+          completed?.({
+            event: 'model_setup_completed',
+            properties: { provider: selected.provider, model: selected.model },
+          });
+        completed?.({
           event: 'onboarding_completed',
-          ...(model?.configured
-            ? { properties: { provider: analyticsModel(model.provider).provider } }
-            : {}),
+          ...(selected ? { properties: { provider: selected.provider } } : {}),
         });
       }
       if (input.theme !== undefined)

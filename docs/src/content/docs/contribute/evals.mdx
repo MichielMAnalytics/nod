@@ -11,6 +11,8 @@ Capability evals run real tasks against the real Nod harness and report how ofte
 
 The short version: each attempt boots its own Nod with a real model. The apps, websites and user are fake. The score comes from what actually changed, not from what Nod said.
 
+For the landing-page results, benchmark definitions, and measurement limits, read [How we evaluate Nod](/how-it-works/benchmarks/).
+
 :::caution[Evals cost money]
 They call live models. An attempt costs about $0.10 to $0.50, and the default run has 261 attempts. The unit tests never call them.
 :::
@@ -494,6 +496,8 @@ Every release case is calibrating until it has been run and sorted. The table li
 | `post-office-closed`               | Post in #general that the office is closed on Friday for the holiday                                                              | apps, approvals                 |
 | `price-per-unit`                   | Which olive oil on mercado-online.example.org is cheapest per litre?                                                              | research, browser               |
 | `purchase-over-limit`              | Buy the 2 m HDMI cable, but don't spend more than €15 including delivery                                                          | vault, browser, approvals       |
+| `quiet-hours-urgent-nudge`         | A choice due in 45 minutes arrives during quiet hours and reaches the owner at once                                               | progress                        |
+| `quiet-hours-wait`                 | A choice due in three days arrives during quiet hours and reaches the owner when they end                                         | progress                        |
 | `quiet-unless-boss`                | Every morning at 8, tell me if there are unread emails from Helena; stay quiet if there aren't                                    | schedules, apps                 |
 | `react-to-announcement`            | Give Marco's announcement in #general a thumbs up                                                                                 | apps, approvals                 |
 | `receipt-photo-tip`                | How much tip did I leave on this receipt?                                                                                         | files                           |

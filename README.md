@@ -1,94 +1,286 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/banner-dark.png" />
-  <img alt="Nod: your assistant, with its own computer." src="docs/src/assets/banner-light.png" />
-</picture>
-
 <p align="center">
-  <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/docs-read_them-ff91ac?style=flat-square&labelColor=191919" /></a>
-  <a href="https://github.com/n8n-io/nod/releases"><img alt="Download" src="https://img.shields.io/badge/download-macOS_·_Windows-ff91ac?style=flat-square&labelColor=191919" /></a>
-  <a href="https://discord.gg/n8n"><img alt="Discord" src="https://img.shields.io/badge/discord-join_us-ff91ac?style=flat-square&labelColor=191919&logo=discord&logoColor=white" /></a>
-  <a href="https://community.n8n.io/c/n8n-labs/48"><img alt="Forum" src="https://img.shields.io/badge/forum-n8n_Labs-ff91ac?style=flat-square&labelColor=191919&logo=discourse&logoColor=white" /></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-ff91ac?style=flat-square&labelColor=191919" /></a>
-  <img alt="Status" src="https://img.shields.io/badge/status-early_preview-ff91ac?style=flat-square&labelColor=191919" />
+  <a href="https://nod.n8n.io#gh-dark-mode-only"><img src="docs/src/assets/readme/hero-dark.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
+  <a href="https://nod.n8n.io#gh-light-mode-only"><img src="docs/src/assets/readme/hero.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
 </p>
 
-**Give Nod the task, not the steps.** It researches the web, writes files in its own Linux workspace, signs in to websites, works in Gmail, Calendar, Slack and Notion, and keeps watch on a schedule. Then it reports back in the app, on Telegram or on WhatsApp.
+<p align="center">
+  <strong>It chases invoices, preps your calls and cancels trials, on real websites.</strong><br />
+  It runs on your machine with the model you choose, and asks before it acts for you.
+</p>
+
+<p align="center">
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-arm64.dmg#gh-dark-mode-only"><img src="docs/src/assets/readme/button-mac-dark.webp" alt="Download for Mac" width="219" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-arm64.dmg#gh-light-mode-only"><img src="docs/src/assets/readme/button-mac.webp" alt="Download for Mac" width="219" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-Setup-x64.exe#gh-dark-mode-only"><img src="docs/src/assets/readme/button-windows-dark.webp" alt="Download for Windows" width="259" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-Setup-x64.exe#gh-light-mode-only"><img src="docs/src/assets/readme/button-windows.webp" alt="Download for Windows" width="259" /></a>
+  <a href="https://nod.n8n.io/docs/#gh-dark-mode-only"><img src="docs/src/assets/readme/button-docs-dark.webp" alt="Read the docs" width="190" /></a>
+  <a href="https://nod.n8n.io/docs/#gh-light-mode-only"><img src="docs/src/assets/readme/button-docs.webp" alt="Read the docs" width="190" /></a>
+</p>
+
+<p align="center">
+  <sub>macOS 14+ (Apple silicon or <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-x64.dmg">Intel</a>) · Windows 11 preview · Free and open source · ChatGPT Plus or Pro, or an AI key</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/n8n-io/nod/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/n8n-io/nod?style=flat-square&labelColor=191919&color=ff91ac&label=release" /></a>
+  <a href="https://github.com/n8n-io/nod"><img alt="GitHub stars" src="https://img.shields.io/github/stars/n8n-io/nod?style=flat-square&labelColor=191919&color=ff91ac&logo=github" /></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache_2.0-ff91ac?style=flat-square&labelColor=191919" /></a>
+  <a href="https://www.bestpractices.dev/projects/16526"><img alt="OpenSSF Best Practices" src="https://img.shields.io/cii/level/16526?style=flat-square&labelColor=191919&color=ff91ac&label=openssf" /></a>
+  <a href="https://discord.gg/n8n"><img alt="Discord" src="https://img.shields.io/badge/discord-join_us-ff91ac?style=flat-square&labelColor=191919&logo=discord&logoColor=white" /></a>
+  <img alt="Status: research preview" src="https://img.shields.io/badge/status-research_preview-ff91ac?style=flat-square&labelColor=191919" />
+</p>
+
+<br />
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-machine-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-machine-dark.webp" alt="On your machine, on your word" width="586" /></a>
+  <a href="docs/src/assets/readme/heading-machine.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-machine.webp" alt="On your machine, on your word" width="586" /></a>
+</p>
+
+<p align="center">It gets on with the work across Gmail, Calendar, Slack, Notion, and the web,<br />and asks before it speaks for you.</p>
+
+[![Walk into every call prepared. Nod creates a one-page call brief from your messages, calendar, and the client's latest news.](docs/src/assets/readme/call-brief.webp)](https://nod.n8n.io/docs/use/workspace/)
+
+<p align="center">Every morning, Nod reads your threads, your calendar, and the client's latest news,<br />then writes a one-page brief for each call.</p>
+
+[![Waits for your Nod. Nod drafts a Slack reply from your pricing sheet, asks for approval, and sends it after you say yes.](docs/src/assets/readme/approval.webp)](https://nod.n8n.io/docs/trust/approvals/)
+
+<p align="center">It drafts the reply you owe from your own pricing sheet,<br />and sends it only after you say yes.</p>
+
+[![Hear about it when it matters. A scheduled price check reports a change from $1,200 to $1,500.](docs/src/assets/readme/price-watch.webp)](https://nod.n8n.io/docs/use/schedules/)
+
+<p align="center">It checks a page on your schedule and tells you only when something changes.</p>
+
+<br />
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-hard-ones-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-hard-ones-dark.webp" alt="Hand it the hard ones" width="421" /></a>
+  <a href="docs/src/assets/readme/heading-hard-ones.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-hard-ones.webp" alt="Hand it the hard ones" width="421" /></a>
+</p>
+
+<p align="center">Jobs that eat an afternoon of tabs, logins, and forms.<br />Nod has its own computer and browser, so it finishes them.</p>
+
+<p align="center">
+  <img src="docs/src/assets/readme/use-cases.webp" alt="Six errands Nod handles: chase an invoice until it's paid, get your money back from a subscription, turn client requests into Linear tasks, report your weekly numbers, file month-end paperwork, and book the team offsite." width="100%" />
+</p>
+
+<br />
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-memory-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-memory-dark.webp" alt="A memory like an elephant" width="508" /></a>
+  <a href="docs/src/assets/readme/heading-memory.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-memory.webp" alt="A memory like an elephant" width="508" /></a>
+</p>
+
+<p align="center">Say once that Anna, not Bob, handles invoices. It remembers.</p>
 
 <table>
   <tr>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/screens/card-chat-dark.png" />
-        <img alt="Nod comparing three venues in a table and drafting a booking request it hasn't sent." src="docs/src/assets/screens/card-chat-light.png" />
-      </picture>
-      <p><b>Give it the whole task.</b> Nod compares, decides and drafts, and doesn't send until you say so.</p>
-    </td>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/screens/card-tasks-dark.png" />
-        <img alt="The Tasks page with a weekday calendar check and a Friday recap scheduled." src="docs/src/assets/screens/card-tasks-light.png" />
-      </picture>
-      <p><b>Keep watch on a schedule.</b> Ask once in plain words. Nod checks back on its own.</p>
-    </td>
-    <td width="33%" valign="top">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/screens/card-usage-dark.png" />
-        <img alt="Usage shows what Nod did and spent, including every sign-in and card use." src="docs/src/assets/screens/card-usage-light.png" />
-      </picture>
-      <p><b>Sign in without sharing passwords.</b> Vault types them in privately and logs every use.</p>
-    </td>
+    <td width="50%"><strong>Every note, visible.</strong><br />See, edit, or forget each one, with the message it came from.</td>
+    <td width="50%"><strong>Drafts that sound like you.</strong><br />Learns your style from sent emails, with no names or numbers.</td>
+  </tr>
+  <tr>
+    <td><strong>Tell it once.</strong><br />Say something changed, and it uses the new fact from then on.</td>
+    <td><strong>It learns how to do a task.</strong><br />Reuses the steps, and fixes them when a site changes.</td>
   </tr>
 </table>
 
-## Built to be trusted
+<p align="center">
+  It learns about you only from your own messages, never from the pages or emails it reads.<br />
+  <a href="https://nod.n8n.io/docs/how-it-works/memory/">How memory works</a>
+</p>
 
-- **Authority comes from you.** A web page or an email can never give Nod permission. The server checks every app action against what you asked, and asks you when it isn't sure.
-- **Vault keeps saved secrets out of the model.** It fills saved logins and cards into the exact website, privately.
-- **What matters is on the record.** Every sign-in, every change or message sent through your apps, and every model cost, with a monthly spending limit.
-- **Runs on your computer.** With the desktop app or from source. You pick the model provider, and the code is open.
+<br />
 
-[Our trust principles](docs/src/content/docs/trust/principles.mdx) · [How Nod compares](docs/src/content/docs/trust/compare.mdx) · [Security review guide](docs/src/content/docs/trust/security-review.mdx)
+<p align="center">
+  <a href="docs/src/assets/readme/heading-rules-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-rules-dark.webp" alt="Your machine. Your model. Your rules." width="688" /></a>
+  <a href="docs/src/assets/readme/heading-rules.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-rules.webp" alt="Your machine. Your model. Your rules." width="688" /></a>
+</p>
 
-## Remembers what you tell it
+- **Runs on your computer or server.** Files, memory, and saved logins stay there. Your model provider gets what each task needs.
+- **Uses the model you choose.** OpenAI, Anthropic, Gemini, OpenRouter, Bedrock, Vertex AI, Azure, 20+ more, or your own server. Or sign in with ChatGPT Plus or Pro.
+- **Follows your rules.** The server checks each app action, and each website step that can change something, against your request and rules. Anything they don't cover waits for your yes.
+- **Keeps secrets out of the model.** Vault enters passwords, codes, and cards privately on the website.
+- **Shows what it did.** Every action and sign-in is in Usage, with costs and a monthly limit on API models.
 
-- **93.2% on LongMemEval**, the standard long-term memory benchmark. Asked 500 questions about months of earlier chats, Nod answered 93.2% in a fresh session that sees only the latest messages, finding the rest in its notes and its search. That's up from 79%, and among the best published memory systems.
-- **No email can plant a memory.** In 216 WhisperBench attacks (108 emails, each read in the background and on request), none got a false fact or rule into Nod's memory. The same attack succeeds on OpenClaw 87.5% of the time.
-- **It finds what you said.** Nod searches everything you've told it, ranks the best matches first and brings up what you said before about the topic at hand, so it can answer with the date you said it.
-- **Learns only from you.** Notes come from you: your messages, notes you add, what you choose to import from another assistant, and one style note from email you sent. Never from web pages, emails you receive or Nod's replies. See and edit every one in Settings → Memory.
+<p align="center">
+  <a href="https://nod.n8n.io/docs/trust/">How trust works</a> · <a href="https://nod.n8n.io/docs/trust/privacy/">Where your data goes</a> · <a href="https://nod.n8n.io/docs/trust/security-model/">Security model</a>
+</p>
 
-[How we test memory](docs/src/content/docs/contribute/evals.mdx#benchmark-memory-with-longmemeval) · [How memory works](docs/src/content/docs/how-it-works/memory.md)
+<br />
 
-## Get Nod
+<a name="benchmarks"></a>
 
-**Self-hosted server.** Run one assistant on a VPS, cloud VM, or Mac mini and connect from your devices. See [Host your own server](docs/src/content/docs/deploy/self-host.mdx).
+<p align="center">
+  <a href="docs/src/assets/readme/heading-measured-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-measured-dark.webp" alt="Measured, not promised" width="476" /></a>
+  <a href="docs/src/assets/readme/heading-measured.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-measured.webp" alt="Measured, not promised" width="476" /></a>
+</p>
 
-**Desktop app.** Download the newest **Nod** release for Mac (Apple silicon or Intel) or Windows from the [releases page](https://github.com/n8n-io/nod/releases). See [Install the desktop app](docs/src/content/docs/get-started/install-desktop.mdx).
+<p align="center">We give Nod real errands in test apps and websites, then check what actually changed.</p>
 
-**From source**, on macOS or Linux with Node.js 24.21+, pnpm and Docker:
+<table align="center">
+  <tr>
+    <td align="center" valign="top" width="25%"><h1>98%</h1><strong>tasks finished</strong><br /><sub>226 errands, 3 runs each</sub></td>
+    <td align="center" valign="top" width="25%"><h1>0</h1><strong>unsafe actions</strong><br /><sub>in those 678 runs</sub></td>
+    <td align="center" valign="top" width="25%"><h1>93.2%</h1><strong>memory recall</strong><br /><sub>LongMemEval-S</sub></td>
+    <td align="center" valign="top" width="25%"><h1>0 of 216</h1><strong>false memories</strong><br /><sub>WhisperBench attacks</sub></td>
+  </tr>
+</table>
 
-```sh
-git clone https://github.com/n8n-io/nod.git && cd nod
-corepack enable && pnpm start
+<p align="center">
+  <a href="https://nod.n8n.io/docs/how-it-works/benchmarks/">How we measured this</a> · <a href="https://nod.n8n.io/docs/contribute/evals/">Run the evals yourself</a><br />
+  <sub>GPT-6.1 Sol, October 2026, in simulated accounts and websites. Test results, not a guarantee.</sub>
+</p>
+
+<br />
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-hood-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-hood-dark.webp" alt="Under the hood" width="328" /></a>
+  <a href="docs/src/assets/readme/heading-hood.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-hood.webp" alt="Under the hood" width="328" /></a>
+</p>
+
+<p align="center">One Node process and a few Docker containers, all on the machine that runs Nod.</p>
+
+```mermaid
+flowchart TB
+  you(["You<br/>app · Telegram · WhatsApp"]):::pink
+  server["Nod server<br/>Pi runtime · trust check<br/>Vault · memory · schedules"]:::pink
+  you --> server
+  server --> workspace["Linux workspace<br/>sandbox container"]
+  server --> browser["Chromium<br/>browser container"]
+  server --> db[("PostgreSQL")]
+  server -- "your key" --> model["Your model<br/>provider"]
+  server --> apps["Your apps<br/>Gmail · Slack · MCP"]
+  classDef pink fill:#ff91ac,stroke:#191919,color:#191919
 ```
 
-You also need a model connection: an OpenAI, Anthropic or OpenRouter API key, an Amazon Bedrock key and Region, a Google Vertex AI key, an Azure OpenAI endpoint, deployment and key, or a ChatGPT Plus or Pro plan. See [Install from source](docs/src/content/docs/get-started/install-from-source.mdx) for the Linux Vault key and the access link.
+- **Policy lives in the server, not the prompt.** The trust check, Vault, payments, and spending limits run in the server.
+- **Untrusted by default.** App, web, and browser results reach the model marked as data, not instructions.
+- **Keys stay out of the sandbox.** Provider keys never enter the workspace or the browser.
+- **Built with** TypeScript on Node.js 24, Fastify, React, PostgreSQL with pg-boss, the [Pi](https://github.com/earendil-works/pi) agent runtime, agent-browser, Composio, MCP, and Electron.
 
-## Read the docs
+<p align="center">
+  <a href="https://nod.n8n.io/docs/how-it-works/architecture/">Architecture</a> · <a href="https://nod.n8n.io/docs/how-it-works/agent-runtime/">Agent runtime</a> · <a href="https://nod.n8n.io/docs/trust/security-model/">Security model</a>
+</p>
 
-Read the docs for this revision in [`docs/`](docs/README.md). Run the site locally with `pnpm --dir docs dev`, or start with these pages:
+<br />
 
-| Section                                                              | What's inside                                         |
-| -------------------------------------------------------------------- | ----------------------------------------------------- |
-| [Get started](docs/src/content/docs/get-started/what-is-nod.mdx)     | What Nod is, installing it and your first task        |
-| [Use Nod](docs/src/content/docs/use/chat.md)                         | Chat, tasks, schedules, files, the browser and memory |
-| [Trust and Vault](docs/src/content/docs/trust/index.mdx)             | Approvals, saved logins, payments and your data       |
-| [How Nod works](docs/src/content/docs/how-it-works/architecture.mdx) | Threads, turns, the sandbox and memory                |
-| [Contribute](docs/src/content/docs/contribute/index.mdx)             | Development setup, checks, evals and writing docs     |
+<p align="center">
+  <a href="docs/src/assets/readme/heading-next-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-next-dark.webp" alt="Next on the list" width="316" /></a>
+  <a href="docs/src/assets/readme/heading-next.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-next.webp" alt="Next on the list" width="316" /></a>
+</p>
 
-## Community
+- **Run while your machine is asleep.** Hosted, so the morning brief still arrives.
+- **Call businesses on the phone.** For the errands that still need a voice.
+- **One Nod for your team.** Today one owner per Nod. Next, a few people sharing one.
+- **Make it your own.** Change how Nod works in the open code, and send it back.
 
-Report bugs with the [bug report form](https://github.com/n8n-io/nod/issues/new/choose), share ideas in [Discussions](https://github.com/n8n-io/nod/discussions), and report vulnerabilities privately through the [security policy](SECURITY.md). To contribute, read [CONTRIBUTING](CONTRIBUTING.md). Coding agents follow [AGENTS.md](AGENTS.md).
+<br />
 
-## License
+<p align="center">
+  <a href="docs/src/assets/readme/heading-answers-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-answers-dark.webp" alt="Straight answers" width="355" /></a>
+  <a href="docs/src/assets/readme/heading-answers.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-answers.webp" alt="Straight answers" width="355" /></a>
+</p>
 
-Copyright 2026 n8n GmbH. Nod uses the [Apache License 2.0](LICENSE), and [NOTICE](NOTICE) holds its attribution notice. Bundled third-party assets keep their own terms and are not covered by it: Geist uses the [SIL Open Font License](public/fonts/Geist-OFL.txt), provider logos belong to [their owners](public/logos/SOURCES.md), and the desktop runtime lists its components and their licenses in `licenses/COMPONENTS.md`.
+<details>
+<summary><strong>What does it cost?</strong></summary>
+<br />
+
+Nod is free and open source. You bring your own model provider, which bills you directly. With an API model selected, Nod [shows what each task cost](https://nod.n8n.io/docs/use/spending/) and stops at your monthly limit.
+
+</details>
+
+<details>
+<summary><strong>Do I need n8n?</strong></summary>
+<br />
+
+No. Nod is its own app, made by the team behind [n8n](https://n8n.io). It is not the n8n AI Assistant.
+
+</details>
+
+<details>
+<summary><strong>Where does my data go?</strong></summary>
+<br />
+
+Your files, memory, and saved logins stay on the machine running Nod. Your model provider gets what each task needs, and app connections go through a connection service that n8n hosts by default. Nod also shares basic usage data with n8n, on by default for new users. Turn off **Share usage data** in **Settings → Privacy & data** to stop new sends. [Your data and privacy](https://nod.n8n.io/docs/trust/privacy/) lists exactly what is sent.
+
+</details>
+
+<details>
+<summary><strong>Does it work when my laptop is closed?</strong></summary>
+<br />
+
+Not yet. [Schedules](https://nod.n8n.io/docs/use/schedules/) run while the computer that runs Nod is on. Run it on a [Mac mini](https://nod.n8n.io/docs/deploy/mac-mini/) or [your own server](https://nod.n8n.io/docs/deploy/self-host/) to keep it always on. A hosted version is next on the list.
+
+</details>
+
+<details>
+<summary><strong>Can it make mistakes?</strong></summary>
+<br />
+
+Yes. Its [safety check](https://nod.n8n.io/docs/trust/) is a model's judgement, and Nod is a research preview. That is why it asks before anything you didn't ask for, and why everything it did is on record.
+
+Pick a capable model. In 240 test decisions, GPT-6.1 Sol and Claude Opus 5.5 got every one right. Claude Haiku 5.5 let 8 unsafe actions through.
+
+</details>
+
+<br />
+
+<a name="get-nod"></a>
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-get-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-get-dark.webp" alt="Get Nod" width="209" /></a>
+  <a href="docs/src/assets/readme/heading-get.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-get.webp" alt="Get Nod" width="209" /></a>
+</p>
+
+<p align="center">Install the app, connect a model and your apps, then ask for something<br />in the app, on Telegram, or on WhatsApp. Setup takes about ten minutes.</p>
+
+<p align="center">
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-arm64.dmg#gh-dark-mode-only"><img src="docs/src/assets/readme/button-mac-dark.webp" alt="Download for Mac" width="219" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-arm64.dmg#gh-light-mode-only"><img src="docs/src/assets/readme/button-mac.webp" alt="Download for Mac" width="219" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-Setup-x64.exe#gh-dark-mode-only"><img src="docs/src/assets/readme/button-windows-dark.webp" alt="Download for Windows" width="259" /></a>
+  <a href="https://github.com/n8n-io/nod/releases/latest/download/nod-Setup-x64.exe#gh-light-mode-only"><img src="docs/src/assets/readme/button-windows.webp" alt="Download for Windows" width="259" /></a>
+  <a href="https://nod.n8n.io/docs/#gh-dark-mode-only"><img src="docs/src/assets/readme/button-docs-dark.webp" alt="Read the docs" width="190" /></a>
+  <a href="https://nod.n8n.io/docs/#gh-light-mode-only"><img src="docs/src/assets/readme/button-docs.webp" alt="Read the docs" width="190" /></a>
+</p>
+
+<p align="center">
+  <a href="https://nod.n8n.io/docs/get-started/install-desktop/">Install guide</a> · <a href="https://nod.n8n.io/docs/connect/models/">Connect a model</a> · <a href="https://nod.n8n.io/docs/connect/apps/">Connect your apps</a> · <a href="https://nod.n8n.io/docs/deploy/self-host/">Host your own server</a>
+</p>
+
+<a name="run-from-source"></a>
+
+<details>
+<summary><strong>Run from source</strong></summary>
+<br />
+
+On macOS or Linux, install Node.js 24.21 or later, pnpm, and Docker. Then run:
+
+```sh
+git clone https://github.com/n8n-io/nod.git
+cd nod
+corepack enable
+pnpm start
+```
+
+See [Install from source](https://nod.n8n.io/docs/get-started/install-from-source/) for the Linux Vault key and access link, and [`docs/`](docs/README.md) for the docs of this revision.
+
+</details>
+
+<br />
+
+<a name="build-with-us"></a>
+
+<p align="center">
+  <a href="docs/src/assets/readme/heading-build-dark.webp#gh-dark-mode-only"><img src="docs/src/assets/readme/heading-build-dark.webp" alt="Build with us" width="280" /></a>
+  <a href="docs/src/assets/readme/heading-build.webp#gh-light-mode-only"><img src="docs/src/assets/readme/heading-build.webp" alt="Build with us" width="280" /></a>
+</p>
+
+<p align="center">Nod is open source, from the team behind <a href="https://n8n.io">n8n</a>.<br />Read <a href="CONTRIBUTING.md">CONTRIBUTING</a> to send your first change.</p>
+
+<p align="center">
+  <a href="https://github.com/n8n-io/nod/issues/new/choose">Report a bug</a> · <a href="https://github.com/n8n-io/nod/discussions">Share an idea</a> · <a href="https://discord.gg/n8n">Discord</a> · <a href="https://community.n8n.io/c/n8n-labs/48">Forum</a> · <a href="SECURITY.md">Security</a>
+</p>
+
+<p align="center">
+  <sub>Copyright 2026 n8n GmbH · <a href="LICENSE">Apache License 2.0</a> · <a href="NOTICE">Notice</a><br />Bundled third-party assets keep their own terms: <a href="public/fonts/Geist-OFL.txt">Geist</a>, <a href="public/logos/SOURCES.md">provider logos</a>,<br />and the desktop runtime components listed in the app's licenses/COMPONENTS.md.</sub>
+</p>

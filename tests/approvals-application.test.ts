@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +9,7 @@ import test from 'node:test';
 import pg from 'pg';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import type { AgentToolResult } from '../src/ports/agent.ts';
+import type { MessagingTransport } from '../src/ports/messaging.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
@@ -16,6 +18,10 @@ import { createDecisionModel } from '../src/providers/decisions.ts';
 import { BrowserActionError, type CredentialInput } from '../src/ports/computer.ts';
 import { authenticatorKey } from '../src/shared/authenticator-key.ts';
 import { authenticatorCode } from '../src/server/authenticator.ts';
+import { transaction } from '../src/server/transaction.ts';
+import { createChannels } from '../src/server/channels.ts';
+import type { AppState, Task } from '../src/shared/contracts.ts';
+import { mergeMessages } from '../src/web/lib/chat-messages.ts';
 
 test(
   'personal approvals revalidate targets before execution',
@@ -39,6 +45,8 @@ test(
     const runtimeRoot = await mkdtemp(join(tmpdir(), 'nod-test-runtime-'));
     t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
     process.env.NOD_DATA_ROOT = runtimeRoot;
+    const localHome = await realpath(await mkdtemp(join(tmpdir(), 'nod-test-home-')));
+    t.after(() => rm(localHome, { recursive: true, force: true }));
     const { createApplication } = await import('../src/server/composition.ts');
     const { pool } = await import('../src/server/db.ts');
     const { dataRoot, ownerId, port } = await import('../src/server/config.ts');
@@ -270,7 +278,9 @@ test(
                     .execute(
                       plan.tool === 'read_source'
                         ? plan.args
-                        : plan.tool === 'browser' || plan.tool === 'sign_in'
+                        : plan.tool === 'browser' ||
+                            plan.tool === 'sign_in' ||
+                            plan.tool === 'files'
                           ? { action: plan.action, ...plan.args }
                           : { action: plan.action, args: plan.args },
                     );
@@ -284,6 +294,11 @@ test(
           dispose() {
             if (recordClosingUsage) reportClosingUsage();
           },
+        },
+        localFilesHome: localHome,
+        trash: {
+          ready: async () => true,
+          put: (path: string) => rm(path, { recursive: true }),
         },
         computer: fakeComputer({
           signInMethods: async (_browser, origin, methods) => {
@@ -341,6 +356,9 @@ test(
           },
         }),
         workspace: fakeWorkspace({
+          writeArtifact: async (_threadId, path, bytes) => {
+            workspaceFiles.set(path, bytes);
+          },
           readArtifact: async (_threadId, path) => {
             const bytes = workspaceFiles.get(path);
             if (!bytes) throw new Error('The workspace file is unavailable.');
@@ -434,7 +452,7 @@ test(
       cookie: `${accessCookie(port)}=${await accessKey(dataRoot)}`,
     };
     const request = (
-      method: 'GET' | 'POST' | 'PATCH',
+      method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
       path: string,
       payload?: Record<string, unknown>,
     ) => application.app.inject({ method, url: path, headers, payload });
@@ -463,13 +481,14 @@ test(
     }
     const approvalsFor = async (id: string) =>
       (await pool.query('SELECT * FROM approvals WHERE turn_id=$1', [id])).rows;
-    async function reminder() {
+    async function reminder(input: Record<string, unknown> = {}) {
       const response = await request('POST', '/api/schedules', {
         title: 'Synthetic cancellation reminder',
         prompt: 'Review the synthetic checklist.',
         kind: 'once',
         runAt: '2099-01-01T09:00:00Z',
         timeZone: 'UTC',
+        ...input,
       });
       assert.equal(response.statusCode, 200, response.body);
       const id = response.json().id as string;
@@ -479,7 +498,7 @@ test(
       assert.ok(jobId);
       return { id, jobId: jobId as string };
     }
-    async function assertCancelled(schedule: { id: string; jobId: string }) {
+    async function assertPaused(schedule: { id: string; jobId: string }) {
       assert.deepEqual(
         (
           await pool.query(
@@ -497,7 +516,7 @@ test(
       assert.deepEqual(
         (
           await pool.query(
-            "SELECT id FROM approvals WHERE owner_id=$1 AND action='NOD_schedule_cancel' AND args=$2::jsonb AND status<>'expired'",
+            "SELECT id FROM approvals WHERE owner_id=$1 AND action IN ('NOD_schedule_pause','NOD_schedule_cancel') AND args=$2::jsonb AND status<>'expired'",
             [ownerId, { id: schedule.id }],
           )
         ).rows,
@@ -1183,9 +1202,9 @@ test(
       );
 
       await t.test(
-        'schedule confirmations cannot mutate a revision edited after the question was saved',
+        'schedule pause and edit confirmations cannot mutate a revision edited after the question was saved',
         async () => {
-          for (const action of ['schedule_cancel', 'schedule_update']) {
+          for (const action of ['schedule_pause', 'schedule_update']) {
             const schedule = await reminder();
             const args = {
               id: schedule.id,
@@ -1193,6 +1212,7 @@ test(
             };
             const turn = await propose(action, args);
             const [approval] = await approvalsFor(turn);
+            assert.equal(approval.action, `NOD_${action}`);
             assert.equal(approval.expected_revision, 0);
             const changed = await request('PATCH', `/api/schedules/${schedule.id}`, {
               title: 'A newer synthetic reminder',
@@ -1244,8 +1264,534 @@ test(
               ])
             ).rows[0];
             assert.equal(applied.revision, saved.revision + 1);
-            assert.equal(applied.enabled, action !== 'schedule_cancel');
+            assert.equal(applied.enabled, action !== 'schedule_pause');
             assert.equal(applied.title, args.title ?? saved.title);
+            if (action === 'schedule_pause') {
+              const listed = (await request('GET', '/api/schedules'))
+                .json()
+                .find((item: { id: string }) => item.id === schedule.id);
+              assert.equal(listed.enabled, false);
+              assert.equal(listed.nextRun, null);
+            }
+          }
+        },
+      );
+
+      await t.test(
+        'direct schedule pause or deletion retires an outstanding chat confirmation',
+        async () => {
+          for (const method of ['PATCH', 'DELETE'] as const) {
+            const schedule = await reminder({
+              kind: 'recurring',
+              cron: '0 0 * * 0',
+              runAt: null,
+            });
+            const prompt = `Synthetic scheduled cancellation ${randomUUID()}`;
+            const requestedId = method === 'PATCH' ? schedule.id.toUpperCase() : schedule.id;
+            plans.set(prompt, { action: 'schedule_pause', args: { id: requestedId } });
+            const turn = await transaction(async (client) => {
+              const turnId = await enqueueTurn(prompt, {
+                source: 'schedule',
+                sourceId: `schedule-fixture:${randomUUID()}`,
+                background: true,
+                client,
+              });
+              await client.query(
+                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
+                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+                [
+                  randomUUID(),
+                  ownerId,
+                  schedule.id,
+                  randomUUID(),
+                  'Synthetic cancellation reminder',
+                  turnId,
+                  new Date().toISOString(),
+                  'Check the synthetic schedule status.',
+                ],
+              );
+              return turnId;
+            }, pool);
+            await waitFor(turn, 'waiting');
+            const [approval] = await approvalsFor(turn);
+            assert.equal(approval.status, 'pending');
+            assert.equal(approval.action, 'NOD_schedule_pause');
+            assert.deepEqual(approval.args, { id: requestedId });
+            const before = await request('GET', '/api/state');
+            assert.equal(before.statusCode, 200, before.body);
+            const beforeState = before.json<AppState>();
+            assert.equal(
+              beforeState.messages.find(
+                (message) => message.id === approval.confirmation_message_id,
+              )?.text,
+              confirmationText,
+            );
+            const response = await request(
+              method,
+              `/api/schedules/${schedule.id}`,
+              method === 'PATCH' ? { enabled: false } : undefined,
+            );
+            assert.equal(response.statusCode, 200, response.body);
+            if (method === 'PATCH') await assertPaused(schedule);
+            else {
+              assert.equal(
+                (
+                  await pool.query('SELECT id FROM schedules WHERE id=$1 AND owner_id=$2', [
+                    schedule.id,
+                    ownerId,
+                  ])
+                ).rowCount,
+                0,
+              );
+              assert.equal(
+                (
+                  await pool.query(`SELECT state FROM ${bossSchema}.job WHERE id=$1`, [
+                    schedule.jobId,
+                  ])
+                ).rows[0].state,
+                'cancelled',
+              );
+            }
+            assert.equal((await approvalsFor(turn))[0].status, 'expired');
+            const waiting = (
+              await pool.query('SELECT status FROM turns WHERE id=$1 AND owner_id=$2', [
+                turn,
+                ownerId,
+              ])
+            ).rows[0];
+            assert.notEqual(waiting.status, 'waiting');
+            const state = await request('GET', '/api/state');
+            assert.equal(state.statusCode, 200, state.body);
+            const afterState = state.json<AppState>();
+            assert.ok(afterState.hiddenMessageIds?.includes(approval.confirmation_message_id));
+            assert.equal(
+              afterState.messages.some(
+                (message) => message.id === approval.confirmation_message_id,
+              ),
+              false,
+            );
+            assert.equal(
+              mergeMessages(
+                beforeState.messages,
+                afterState.messages,
+                new Set(afterState.hiddenMessageIds),
+              ).some((message) => message.id === approval.confirmation_message_id),
+              false,
+            );
+            const staleReply = await request('POST', '/api/messages', {
+              text: 'Yes',
+              replyToMessageId: approval.confirmation_message_id,
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(staleReply.statusCode, 404, staleReply.body);
+          }
+        },
+      );
+
+      await t.test(
+        'retiring a schedule confirmation leaves its saved task open with a reply target',
+        async () => {
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
+          const taskId = randomUUID();
+          const parentId = randomUUID();
+          const ownerMessageId = randomUUID();
+          const prompt = `Synthetic saved task cancellation ${randomUUID()}`;
+          const threadId = (await request('GET', '/api/state')).json<AppState>().threadId;
+          plans.set(prompt, { action: 'schedule_pause', args: { id: schedule.id } });
+          const turn = await transaction(async (client) => {
+            await client.query(
+              `INSERT INTO turns(id,owner_id,thread_id,session_id,source,message_id,prompt,status,finished_at)
+               VALUES($1,$2,$3,$3,'user',$4,$5,'succeeded',now())`,
+              [parentId, ownerId, threadId, ownerMessageId, 'Cancel the synthetic reminder.'],
+            );
+            await client.query(
+              `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text)
+               VALUES($1,$2,$3,$4,'user',$5)`,
+              [ownerMessageId, ownerId, threadId, parentId, 'Cancel the synthetic reminder.'],
+            );
+            const id = await enqueueTurn(prompt, {
+              source: 'task',
+              sessionId: taskId,
+              parentTurnId: parentId,
+              background: true,
+              client,
+            });
+            await client.query(
+              `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text,applied_revision)
+               VALUES($1,$2,$3,$1,$4,'Synthetic saved task','Other work completed','Waiting for approval',1)`,
+              [taskId, ownerId, id, ownerMessageId],
+            );
+            await client.query('UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2', [
+              taskId,
+              id,
+            ]);
+            return id;
+          }, pool);
+          await waitFor(turn, 'waiting');
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.status, 'pending');
+          assert.equal(approval.action, 'NOD_schedule_pause');
+          const before = (await request('GET', '/api/tasks'))
+            .json<Task[]>()
+            .find((task) => task.id === taskId);
+          assert.ok(before);
+          assert.equal(before.status, 'needs_you');
+          assert.equal(before.question, confirmationText);
+          assert.equal(before.messageId, null);
+          const turnCount = (
+            await pool.query(
+              'SELECT count(*)::int AS count FROM turns WHERE owner_id=$1 AND session_id=$2',
+              [ownerId, taskId],
+            )
+          ).rows[0].count;
+          for (const [table, rowId] of [
+            ['turns', turn],
+            ['tasks', taskId],
+          ] as const) {
+            const blocker = await pool.connect();
+            try {
+              await blocker.query('BEGIN');
+              await blocker.query(
+                `SELECT id FROM ${table} WHERE id=$1 AND owner_id=$2 FOR NO KEY UPDATE`,
+                [rowId, ownerId],
+              );
+              const blocked = await request('PATCH', `/api/schedules/${schedule.id}`, {
+                enabled: false,
+              });
+              assert.equal(blocked.statusCode, 409, blocked.body);
+              assert.match(blocked.body, /still being updated/);
+              assert.equal((await approvalsFor(turn))[0].status, 'pending');
+              assert.equal(
+                (await pool.query('SELECT enabled FROM schedules WHERE id=$1', [schedule.id]))
+                  .rows[0].enabled,
+                true,
+              );
+            } finally {
+              await blocker.query('ROLLBACK');
+              blocker.release();
+            }
+          }
+          const paused = await request('PATCH', `/api/schedules/${schedule.id}`, {
+            enabled: false,
+          });
+          assert.equal(paused.statusCode, 200, paused.body);
+          assert.equal((await approvalsFor(turn))[0].status, 'expired');
+          assert.equal(
+            (await pool.query('SELECT status FROM turns WHERE id=$1', [turn])).rows[0].status,
+            'cancelled',
+          );
+          assert.equal(
+            (
+              await pool.query(
+                'SELECT count(*)::int AS count FROM turns WHERE owner_id=$1 AND session_id=$2',
+                [ownerId, taskId],
+              )
+            ).rows[0].count,
+            turnCount,
+          );
+          const detail = (await request('GET', `/api/tasks/${taskId}`)).json<{
+            task: Task;
+            events: Array<{ type: string; summary: string }>;
+          }>();
+          assert.equal(detail.task.status, 'needs_you');
+          assert.match(detail.task.question ?? '', /This task is still open/);
+          assert.ok(detail.task.questionMessageId);
+          assert.notEqual(detail.task.questionMessageId, approval.confirmation_message_id);
+          assert.equal(
+            detail.events.some((event) => event.summary === confirmationText),
+            false,
+          );
+          assert.ok(detail.events.some((event) => event.summary === detail.task.question));
+          const state = (await request('GET', '/api/state')).json<AppState>();
+          assert.equal(
+            state.messages.some((message) => message.id === approval.confirmation_message_id),
+            false,
+          );
+          assert.ok(state.messages.some((message) => message.id === detail.task.questionMessageId));
+          const reply = await request('POST', '/api/messages', {
+            text: 'Continue the remaining synthetic work.',
+            replyToMessageId: detail.task.questionMessageId,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(reply.statusCode, 200, reply.body);
+          await waitFor(reply.json().turnId, 'succeeded');
+          const resumed = (
+            await pool.query('SELECT session_id,parent_turn_id,task_id FROM turns WHERE id=$1', [
+              reply.json().turnId,
+            ])
+          ).rows[0];
+          assert.deepEqual(resumed, {
+            session_id: taskId,
+            parent_turn_id: turn,
+            task_id: taskId,
+          });
+          assert.equal((await approvalsFor(turn))[0].status, 'expired');
+        },
+      );
+
+      await t.test('state counts all hidden messages while bounding recent IDs', async () => {
+        const beforeResponse = await request('GET', '/api/state');
+        assert.equal(beforeResponse.statusCode, 200, beforeResponse.body);
+        const before = beforeResponse.json<AppState>();
+        assert.ok(Number.isInteger(before.hiddenMessageCount));
+        const hiddenIds: string[] = Array.from({ length: 161 }, () => randomUUID());
+        const visibleId = randomUUID();
+        const foreignId = randomUUID();
+        const archivedId = randomUUID();
+        const archivedThreadId = randomUUID();
+        await pool.query('INSERT INTO threads(id,owner_id,archived_at) VALUES($1,$2,now())', [
+          archivedThreadId,
+          ownerId,
+        ]);
+        try {
+          await pool.query(
+            `INSERT INTO messages(id,owner_id,thread_id,role,text,hidden_at)
+             SELECT source.id,$2,$3,'assistant','Retired state fixture',
+               clock_timestamp()+make_interval(mins => source.position::int)
+             FROM unnest($1::uuid[]) WITH ORDINALITY AS source(id,position)`,
+            [hiddenIds, ownerId, before.threadId],
+          );
+          await pool.query(
+            `INSERT INTO messages(id,owner_id,thread_id,role,text,hidden_at) VALUES
+             ($1,$2,$3,'assistant','Visible state fixture',NULL),
+             ($4,'foreign-owner',$3,'assistant','Foreign retired fixture',now()+interval '1 day'),
+             ($5,$2,$6,'assistant','Archived retired fixture',now()+interval '1 day')`,
+            [visibleId, ownerId, before.threadId, foreignId, archivedId, archivedThreadId],
+          );
+          const response = await request('GET', '/api/state');
+          assert.equal(response.statusCode, 200, response.body);
+          const state = response.json<AppState>();
+          assert.equal(state.hiddenMessageCount, before.hiddenMessageCount! + hiddenIds.length);
+          assert.equal(state.hiddenMessageIds?.length, 150);
+          assert.deepEqual(state.hiddenMessageIds, hiddenIds.slice(-150).reverse());
+          assert.ok(state.messages.some(({ id }) => id === visibleId));
+          assert.ok(state.messages.every(({ id }) => !hiddenIds.includes(id)));
+          const originalQuery = pool.query;
+          const query = originalQuery.bind(pool) as unknown as (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+          let visibleRead: Promise<unknown> | undefined;
+          pool.query = ((...args: unknown[]) => {
+            const sql = args[0];
+            if (typeof sql !== 'string') return query(...args);
+            if (sql.includes('FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1')) {
+              const result = query(...args);
+              visibleRead = result;
+              return result;
+            }
+            if (sql.includes('ARRAY(SELECT id FROM messages WHERE owner_id=$1'))
+              return (async () => {
+                assert.ok(visibleRead);
+                await visibleRead;
+                await query('UPDATE messages SET hidden_at=now() WHERE id=$1 AND owner_id=$2', [
+                  visibleId,
+                  ownerId,
+                ]);
+                return query(...args);
+              })();
+            return query(...args);
+          }) as typeof pool.query;
+          try {
+            const racedResponse = await request('GET', '/api/state');
+            assert.equal(racedResponse.statusCode, 200, racedResponse.body);
+            const racedState = racedResponse.json<AppState>();
+            assert.equal(racedState.hiddenMessageCount, state.hiddenMessageCount! + 1);
+            assert.equal(racedState.hiddenMessageIds?.includes(visibleId), false);
+            assert.equal(
+              racedState.messages.some(({ id }) => id === visibleId),
+              false,
+            );
+          } finally {
+            pool.query = originalQuery;
+          }
+        } finally {
+          await pool.query('DELETE FROM messages WHERE id=ANY($1::uuid[])', [
+            [...hiddenIds, visibleId, foreignId, archivedId],
+          ]);
+          await pool.query('DELETE FROM threads WHERE id=$1 AND owner_id=$2', [
+            archivedThreadId,
+            ownerId,
+          ]);
+        }
+      });
+
+      await t.test(
+        'direct schedule pause waits for a channel confirmation already in flight',
+        async () => {
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
+          const prompt = `Synthetic channel cancellation ${randomUUID()}`;
+          const sourceId = `channel:telegram:bot:${randomUUID()}`;
+          const channel = 'telegram:synthetic';
+          plans.set(prompt, { action: 'schedule_pause', args: { id: schedule.id } });
+          const turn = await transaction(async (client) => {
+            const turnId = await enqueueTurn(prompt, {
+              source: 'schedule',
+              sourceId: `schedule-fixture:${randomUUID()}`,
+              background: true,
+              channel,
+              channelSourceId: sourceId,
+              client,
+            });
+            await client.query(
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
+             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              [
+                randomUUID(),
+                ownerId,
+                schedule.id,
+                randomUUID(),
+                'Synthetic cancellation reminder',
+                turnId,
+                new Date().toISOString(),
+                'Check the synthetic schedule status.',
+              ],
+            );
+            return turnId;
+          }, pool);
+          await waitFor(turn, 'waiting');
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.status, 'pending');
+          const messageId = approval.confirmation_message_id as string;
+          const taskId = randomUUID();
+          await transaction(async (client) => {
+            await client.query(
+              `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,applied_revision)
+               VALUES($1,$2,$3,$3,'Synthetic channel task','Synthetic work finished','Waiting for approval',1)`,
+              [taskId, ownerId, turn],
+            );
+            await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
+              taskId,
+              turn,
+              ownerId,
+            ]);
+          }, pool);
+          const channelPool = new pg.Pool({
+            connectionString: process.env.DATABASE_URL,
+            max: 1,
+            connectionTimeoutMillis: 10_000,
+          });
+          const posts: Array<{ threadId: string; text: string }> = [];
+          let postEntered = false;
+          let releasePost = () => {};
+          const postReleased = new Promise<void>((resolve) => {
+            releasePost = resolve;
+          });
+          const transport: MessagingTransport = {
+            channels: [
+              {
+                id: 'telegram',
+                status: 'configured',
+                missing: [],
+                accountId: 'bot',
+                allowedSenderIds: ['111'],
+              },
+            ],
+            receive: async () => ({ status: 200, body: {} }),
+            post: async (input) => {
+              postEntered = true;
+              await postReleased;
+              await channelPool.query('SELECT 1');
+              posts.push({ threadId: input.threadId, text: input.text });
+              return { id: 'synthetic-channel-message' };
+            },
+            close: async () => {},
+          };
+          let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
+          let sending: Promise<void> | undefined;
+          let pausing: ReturnType<typeof request> | undefined;
+          try {
+            channels = await createChannels(channelPool, {
+              ownerId,
+              transport,
+              subscribe: () => () => {},
+              intervalMs: 600_000,
+              submit: async () => {
+                throw new Error('Synthetic channel did not receive a message.');
+              },
+              isRetirableScheduleConfirmation: async (id) =>
+                Boolean(
+                  (
+                    await pool.query(
+                      "SELECT 1 FROM approvals WHERE owner_id=$1 AND confirmation_message_id=$2 AND action='NOD_schedule_pause'",
+                      [ownerId, id],
+                    )
+                  ).rowCount,
+                ),
+            });
+            await channelPool.query(
+              `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,turn_id,state,created_at,owner_id,channel)
+             VALUES($1,'telegram','bot','111','synthetic-chat','Synthetic channel request',now()-interval '1 minute',$2,'submitted',now()-interval '1 minute',$3,$4)`,
+              [sourceId, turn, ownerId, channel],
+            );
+            sending = channels.drain();
+            for (let attempt = 0; attempt < 300 && !postEntered; attempt++) await delay(20);
+            assert.equal(postEntered, true);
+            pausing = request('PATCH', `/api/schedules/${schedule.id}`, { enabled: false });
+            let waiting = false;
+            for (let attempt = 0; attempt < 300 && !waiting; attempt++) {
+              waiting = Boolean(
+                (
+                  await admin.query(
+                    `SELECT 1 FROM pg_stat_activity a WHERE a.wait_event_type='Lock'
+                   AND a.query LIKE 'SELECT id FROM messages WHERE owner_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE%'
+                   AND EXISTS (
+                     SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+                     JOIN pg_namespace n ON n.oid=c.relnamespace
+                     WHERE l.pid=a.pid AND l.granted AND c.relname='schedules' AND n.nspname=$1
+                   ) LIMIT 1`,
+                    [schema],
+                  )
+                ).rowCount,
+              );
+              if (!waiting) await delay(20);
+            }
+            assert.equal(waiting, true);
+            assert.equal(
+              (await pool.query('SELECT enabled FROM schedules WHERE id=$1', [schedule.id])).rows[0]
+                .enabled,
+              true,
+            );
+            releasePost();
+            const response = await pausing;
+            await sending;
+            await channels.drain();
+            assert.equal(response.statusCode, 200, response.body);
+            await assertPaused(schedule);
+            assert.equal((await approvalsFor(turn))[0].status, 'expired');
+            assert.equal(posts.length, 2);
+            assert.deepEqual(posts[0], { threadId: 'synthetic-chat', text: confirmationText });
+            assert.equal(posts[1]?.threadId, 'synthetic-chat');
+            assert.match(posts[1]?.text ?? '', /This task is still open/);
+            assert.notEqual(posts[1]?.text, confirmationText);
+            const noticeId = (
+              await pool.query('SELECT continuation_message_id FROM tasks WHERE id=$1', [taskId])
+            ).rows[0].continuation_message_id as string;
+            assert.ok(noticeId);
+            assert.deepEqual(
+              (
+                await channelPool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [
+                  messageId,
+                ])
+              ).rows,
+              [{ state: 'sent' }],
+            );
+            assert.deepEqual(
+              (
+                await channelPool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [
+                  noticeId,
+                ])
+              ).rows,
+              [{ state: 'sent' }],
+            );
+            assert.ok(
+              (await pool.query('SELECT hidden_at FROM messages WHERE id=$1', [messageId])).rows[0]
+                .hidden_at,
+            );
+          } finally {
+            releasePost();
+            await Promise.allSettled([sending, pausing]);
+            await channels?.close();
+            await channelPool.end();
           }
         },
       );
@@ -1254,11 +1800,12 @@ test(
         'legacy schedule approvals without a saved revision cannot execute',
         async () => {
           const schedule = await reminder();
-          const turn = await propose('schedule_cancel', { id: schedule.id });
+          const turn = await propose('schedule_pause', { id: schedule.id });
           const [approval] = await approvalsFor(turn);
-          await pool.query('UPDATE approvals SET expected_revision=NULL WHERE id=$1', [
-            approval.id,
-          ]);
+          await pool.query(
+            "UPDATE approvals SET action='NOD_schedule_cancel',expected_revision=NULL WHERE id=$1",
+            [approval.id],
+          );
           const response = await request('POST', '/api/messages', {
             text: 'Yes',
             replyToMessageId: approval.confirmation_message_id,
@@ -1275,6 +1822,78 @@ test(
             ).rows[0],
             { revision: 0, enabled: true, job_id: schedule.jobId },
           );
+        },
+      );
+
+      await t.test(
+        'legacy schedule cancellation approval still pauses the saved schedule',
+        async () => {
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
+          const turn = await propose('schedule_pause', { id: schedule.id });
+          const [approval] = await approvalsFor(turn);
+          await pool.query("UPDATE approvals SET action='NOD_schedule_cancel' WHERE id=$1", [
+            approval.id,
+          ]);
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          const resumed = response.json().turnId as string;
+          await waitFor(resumed, 'succeeded');
+          assert.equal((await approvalsFor(turn))[0].status, 'completed');
+          assert.match(prompts.get(resumed) ?? '', /The schedule is paused/);
+          const paused = (await request('GET', '/api/schedules'))
+            .json()
+            .find((item: { id: string }) => item.id === schedule.id);
+          assert.equal(paused.enabled, false);
+          assert.equal(paused.nextRun, null);
+        },
+      );
+
+      await t.test(
+        'legacy approval does not call a completed one-time schedule paused',
+        async () => {
+          const schedule = await reminder();
+          const turn = await propose('schedule_pause', { id: schedule.id });
+          const [approval] = await approvalsFor(turn);
+          const threadId = (await request('GET', '/api/state')).json<AppState>().threadId;
+          const finishedTurn = randomUUID();
+          const runAt = '2020-01-01T09:00:00Z';
+          await pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,finished_at)
+             VALUES($1,$2,$3,$3,'schedule','Synthetic completed reminder.','succeeded',now())`,
+            [finishedTurn, ownerId, threadId],
+          );
+          await pool.query(
+            `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone)
+             VALUES($1,$2,$3,0,$4,'Synthetic cancellation reminder',$5,$6,'UTC')`,
+            [randomUUID(), ownerId, schedule.id, randomUUID(), finishedTurn, runAt],
+          );
+          await pool.query(
+            'UPDATE schedules SET enabled=false,run_at=$2,next_run_at=NULL,job_id=NULL WHERE id=$1',
+            [schedule.id, runAt],
+          );
+          await pool.query("UPDATE approvals SET action='NOD_schedule_cancel' WHERE id=$1", [
+            approval.id,
+          ]);
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          const resumed = response.json().turnId as string;
+          await waitFor(resumed, 'succeeded');
+          assert.equal((await approvalsFor(turn))[0].status, 'completed');
+          assert.doesNotMatch(prompts.get(resumed) ?? '', /The schedule is paused/);
+          const saved = (await request('GET', '/api/schedules'))
+            .json()
+            .find((item: { id: string }) => item.id === schedule.id);
+          assert.equal(saved.enabled, false);
+          assert.equal(saved.lastRun.scheduledFor, new Date(runAt).toISOString());
+          assert.equal(saved.lastRun.status, 'succeeded');
         },
       );
 
@@ -1366,7 +1985,7 @@ test(
       );
 
       await t.test(
-        'a schedule cancellation steered into a confirmed turn uses the fresh owner request',
+        'a schedule pause steered into a confirmed turn uses the fresh owner request',
         async () => {
           const schedule = await reminder();
           const proposed = await propose('notification_preferences_update', {
@@ -1403,7 +2022,7 @@ test(
             assert.equal((await approvalsFor(proposed))[0].status, 'completed');
             const text = 'Cancel the synthetic reminder now.';
             asked.add(text);
-            plans.set(text, { action: 'schedule_cancel', args: { id: schedule.id } });
+            plans.set(text, { action: 'schedule_pause', args: { id: schedule.id } });
             const cancellation = await request('POST', '/api/messages', {
               text,
               clientMessageId: randomUUID(),
@@ -1420,7 +2039,7 @@ test(
               ).rows[0].turn_id,
               resumed,
             );
-            await assertCancelled(schedule);
+            await assertPaused(schedule);
           } finally {
             steering = undefined;
             release();
@@ -1840,6 +2459,174 @@ test(
             'waiting',
           );
           assert.equal(await pending(), 1);
+        },
+      );
+      await t.test(
+        'local files open only in work the owner started, and opening needs their words',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'files-'));
+          await mkdir(join(folder, 'sorted'));
+          await writeFile(join(folder, 'a.txt'), 'a');
+          await writeFile(join(folder, 'contract.txt'), 'Synthetic contract');
+          const text = (id: string) => JSON.stringify(results.get(id));
+          const eventPrompt = `Synthetic event ${randomUUID()}`;
+          plans.set(eventPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const event = await enqueueTurn(eventPrompt, { source: 'event', background: true });
+          await waitFor(event, 'succeeded|failed');
+          assert.match(
+            text(event) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [event])).rows[0].error,
+            /work the owner started/,
+          );
+          assert.deepEqual(await approvalsFor(event), []);
+          const observer = await enqueueTurn(`Synthetic observer ${randomUUID()}`, {
+            source: 'event',
+            background: true,
+            proactive: true,
+          });
+          await waitFor(observer, 'succeeded|failed');
+          const taskPrompt = `Synthetic observer task ${randomUUID()}`;
+          plans.set(taskPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const task = await enqueueTurn(taskPrompt, {
+            source: 'task',
+            background: true,
+            parentTurnId: observer,
+            proactive: false,
+          });
+          await waitFor(task, 'succeeded|failed');
+          assert.match(
+            text(task) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [task])).rows[0].error,
+            /work the owner started/,
+          );
+          const listText = `List the synthetic folder ${randomUUID()}`;
+          asked.add(listText);
+          const listed = await propose('list', { path: folder }, 'files', listText);
+          assert.deepEqual(await approvalsFor(listed), []);
+          assert.match(text(listed), /contract\.txt/);
+          const unnamed = await propose(
+            'read',
+            { path: `${folder}/sorted/../contract.txt` },
+            'files',
+          );
+          const [held] = await approvalsFor(unnamed);
+          assert.equal(held.status, 'pending');
+          assert.equal(held.action, 'LOCAL_FILES_READ');
+          assert.deepEqual(held.args, { path: join(folder, 'contract.txt') });
+          const readText = `Summarize contract.txt ${randomUUID()}`;
+          asked.add(readText);
+          const opened = await propose(
+            'read',
+            { path: join(folder, 'contract.txt') },
+            'files',
+            readText,
+          );
+          assert.deepEqual(await approvalsFor(opened), []);
+          assert.match(text(opened), /Synthetic contract/);
+          const schedule = await reminder();
+          const scheduledPrompt = `Synthetic scheduled listing ${randomUUID()}`;
+          plans.set(scheduledPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const scheduled = await transaction(async (client) => {
+            const turnId = await enqueueTurn(scheduledPrompt, {
+              source: 'schedule',
+              sourceId: `schedule-fixture:${randomUUID()}`,
+              background: true,
+              client,
+            });
+            await client.query(
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
+               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              [
+                randomUUID(),
+                ownerId,
+                schedule.id,
+                randomUUID(),
+                'Synthetic listing',
+                turnId,
+                new Date().toISOString(),
+                'List the synthetic folder.',
+              ],
+            );
+            return turnId;
+          }, pool);
+          await waitFor(scheduled, 'waiting|succeeded');
+          assert.doesNotMatch(text(scheduled), /work the owner started/);
+          const keepText = `Never touch the sorted folder ${randomUUID()}`;
+          const keptOut = await propose(
+            'keep_out',
+            { path: join(folder, 'sorted') },
+            'files',
+            keepText,
+          );
+          assert.deepEqual(await approvalsFor(keptOut), []);
+          const moveText = `Move a.txt into sorted ${randomUUID()}`;
+          asked.add(moveText);
+          plans.set(moveText, {
+            tool: 'files',
+            action: 'move',
+            args: { moves: [{ from: join(folder, 'a.txt'), to: join(folder, 'sorted', 'a.txt') }] },
+          });
+          const moved = (await request('POST', '/api/messages', { text: moveText })).json()
+            .turnId as string;
+          await waitFor(moved, 'succeeded|failed');
+          assert.match(
+            text(moved) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [moved])).rows[0].error,
+            /keep out of .*sorted/,
+          );
+          assert.equal(await readFile(join(folder, 'a.txt'), 'utf8'), 'a');
+          assert.equal(
+            (
+              await application.app.inject({
+                method: 'DELETE',
+                url: '/api/local-files/keep-out',
+                headers: { host: headers.host },
+                payload: { path: join(folder, 'sorted') },
+              })
+            ).statusCode,
+            401,
+          );
+          const letIn = await request('DELETE', '/api/local-files/keep-out', {
+            path: join(folder, 'sorted'),
+          });
+          assert.equal(letIn.statusCode, 200, letIn.body);
+          assert.ok(!letIn.json().paths.includes(join(folder, 'sorted')));
+        },
+      );
+      await t.test(
+        'local files export imported workspace files and refuse changed approved bytes',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'exports-'));
+          const source = join(folder, 'source.txt');
+          await writeFile(source, 'Synthetic local report');
+          const before = new Set(workspaceFiles.keys());
+          const importText = `Import the synthetic local report ${randomUUID()}`;
+          asked.add(importText);
+          await propose('import', { path: source }, 'files', importText);
+          const workspaceFile = [...workspaceFiles.keys()].find((path) => !before.has(path));
+          assert.ok(workspaceFile);
+          const file = { workspaceFile, mimeType: 'text/plain' };
+          const path = join(folder, 'exported.txt');
+          const exportText = `Save the synthetic local report ${randomUUID()}`;
+          asked.add(exportText);
+          const exported = await propose('export', { file, path }, 'files', exportText);
+          assert.deepEqual(await approvalsFor(exported), []);
+          assert.equal(await readFile(path, 'utf8'), 'Synthetic local report');
+
+          const heldPath = join(folder, 'held.txt');
+          const held = await propose('export', { file, path: heldPath }, 'files');
+          const [approval] = await approvalsFor(held);
+          assert.equal(approval.status, 'pending');
+          workspaceFiles.set(workspaceFile, Buffer.from('Changed synthetic local report'));
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          await waitFor(response.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(held))[0].status, 'expired');
+          assert.equal(existsSync(heldPath), false);
+          assert.equal(await readFile(source, 'utf8'), 'Synthetic local report');
         },
       );
       await t.test('shutdown saves usage from the last provider before it returns', async () => {

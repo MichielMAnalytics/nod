@@ -48,7 +48,7 @@ export const personalActions = [
   'schedule_list',
   'schedule_create',
   'schedule_update',
-  'schedule_cancel',
+  'schedule_pause',
   'schedule_record_observation',
   'usage_get',
   'prepared_list',
@@ -521,6 +521,52 @@ export const toolDefinitions = {
     }),
     true,
   ),
+  files: defineTool(
+    'files',
+    "Work with files on the owner's computer, in their home folder and drives. Hidden files, secrets such as keys and password exports, Library and AppData, and folders the owner keeps Nod out of are refused. Use absolute paths. list {path} lists a folder, newest first; read {path} reads up to 256 KB of a text file; import {path} copies a file of up to 90 MB, such as a PDF, into the workspace; create_folder {path}; move {moves:[{from,to}]} moves or renames up to 200 items and never overwrites; trash {paths} moves up to 200 items to the Trash; write {path,text,overwrite?} writes a text file of up to 1 MB; edit {path,edits:[{oldText,newText}]} replaces text that appears exactly once; export {file,path,overwrite?} copies a workspace file {workspaceFile,mimeType,name?} to the computer. Replaced versions go to the Trash. keep_out {path} adds a folder the owner tells you never to touch; only the owner can remove it again, in Settings.",
+    Type.Object({
+      action: literals([
+        'list',
+        'read',
+        'import',
+        'create_folder',
+        'move',
+        'trash',
+        'write',
+        'edit',
+        'export',
+        'keep_out',
+      ]),
+      path: Type.Optional(Type.String()),
+      moves: Type.Optional(
+        Type.Array(
+          Type.Object({ from: Type.String(), to: Type.String() }, { additionalProperties: false }),
+        ),
+      ),
+      paths: Type.Optional(Type.Array(Type.String())),
+      text: Type.Optional(Type.String()),
+      overwrite: Type.Optional(Type.Boolean()),
+      edits: Type.Optional(
+        Type.Array(
+          Type.Object(
+            { oldText: Type.String(), newText: Type.String() },
+            { additionalProperties: false },
+          ),
+        ),
+      ),
+      file: Type.Optional(
+        Type.Object(
+          {
+            workspaceFile: Type.String(),
+            mimeType: Type.String(),
+            name: Type.Optional(Type.String()),
+          },
+          { additionalProperties: false },
+        ),
+      ),
+    }),
+    true,
+  ),
   manage_apps: defineTool(
     'manage_apps',
     'list {query?} reads accounts and paths; use a service query for exact-origin saved logins and browser profiles. discover {query?} finds integrations; connect {service} uses a returned slug and pauses for private sign-in. Reconnect only with the saved connectionId and canReconnect:true. For canReconnect:false managed accounts, direct the owner to Apps, that app, Add account for the saved identity; explain it adds a separate connection. Ask if identity is unclear. Do not use this fallback for not_configured, disconnectPending, browser or Vault entries. newAccount:true requires an explicit request for another account. propose {service,proposal} offers an official MCP, HTTP or CLI path through private setup. A CLI needs its declared npm, pypi or HTTPS release source and actual credential env names. Never request keys in chat. Deliver completed work before a required sign-in.',
@@ -580,7 +626,7 @@ export const toolDefinitions = {
   ),
   manage_personal_context: defineTool(
     'manage_personal_context',
-    'Read or change owner settings, memory, schedules and history. Read current values before a change. Change only the requested fields.\nprepared_list {id?|query?} reads complete prepared work and sources; {} lists it. Read before acting and show its draft when asked. prepared_update {id,action,minutes?} records an owner request to snooze, handle, dismiss, or give useful/not_useful feedback.\nnotification_preferences_get {} reads settings. notification_preferences_update partially changes notificationRule, rules, speechReply (auto,voice,always,never), timeZone (IANA or null), locale (tag or null), hourCycle (auto,h12,h23), quietHoursEnabled, quietStart/quietEnd (HH:MM), or proactivePaused. Device permissions need Settings on that device.\nmodels_get {} lists model IDs and efforts; model_select {connectionId,modelId,effort} selects one for the next turn. Model connections need private Settings sign-in.\nmemory_find {query,area?} and memory_read {path} read saved facts (areas: about,preferences,people,routines,lessons). Check memory and history for earlier facts or advice; collect all relevant mentions for totals, and use the latest statement when facts change. Do not guess missing facts. memory_learn {messages?} asks the memory model to learn from owner messages, never your own text. Use it for lasting facts or explicit requests, never tasks, guesses, secrets or outside content. Pass older owner message IDs when needed. Sensitive facts require sensitiveTopics enabled or an explicit save request. Corrections archive old notes. memory_forget {path} removes a requested note. memory_control {enabled?,clear?,quote} needs the complete current owner message; clear keeps chat history.\nhistory_search {query?,from?,to?,before?,cursor?,order?,around?} searches earlier messages. Dates are YYYY-MM-DD in owner time. Page with cursor=nextCursor, keeping the same query, dates and order (relevance or newest). complete covers search matches only. Dates and before filter message times, not event dates. around reads a result in context. Read source messages before claims about earlier work.\nschedule_list {} reads schedules. schedule_create {title,prompt,timeZone,kind:once|recurring,cron?,runAt?,baselineObservation?}: recurring needs a five-field cron, once a future runAt with offset; baselineObservation is {status:verified,sourceUrl,value,summary}. schedule_update {id,...changed fields,enabled?}. schedule_cancel {id}. schedule_record_observation {status,sourceUrl,value,summary} records a scheduled check; value is null when unavailable.\nusage_get {} reads spend and activity; planUsd is ChatGPT plan usage at API prices, not charged; unpriced usage has no price in Nod and is not counted. limits_update {monthlyUsd?,taskUsd?} changes requested limits; values are at least 1 USD, or null to remove.',
+    'Read or change owner settings, memory, schedules and history. Read current values before a change. Change only the requested fields.\nprepared_list {id?|query?} reads complete prepared work and sources; {} lists it. Read before acting and show its draft when asked. prepared_update {id,action,minutes?} records an owner request to snooze, handle, dismiss, or give useful/not_useful feedback.\nnotification_preferences_get {} reads settings. notification_preferences_update partially changes notificationRule, rules, speechReply (auto,voice,always,never), timeZone (IANA or null), locale (tag or null), hourCycle (auto,h12,h23), quietHoursEnabled, quietStart/quietEnd (HH:MM), or proactivePaused. Device permissions need Settings on that device.\nmodels_get {} lists model IDs and efforts; model_select {connectionId,modelId,effort} selects one for the next turn. Model connections need private Settings sign-in.\nmemory_find {query,area?} and memory_read {path} read saved facts (areas: about,preferences,people,routines,lessons). Check memory and history for earlier facts or advice; collect all relevant mentions for totals, and use the latest statement when facts change. Do not guess missing facts. memory_learn {messages?} asks the memory model to learn from owner messages, never your own text. Use it for lasting facts or explicit requests, never tasks, guesses, secrets or outside content. Pass older owner message IDs when needed. Sensitive facts require sensitiveTopics enabled or an explicit save request. Corrections archive old notes. memory_forget {path} removes a requested note. memory_control {enabled?,clear?,quote} needs the complete current owner message; clear keeps chat history.\nhistory_search {query?,from?,to?,before?,cursor?,order?,around?} searches earlier messages. Dates are YYYY-MM-DD in owner time. Page with cursor=nextCursor, keeping the same query, dates and order (relevance or newest). complete covers search matches only. Dates and before filter message times, not event dates. around reads a result in context. Read source messages before claims about earlier work.\nschedule_list {} reads current schedules; use it before saying none is active or will act on a file. schedule_create {title,prompt,timeZone,kind:once|recurring,cron?,runAt?,baselineObservation?,watch?}: recurring needs a five-field cron, once a future runAt with offset; baselineObservation is {status:verified,sourceUrl,value,summary}; watch lists manage_apps connectionIds whose changes alone make a run useful. schedule_update {id,...changed fields,enabled?,watch?|null}. schedule_pause {id} disables a schedule without deleting it. After pausing a schedule that was active, Scheduled labels it Paused and it can be resumed; a completed one-time schedule retains its last-run status. schedule_record_observation {status,sourceUrl,value,summary} records a scheduled check; value is null when unavailable.\nusage_get {} reads spend and activity; planUsd is ChatGPT plan usage at API prices, not charged; unpriced usage has no price in Nod and is not counted. limits_update {monthlyUsd?,taskUsd?} changes requested limits; values are at least 1 USD, or null to remove.',
     Type.Object({
       action: literals(personalActions),
       args: Type.Record(Type.String(), Type.Unknown()),
@@ -915,9 +961,6 @@ export function nodTools(turn: Turn, skills?: SkillLibrary): NodTool[] {
       const outcome = {
         none: 'The text answer is already visible to the owner.',
         original: 'The visual and accompanying text are already visible to the owner.',
-        corrected: 'The corrected visual and accompanying text are already visible to the owner.',
-        omitted:
-          'The corrected plain-text answer is already visible to the owner; the requested visual was not included.',
       }[delivery.presentation];
       return {
         ...delivery,
@@ -1106,7 +1149,30 @@ export function nodTools(turn: Turn, skills?: SkillLibrary): NodTool[] {
       }
       return result;
     }),
+    ...(context.localFiles
+      ? [
+          bind(toolDefinitions.files, async ({ action, ...args }) => {
+            const result = await context.integration(
+              `LOCAL_FILES_${action.toUpperCase()}`,
+              args,
+              signal,
+              turn.execution.parentRunId
+                ? async (asks) => {
+                    if (asks)
+                      throw new Error(
+                        "This file action needs the owner's yes, and a subagent cannot ask. Stop and return it to the parent agent with the paths and what it would change.",
+                      );
+                  }
+                : undefined,
+            );
+            signal.throwIfAborted();
+            return confirm(result);
+          }),
+        ]
+      : []),
     bind(toolDefinitions.apps, async (p) => {
+      if (p.action.startsWith('LOCAL_FILES_'))
+        throw new Error('Use the files tool for local files.');
       const result = await context.integration(p.action, p.args, signal);
       signal.throwIfAborted();
       return confirm(result);

@@ -15,12 +15,14 @@ export type AnalyticsConnection = {
 
 function properties(connection: AnalyticsConnection) {
   const app =
-    connection.connection_method === 'managed_app' &&
-    connection.publicApp &&
-    connection.app &&
-    /^[a-z][a-z0-9_-]{0,79}$/.test(connection.app)
-      ? connection.app
-      : 'custom';
+    connection.connection_method === 'local'
+      ? 'local_files'
+      : connection.connection_method === 'managed_app' &&
+          connection.publicApp &&
+          connection.app &&
+          /^[a-z][a-z0-9_-]{0,79}$/.test(connection.app)
+        ? connection.app
+        : 'custom';
   return { app, connection_method: connection.connection_method };
 }
 
@@ -154,11 +156,28 @@ export async function captureConnectionInventory(
     AnalyticsEvent,
     { event: 'model_connection_observed' }
   >['properties'][] = () => [],
+  includeApps = true,
 ) {
   const consent = analytics.consent(ownerId);
   if (!consent.enabled || !(await analytics.permitted(ownerId))) return;
   const connections = await read();
   if (consent.signal.aborted || analytics.consent(ownerId).version !== consent.version) return;
+  if (includeApps) {
+    const connectedAppTypes = [
+      ...new Set(connections.map((connection) => properties(connection).app)),
+    ].sort();
+    analytics.capture(
+      ownerId,
+      {
+        event: 'connection_inventory_observed',
+        properties: {
+          connected_app_types: connectedAppTypes,
+          connected_app_type_count: connectedAppTypes.length,
+        },
+      },
+      { consentRevision: consent.revision },
+    );
+  }
   const seen = new Set<string>();
   for (const connection of connections) {
     const value = properties(connection);

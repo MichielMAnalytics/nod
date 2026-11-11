@@ -103,12 +103,15 @@ export async function initializeDatabase() {
     ALTER TABLE turn_events ADD COLUMN IF NOT EXISTS site text;
     CREATE TABLE IF NOT EXISTS messages (
       id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL,
+      display_text text,
       thread_id uuid REFERENCES threads(id), turn_id uuid REFERENCES turns(id),
       attachments jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now(),
       stream_id text, reaction text, assistant_reaction text, assistant_reacted_at timestamptz,
-      reaction_revision integer NOT NULL DEFAULT 0, reply_to_message_id uuid REFERENCES messages(id)
+      reaction_revision integer NOT NULL DEFAULT 0, reply_to_message_id uuid REFERENCES messages(id),
+      hidden_at timestamptz
     );
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_quote text;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_text text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_caption text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS suggestions jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS presentation jsonb;
@@ -117,7 +120,10 @@ export async function initializeDatabase() {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS approval_answer boolean;
     CREATE INDEX IF NOT EXISTS messages_question_answer_reply ON messages(reply_to_message_id) WHERE question_answer IS NOT NULL;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_channel text;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS hidden_at timestamptz;
     ALTER TABLE turns ADD COLUMN IF NOT EXISTS handoff_browser_id text;
+    DROP INDEX IF EXISTS messages_hidden_thread;
+    CREATE INDEX IF NOT EXISTS messages_hidden_thread_recent ON messages(owner_id,thread_id,hidden_at DESC,id DESC) WHERE hidden_at IS NOT NULL;
     CREATE INDEX IF NOT EXISTS messages_owner_agent_reaction_time ON messages(owner_id,assistant_reacted_at DESC) WHERE assistant_reacted_at IS NOT NULL;
     CREATE TABLE IF NOT EXISTS approvals (
       id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid REFERENCES threads(id),
@@ -155,6 +161,7 @@ export async function initializeDatabase() {
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS speech_voice text;
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS speech_reply text NOT NULL DEFAULT 'auto' CHECK (speech_reply IN ('auto','voice','always','never'));
     ALTER TABLE preferences ADD COLUMN IF NOT EXISTS proactive_paused boolean NOT NULL DEFAULT false;
+    ALTER TABLE preferences ADD COLUMN IF NOT EXISTS local_keep_out text[] NOT NULL DEFAULT '{}';
     CREATE INDEX IF NOT EXISTS messages_owner_time ON messages(owner_id,created_at);
     CREATE INDEX IF NOT EXISTS messages_thread_time ON messages(thread_id,created_at);
     CREATE INDEX IF NOT EXISTS messages_turn_time ON messages(turn_id,created_at);

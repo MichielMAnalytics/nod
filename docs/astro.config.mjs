@@ -1,13 +1,15 @@
 import { defineConfig } from 'astro/config';
 import { satteri } from '@astrojs/markdown-satteri';
 import { defineHastPlugin, defineMdastPlugin } from 'satteri';
+import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 import mermaid from 'astro-mermaid';
 import starlightLinksValidator from 'starlight-links-validator';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import { gtmSnippet } from './src/gtm.mjs';
 
-const site = process.env.DOCS_SITE || 'https://nod-docs.pages.dev';
-const base = process.env.DOCS_BASE ?? '/';
+const site = 'https://nod.n8n.io';
+const base = '/docs/';
 const prefix = base.replace(/\/$/, '');
 const withBase = (url) =>
   prefix && url.startsWith('/') && !url.startsWith('//') && !url.startsWith(`${prefix}/`)
@@ -69,6 +71,10 @@ export default defineConfig({
   },
   vite: { server: { fs: { allow: ['.', '../public/fonts', '../public/logos'] } } },
   integrations: [
+    sitemap({
+      filter: (page) => !/\/docs\/(next|open)\/$/.test(page),
+      customPages: [`${site}/`],
+    }),
     mermaid({
       theme: 'base',
       autoTheme: false,
@@ -89,9 +95,10 @@ export default defineConfig({
     starlight({
       title: 'Nod',
       description:
-        'Nod is a personal assistant with its own computer. Learn how to install it, use it, and how it keeps your accounts and actions under your control.',
+        'Nod is an open source personal agent with its own computer. Learn how to install it, use it, and how it keeps your accounts and actions under your control.',
       logo: { light: './src/assets/nod-light.svg', dark: './src/assets/nod-dark.svg' },
       favicon: '/favicon.svg',
+      head: [{ tag: 'script', content: gtmSnippet }],
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/n8n-io/nod' }],
       editLink: { baseUrl: 'https://github.com/n8n-io/nod/edit/main/docs/' },
       lastUpdated: true,
@@ -111,7 +118,7 @@ export default defineConfig({
         starlightLlmsTxt({
           projectName: 'Nod',
           description:
-            'Nod is a personal assistant you use through one chat. It has its own Linux workspace and browser, uses your connected apps, and keeps your accounts and actions under your control.',
+            'Nod is an open source personal agent you use through one chat. It has its own Linux workspace and browser, uses your connected apps, and keeps your accounts and actions under your control.',
         }),
       ],
     }),

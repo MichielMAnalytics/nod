@@ -13,10 +13,13 @@ import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.
 import { createChatSdkTransport } from '../src/providers/chat-sdk/index.ts';
 import { createChatSdkSetupVerifier } from '../src/providers/chat-sdk/settings.ts';
 import {
+  channelConnectionObservations,
   createChannelSettings,
   managedChannelEnvironment,
+  type ChannelConnectionObservation,
 } from '../src/server/channel-settings.ts';
 import { createChannels } from '../src/server/channels.ts';
+import { transaction } from '../src/server/transaction.ts';
 import type { LiveWork } from '../src/server/activity.ts';
 
 const token = '987:fixture-never-live';
@@ -28,6 +31,141 @@ async function until(check: () => boolean | Promise<boolean>) {
     await sleep(10);
   }
 }
+
+test('channel observations require pairing or a live link and omit private account details', () => {
+  const channels = [
+    {
+      provider: 'telegram',
+      enabled: true,
+      mode: 'webhook',
+      webhookStatus: 'registered',
+      accountHandle: '@private_bot',
+      pairingExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+    {
+      provider: 'whatsapp',
+      enabled: true,
+      mode: 'webhook',
+      webhookStatus: 'manual_setup',
+      accountHandle: 'private-number',
+    },
+  ] as const;
+  assert.deepEqual(channelConnectionObservations([...channels]), [
+    { channel: 'telegram', state: 'setup_pending' },
+    { channel: 'whatsapp', state: 'configured_unverified' },
+  ]);
+  const paired = channelConnectionObservations([
+    { ...channels[0], pairingExpiresAt: undefined, allowedUserId: '123' },
+    { ...channels[1], mode: 'linked', connectionState: 'connected' },
+  ]);
+  assert.deepEqual(paired, [
+    { channel: 'telegram', state: 'connected' },
+    { channel: 'whatsapp', state: 'connected' },
+  ]);
+  assert.equal(JSON.stringify(paired).includes('private'), false);
+  assert.equal(JSON.stringify(paired).includes('123'), false);
+});
+
+test('managed connection observations require usable channel configuration', () => {
+  const telegram = {
+    provider: 'telegram',
+    enabled: true,
+    managed: true,
+    mode: 'polling',
+    allowedUserId: '42',
+  } as const;
+  for (const environment of [
+    { TELEGRAM_ALLOWED_USER_ID: '42' },
+    { TELEGRAM_ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'invalid' },
+  ])
+    assert.deepEqual(
+      channelConnectionObservations([telegram], managedChannelEnvironment(environment))[0],
+      { channel: 'telegram', state: 'setup_pending' },
+    );
+  assert.deepEqual(
+    channelConnectionObservations(
+      [telegram],
+      managedChannelEnvironment({
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: '987:fixture-never-live',
+      }),
+    )[0],
+    { channel: 'telegram', state: 'connected' },
+  );
+  assert.deepEqual(
+    channelConnectionObservations(
+      [{ provider: 'whatsapp', enabled: true, managed: true, mode: 'webhook' }],
+      managedChannelEnvironment({ WHATSAPP_ENABLED: 'true' }),
+    )[1],
+    { channel: 'whatsapp', state: 'setup_pending' },
+  );
+});
+
+test('a newer unchanged channel status suppresses an older observation that finishes later', async () => {
+  const pool = {
+    async query(statement: string) {
+      assert.match(
+        statement,
+        /^(CREATE TABLE IF NOT EXISTS channel_settings|SELECT \* FROM channel_settings)/,
+      );
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  let linkState: 'connected' | 'disconnected' = 'connected';
+  let holdNext = false;
+  let release: () => void = () => {};
+  let reached: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const observations: ChannelConnectionObservation[][] = [];
+  let lastSignature: string | undefined;
+  const settings = await createChannelSettings(pool, {
+    ownerId: 'synthetic-owner',
+    keyStore: { id: 'fixture', configured: true, getKey: async () => Buffer.alloc(32) },
+    verifier: createChatSdkSetupVerifier({
+      fetch: async () => {
+        throw new Error('Channel verification was not expected.');
+      },
+    }),
+    managed: managedChannelEnvironment({
+      WHATSAPP_ENABLED: 'true',
+      WHATSAPP_MODE: 'self-chat',
+      WHATSAPP_POLICY_CONFIRMED: 'true',
+    }),
+    apply: async () => {},
+    linkStatus: async () => {
+      const state = linkState;
+      if (holdNext) {
+        holdNext = false;
+        reached();
+        await held;
+      }
+      return { state };
+    },
+    observed: () => (states) => {
+      const signature = JSON.stringify(states);
+      if (signature === lastSignature) return;
+      lastSignature = signature;
+      observations.push(states);
+    },
+  });
+  await settings.status();
+  assert.deepEqual(observations[0]?.[1], { channel: 'whatsapp', state: 'connected' });
+  linkState = 'disconnected';
+  holdNext = true;
+  const stale = settings.status();
+  await waiting;
+  linkState = 'connected';
+  await settings.status();
+  assert.equal(observations.length, 1);
+  release();
+  assert.equal((await stale).channels[0]?.connectionState, 'disconnected');
+  assert.equal(observations.length, 1);
+});
 
 test(
   'managed channels shadow saved credentials, refuse changes and restore saved configuration when removed',
@@ -102,9 +240,13 @@ test(
       WHATSAPP_ENABLED: 'false',
       WHATSAPP_ACCESS_TOKEN: 'synthetic-server-meta-token',
     });
+    const managedObservations: ChannelConnectionObservation[][] = [];
     const settings = await createChannelSettings(pool, {
       ...options,
       managed,
+      observed: () => (states) => {
+        managedObservations.push(states);
+      },
       keyStore: {
         id: 'fixture',
         configured: true,
@@ -153,14 +295,84 @@ test(
       status.channels.find((channel) => channel.provider === 'whatsapp')?.enabled,
       false,
     );
+    assert.deepEqual(managedObservations.at(-1), [
+      { channel: 'telegram', state: 'connected' },
+      { channel: 'whatsapp', state: 'disabled' },
+    ]);
     for (const secret of [serverToken, 'synthetic-server-meta-token'])
       assert.equal(JSON.stringify(status).includes(secret), false);
     assert.deepEqual((await pool.query('SELECT * FROM channel_settings')).rows, rows);
+    const observeManaged = async (
+      environment: Record<string, string | undefined>,
+      provider: 'telegram' | 'whatsapp',
+    ) => {
+      let last: ChannelConnectionObservation[] = [];
+      const candidate = await createChannelSettings(pool, {
+        ...options,
+        managed: managedChannelEnvironment(environment),
+        observed: () => (states) => {
+          last = states;
+        },
+      });
+      await candidate.status();
+      return last.find((state) => state.channel === provider);
+    };
+    for (const environment of [
+      { TELEGRAM_ALLOWED_USER_ID: '42' },
+      { TELEGRAM_ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'invalid' },
+      {
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: serverToken,
+        TELEGRAM_MODE: 'webhook',
+      },
+      {
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: serverToken,
+        TELEGRAM_WEBHOOK_SECRET_TOKEN: 'invalid',
+      },
+    ])
+      assert.deepEqual(await observeManaged(environment, 'telegram'), {
+        channel: 'telegram',
+        state: 'setup_pending',
+      });
+    assert.deepEqual(
+      await observeManaged(
+        {
+          TELEGRAM_ALLOWED_USER_ID: '42',
+          TELEGRAM_BOT_TOKEN: serverToken,
+          TELEGRAM_MODE: 'webhook',
+          TELEGRAM_WEBHOOK_SECRET_TOKEN: 'abcdefghijklmnop',
+        },
+        'telegram',
+      ),
+      { channel: 'telegram', state: 'configured_unverified' },
+    );
+    assert.deepEqual(await observeManaged({ WHATSAPP_ENABLED: 'true' }, 'whatsapp'), {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    assert.deepEqual(
+      await observeManaged(
+        {
+          WHATSAPP_ENABLED: 'true',
+          WHATSAPP_POLICY_CONFIRMED: 'true',
+          WHATSAPP_ACCESS_TOKEN: 'synthetic-access-token',
+          WHATSAPP_APP_SECRET: 'synthetic-app-secret',
+          WHATSAPP_PHONE_NUMBER_ID: '123',
+          WHATSAPP_ALLOWED_NUMBER: '123456789',
+          WHATSAPP_VERIFY_TOKEN: 'synthetic-verify-token',
+        },
+        'whatsapp',
+      ),
+      { channel: 'whatsapp', state: 'configured_unverified' },
+    );
     const restored = await createChannelSettings(pool, options);
     assert.deepEqual(await restored.environment(), saved);
     assert.equal((await restored.status()).channels[0]?.managed, undefined);
     let pairingId = randomUUID();
     let restarts = 0;
+    let linkedState: 'awaiting_scan' | 'connected' | 'disconnected' = 'awaiting_scan';
+    const linkedObservations: ChannelConnectionObservation[][] = [];
     const linked = await createChannelSettings(pool, {
       ...options,
       managed: managedChannelEnvironment({
@@ -168,11 +380,14 @@ test(
         WHATSAPP_POLICY_CONFIRMED: 'true',
       }),
       linkStatus: async () => ({
-        state: 'awaiting_scan',
+        state: linkedState,
         pairingId,
         qr: 'synthetic-pairing-qr',
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
+      observed: () => (states) => {
+        linkedObservations.push(states);
+      },
       cancelPairing: async (candidate, restart) => candidate === pairingId && restart === true,
       apply: async (environment) => {
         assert.equal(environment.WHATSAPP_MODE, 'self-chat');
@@ -188,6 +403,23 @@ test(
     assert.equal(qr.statusCode, 200);
     assert.equal(qr.json().qr, 'synthetic-pairing-qr');
     assert.equal(JSON.stringify(await linked.status()).includes('synthetic-pairing-qr'), false);
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    linkedState = 'connected';
+    await linked.status();
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'connected',
+    });
+    linkedState = 'disconnected';
+    await linked.status();
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    assert.equal(JSON.stringify(linkedObservations).includes('synthetic-pairing-qr'), false);
     assert.equal(
       (
         await linkedApp.inject({
@@ -223,8 +455,8 @@ test(
 
 async function createFixtureTables(pool: pg.Pool, owner: string) {
   await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text NOT NULL,status text NOT NULL DEFAULT 'idle',created_at timestamptz NOT NULL DEFAULT now(),archived_at timestamptz);
-    CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL REFERENCES threads(id),session_id uuid GENERATED ALWAYS AS (thread_id) STORED,source text NOT NULL DEFAULT 'user',source_id text UNIQUE,channel text NOT NULL DEFAULT 'web',channel_source_id text,status text NOT NULL DEFAULT 'queued',waiting_reason text,handoff_browser_id text,created_at timestamptz NOT NULL DEFAULT now());
-    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,created_at timestamptz NOT NULL DEFAULT now())`);
+    CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL REFERENCES threads(id),session_id uuid GENERATED ALWAYS AS (thread_id) STORED,message_id uuid,source text NOT NULL DEFAULT 'user',source_id text UNIQUE,channel text NOT NULL DEFAULT 'web',channel_source_id text,status text NOT NULL DEFAULT 'queued',waiting_reason text,handoff_browser_id text,created_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz);
+    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,hidden_at timestamptz,created_at timestamptz NOT NULL DEFAULT now())`);
   const threadId = randomUUID();
   await pool.query('INSERT INTO threads(id,owner_id) VALUES($1,$2)', [threadId, owner]);
   return threadId;
@@ -1100,6 +1332,180 @@ test(
       );
     } finally {
       await channels.close();
+    }
+  },
+);
+
+test(
+  'retired schedule confirmations do not reach connected channels',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    for (const provider of ['telegram', 'whatsapp'])
+      await t.test(provider, async (t) => {
+        const { pool, posts, receive, turnOf, reply, create } = await outboxFixture(
+          t,
+          undefined,
+          provider,
+        );
+        const channels = await create();
+        try {
+          const inboundId = `retired-${provider}`;
+          receive('111', inboundId, `chat-${provider}`);
+          await channels.drain();
+          const { turn_id: turnId } = await turnOf(inboundId);
+          await pool.query(
+            "UPDATE turns SET status='waiting',waiting_reason='question' WHERE id=$1",
+            [turnId],
+          );
+
+          const hiddenBeforeEnqueue = randomUUID();
+          await reply(turnId, 'Cancel the synthetic schedule?', hiddenBeforeEnqueue, 0);
+          await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [
+            hiddenBeforeEnqueue,
+          ]);
+          await channels.drain();
+          assert.deepEqual(posts, []);
+          assert.equal(
+            (
+              await pool.query('SELECT 1 FROM channel_outbox WHERE message_id=$1', [
+                hiddenBeforeEnqueue,
+              ])
+            ).rowCount,
+            0,
+          );
+
+          const hiddenAfterEnqueue = randomUUID();
+          await reply(turnId, 'Cancel the synthetic schedule?', hiddenAfterEnqueue, 1);
+          await pool.query('INSERT INTO channel_outbox(message_id,source_id) VALUES($1,$2)', [
+            hiddenAfterEnqueue,
+            `channel:${provider}:bot:${inboundId}`,
+          ]);
+          await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [hiddenAfterEnqueue]);
+          await channels.drain();
+          assert.deepEqual(posts, []);
+          assert.equal(
+            (
+              await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [
+                hiddenAfterEnqueue,
+              ])
+            ).rows[0]?.state,
+            'blocked',
+          );
+        } finally {
+          await channels.close();
+        }
+      });
+  },
+);
+
+test(
+  'a failed schedule confirmation lookup retries before channel delivery',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const { pool, posts, receive, turnOf, reply, create } = await outboxFixture(t);
+    const messageId = randomUUID();
+    let lookups = 0;
+    const channels = await create({
+      isRetirableScheduleConfirmation: async (id) => {
+        assert.equal(id, messageId);
+        if (++lookups === 1) throw new Error('Synthetic confirmation lookup failed.');
+        return true;
+      },
+    });
+    try {
+      receive('111', 'lookup-retry', 'chat-lookup-retry');
+      await channels.drain();
+      await reply((await turnOf('lookup-retry')).turn_id, 'Cancel the schedule?', messageId, 0);
+      await channels.drain();
+      assert.equal(lookups, 1);
+      assert.deepEqual(posts, []);
+      assert.deepEqual(
+        (
+          await pool.query('SELECT state,reason,claim_id FROM channel_outbox WHERE message_id=$1', [
+            messageId,
+          ])
+        ).rows,
+        [{ state: 'pending', reason: null, claim_id: null }],
+      );
+      await channels.drain();
+      assert.equal(lookups, 2);
+      assert.deepEqual(posts, [{ threadId: 'chat-lookup-retry', text: 'Cancel the schedule?' }]);
+      assert.deepEqual(
+        (await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [messageId]))
+          .rows,
+        [{ state: 'sent' }],
+      );
+    } finally {
+      await channels.close();
+    }
+  },
+);
+
+test(
+  'in-flight schedule confirmations finish before their retirement commits',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 15000 },
+  async (t) => {
+    const { pool, posts, receive, turnOf, reply, create, transport } = await outboxFixture(t, 1);
+    const control = new pg.Pool({ ...pool.options, password: pool.options.password, max: 1 });
+    const messageId = randomUUID();
+    const originalPost = transport.post;
+    let postEntered = false;
+    let releasePost = () => {};
+    const postReleased = new Promise<void>((resolve) => {
+      releasePost = resolve;
+    });
+    transport.post = async (input) => {
+      postEntered = true;
+      await postReleased;
+      await pool.query('SELECT 1');
+      return originalPost(input);
+    };
+    const channels = await create({
+      isRetirableScheduleConfirmation: async (id) => id === messageId,
+    });
+    let sending: Promise<void> | undefined;
+    let update: Promise<unknown> | undefined;
+    let updaterPid: number | undefined;
+    try {
+      receive('111', 'retire-during-send', 'chat-retire-during-send');
+      await channels.drain();
+      await reply(
+        (await turnOf('retire-during-send')).turn_id,
+        'Cancel the schedule?',
+        messageId,
+        0,
+      );
+      sending = channels.drain();
+      await until(() => postEntered);
+      update = transaction(async (client) => {
+        updaterPid = (await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]!.pid;
+        await client.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [messageId]);
+      }, control);
+      await until(() => updaterPid !== undefined);
+      await until(async () => {
+        const { rows } = await pool.query<{ waiting: boolean }>(
+          'SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND NOT granted) AS waiting',
+          [updaterPid],
+        );
+        return rows[0]?.waiting ?? false;
+      });
+      assert.deepEqual(posts, []);
+      releasePost();
+      await Promise.all([sending, update]);
+      assert.deepEqual(posts, [
+        { threadId: 'chat-retire-during-send', text: 'Cancel the schedule?' },
+      ]);
+      assert.deepEqual(
+        (await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [messageId]))
+          .rows,
+        [{ state: 'sent' }],
+      );
+    } finally {
+      releasePost();
+      await Promise.allSettled([sending, update]);
+      await channels.close();
+      await control.end();
     }
   },
 );
@@ -1999,6 +2405,453 @@ for (const provider of ['telegram', 'whatsapp'])
         await channels.drain();
         assert.deepEqual(calls.at(-1), { command: 'tasks', target: undefined, hasReply: false });
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM turns')).rows[0].n, 1);
+        const beforeRetired = calls.length;
+        await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [anchor]);
+        receive('111', 'retired-stop', 'chat-a', '/stop', 'provider-1');
+        receive('111', 'after-retired', 'chat-a', 'Start a new task');
+        await channels.drain();
+        assert.equal(calls.length, beforeRetired);
+        assert.deepEqual(
+          (
+            await pool.query('SELECT state,turn_id FROM channel_inbox WHERE source_id=$1', [
+              `channel:${provider}:bot:retired-stop`,
+            ])
+          ).rows[0],
+          { state: 'discarded', turn_id: null },
+        );
+        assert.ok((await turnOf('after-retired')).turn_id);
+      } finally {
+        await channels.close();
+      }
+    },
+  );
+
+for (const provider of ['telegram', 'whatsapp'])
+  test(
+    `${provider} consumes replies to hidden confirmations and drains later messages`,
+    { skip: !process.env.TEST_DATABASE_URL },
+    async (t) => {
+      const { pool, threadId, posts, receive, turnOf, reply, create } = await outboxFixture(
+        t,
+        undefined,
+        provider,
+      );
+      const firstConfirmation = randomUUID();
+      const racedConfirmation = randomUUID();
+      const lateConfirmation = randomUUID();
+      const lateReplacementConfirmation = randomUUID();
+      const hiddenAfterLookup = randomUUID();
+      const unrelatedHidden = randomUUID();
+      const activeConfirmation = randomUUID();
+      const scheduleConfirmations = new Set<string>([
+        firstConfirmation,
+        racedConfirmation,
+        lateConfirmation,
+        lateReplacementConfirmation,
+        hiddenAfterLookup,
+        activeConfirmation,
+      ]);
+      const submitted: Array<{ text: string; target?: string }> = [];
+      const submittedAnswers: Array<{
+        text: string;
+        answer?: { approvalId: string; approved?: boolean };
+      }> = [];
+      const answered: string[] = [];
+      const classified: Array<{ text: string; confirmation: string }> = [];
+      const commands: Array<{ command: string; target?: string; hasReply?: boolean }> = [];
+      const query = pool.query.bind(pool) as (
+        text: string,
+        values?: unknown[],
+      ) => Promise<pg.QueryResult>;
+      let retireAfterNativeReply = false;
+      let retireAfterHiddenLookup = false;
+      t.mock.method(pool, 'query', async (text: string, values?: unknown[]) => {
+        const result = await query(text, values);
+        if (
+          retireAfterNativeReply &&
+          text.includes('SELECT o.message_id FROM channel_outbox') &&
+          result.rows[0]?.message_id === racedConfirmation
+        ) {
+          retireAfterNativeReply = false;
+          await query('UPDATE messages SET hidden_at=now() WHERE id=$1', [racedConfirmation]);
+        }
+        if (
+          retireAfterHiddenLookup &&
+          text ===
+            'SELECT text FROM messages WHERE id=$1 AND owner_id=$2 AND hidden_at IS NOT NULL' &&
+          values?.[0] === hiddenAfterLookup &&
+          !result.rowCount
+        ) {
+          retireAfterHiddenLookup = false;
+          await query('UPDATE messages SET hidden_at=now() WHERE id=$1', [hiddenAfterLookup]);
+        }
+        return result;
+      });
+      const channels = await create({
+        isRetirableScheduleConfirmation: async (id) => scheduleConfirmations.has(id),
+        classifyRetiredReply: async (text, confirmation) => {
+          classified.push({ text, confirmation });
+          if (text === 'Why is this happening?') throw new Error('Synthetic classifier failure.');
+          if (
+            text === 'Why did you ask?' ||
+            text === 'Yes, move the reminder to tomorrow' ||
+            text === 'Yes, move the fifth task to tomorrow' ||
+            text === 'Why is the fourth task still here?'
+          )
+            return 'new';
+          return text === 'Maybe' ? 'uncertain' : 'stale';
+        },
+        answer: async (text, _channel, target) => {
+          answered.push(text);
+          return target ? { approvalId: 'synthetic-approval', approved: true } : undefined;
+        },
+        submit: async (text, sourceId, client, channel, _messageId, answer, target) => {
+          submitted.push({ text, target });
+          submittedAnswers.push({ text, answer });
+          const turnId = randomUUID();
+          await client.query(
+            "INSERT INTO turns(id,owner_id,thread_id,source_id,channel) VALUES($1,'local-development',$2,$3,$4)",
+            [turnId, threadId, sourceId, channel],
+          );
+          if (text === 'Yes, cancel the third task') {
+            assert.equal(target, lateConfirmation);
+            await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [lateConfirmation]);
+            throw Object.assign(new Error('The reply is unavailable in this conversation.'), {
+              statusCode: 404,
+            });
+          }
+          if (text === 'Yes, move the fifth task to tomorrow' && target) {
+            assert.equal(target, lateReplacementConfirmation);
+            await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [
+              lateReplacementConfirmation,
+            ]);
+            throw Object.assign(new Error('The reply is unavailable in this conversation.'), {
+              statusCode: 404,
+            });
+          }
+          return turnId;
+        },
+        taskCommand: async (_client, command, target, hasReply) => {
+          commands.push({ command, target, hasReply });
+          return { threadId, replies: [{ text: `Fixture ${command}` }] };
+        },
+      });
+      try {
+        receive('111', 'initial', 'chat-a');
+        await channels.drain();
+        const initial = (await turnOf('initial')).turn_id;
+        await reply(initial, 'Cancel the first task?', firstConfirmation, 0);
+        await channels.drain();
+        assert.equal(posts.length, 1);
+        await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [firstConfirmation]);
+        receive('111', 'stale-first', 'chat-a', 'Yes, cancel the first task', 'provider-1');
+        receive('111', 'following-first', 'chat-a', 'Start something new');
+        await channels.drain();
+        assert.equal(
+          submitted.some((item) => item.text === 'Yes, cancel the first task'),
+          false,
+        );
+        assert.equal(answered.includes('Yes, cancel the first task'), false);
+        assert.deepEqual(
+          classified.find((item) => item.text === 'Yes, cancel the first task'),
+          {
+            text: 'Yes, cancel the first task',
+            confirmation: 'Cancel the first task?',
+          },
+        );
+        await reply(initial, 'Cancel the second task?', racedConfirmation, 1);
+        await channels.drain();
+        assert.equal(posts.length, 2);
+        retireAfterNativeReply = true;
+        receive('111', 'stale-race', 'chat-a', 'Yes, cancel the second task', 'provider-2');
+        receive('111', 'following-race', 'chat-a', 'Check the weather');
+        await channels.drain();
+        assert.equal(retireAfterNativeReply, false);
+        assert.equal(
+          submitted.some((item) => item.text === 'Yes, cancel the second task'),
+          false,
+        );
+        assert.equal(answered.includes('Yes, cancel the second task'), false);
+        assert.deepEqual(
+          classified.find((item) => item.text === 'Yes, cancel the second task'),
+          {
+            text: 'Yes, cancel the second task',
+            confirmation: 'Cancel the second task?',
+          },
+        );
+        await reply(initial, 'Cancel the third task?', lateConfirmation, 2);
+        await channels.drain();
+        assert.equal(posts.length, 3);
+        receive('111', 'stale-late', 'chat-a', 'Yes, cancel the third task', 'provider-3');
+        receive('111', 'following-late', 'chat-a', 'Summarize my calendar');
+        await channels.drain();
+        assert.equal(answered.includes('Yes, cancel the third task'), true);
+        assert.deepEqual(
+          submitted.find((item) => item.text === 'Yes, cancel the third task'),
+          { text: 'Yes, cancel the third task', target: lateConfirmation },
+        );
+        assert.deepEqual(
+          classified.find((item) => item.text === 'Yes, cancel the third task'),
+          {
+            text: 'Yes, cancel the third task',
+            confirmation: 'Cancel the third task?',
+          },
+        );
+        const inbox = (
+          await pool.query(
+            'SELECT source_id,state,turn_id FROM channel_inbox WHERE source_id=ANY($1::text[]) ORDER BY source_id',
+            [
+              [
+                'stale-first',
+                'following-first',
+                'stale-race',
+                'following-race',
+                'stale-late',
+                'following-late',
+              ].map((id) => `channel:${provider}:bot:${id}`),
+            ],
+          )
+        ).rows;
+        assert.deepEqual(
+          inbox.map(({ source_id, state, turn_id }) => ({
+            source: source_id.split(':').at(-1),
+            state,
+            hasTurn: Boolean(turn_id),
+          })),
+          [
+            { source: 'following-first', state: 'submitted', hasTurn: true },
+            { source: 'following-late', state: 'submitted', hasTurn: true },
+            { source: 'following-race', state: 'submitted', hasTurn: true },
+            { source: 'stale-first', state: 'discarded', hasTurn: false },
+            { source: 'stale-late', state: 'discarded', hasTurn: false },
+            { source: 'stale-race', state: 'discarded', hasTurn: false },
+          ],
+        );
+        assert.deepEqual(
+          (await pool.query('SELECT source_id FROM turns ORDER BY source_id')).rows.map(
+            ({ source_id }) => source_id,
+          ),
+          ['following-first', 'following-late', 'following-race', 'initial'].map(
+            (id) => `channel:${provider}:bot:${id}`,
+          ),
+        );
+        assert.equal(
+          submitted.find((item) => item.text === 'Check the weather')?.target,
+          undefined,
+        );
+        await reply(initial, 'Cancel the active task?', activeConfirmation, 3);
+        await channels.drain();
+        receive('111', 'active-yes', 'chat-a', 'Yes', `provider-${posts.length}`);
+        await channels.drain();
+        assert.deepEqual(
+          submitted.find((item) => item.text === 'Yes'),
+          {
+            text: 'Yes',
+            target: activeConfirmation,
+          },
+        );
+        assert.deepEqual(submittedAnswers.find((item) => item.text === 'Yes')?.answer, {
+          approvalId: 'synthetic-approval',
+          approved: true,
+        });
+        assert.equal(
+          classified.some((item) => item.text === 'Yes'),
+          false,
+        );
+
+        await reply(initial, 'Unrelated hidden message', unrelatedHidden, 4);
+        await channels.drain();
+        const unrelatedProviderId = `provider-${posts.length}`;
+        await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [unrelatedHidden]);
+        receive('111', 'unrelated-hidden', 'chat-a', 'Why is this gone?', unrelatedProviderId);
+        await channels.drain();
+        assert.equal(
+          (
+            await pool.query('SELECT state FROM channel_inbox WHERE source_id=$1', [
+              `channel:${provider}:bot:unrelated-hidden`,
+            ])
+          ).rows[0]?.state,
+          'discarded',
+        );
+        assert.equal(
+          classified.some((item) => item.text === 'Why is this gone?'),
+          false,
+        );
+
+        receive('111', 'retired-question', 'chat-a', 'Why did you ask?', 'provider-1');
+        receive(
+          '111',
+          'retired-replacement',
+          'chat-a',
+          'Yes, move the reminder to tomorrow',
+          'provider-1',
+        );
+        receive('111', 'retired-bare-yes', 'chat-a', 'Yes', 'provider-1');
+        receive('111', 'retired-no', 'chat-a', 'No', 'provider-1');
+        receive('111', 'retired-uncertain', 'chat-a', 'Maybe', 'provider-1');
+        receive(
+          '111',
+          'retired-classifier-failure',
+          'chat-a',
+          'Why is this happening?',
+          'provider-1',
+        );
+        receive('111', 'retired-tasks', 'chat-a', '/tasks', 'provider-1');
+        receive('111', 'retired-status', 'chat-a', '/status', 'provider-1');
+        receive('111', 'retired-stop', 'chat-a', '/stop', 'provider-1');
+        receive('111', 'after-classifier-failure', 'chat-a', 'Create a fresh task');
+        await channels.drain();
+        for (const text of ['Why did you ask?', 'Yes, move the reminder to tomorrow']) {
+          assert.deepEqual(
+            submitted.find((item) => item.text === text),
+            {
+              text,
+              target: undefined,
+            },
+          );
+          assert.equal(submittedAnswers.find((item) => item.text === text)?.answer, undefined);
+          assert.equal(answered.includes(text), false);
+          assert.deepEqual(
+            classified.find((item) => item.text === text),
+            {
+              text,
+              confirmation: 'Cancel the first task?',
+            },
+          );
+        }
+        assert.deepEqual(commands, [
+          { command: 'tasks', target: undefined, hasReply: false },
+          { command: 'status', target: undefined, hasReply: false },
+          { command: 'stop', target: undefined, hasReply: true },
+        ]);
+        for (const id of ['retired-bare-yes', 'retired-no']) {
+          assert.deepEqual(
+            (
+              await pool.query('SELECT state,turn_id FROM channel_inbox WHERE source_id=$1', [
+                `channel:${provider}:bot:${id}`,
+              ])
+            ).rows[0],
+            { state: 'discarded', turn_id: null },
+          );
+        }
+        assert.equal(
+          (
+            await pool.query(
+              'SELECT count(*)::int AS n FROM channel_outbox WHERE source_id=ANY($1::text[])',
+              [
+                ['stale-first', 'stale-race', 'stale-late', 'retired-bare-yes', 'retired-no'].map(
+                  (id) => `channel:${provider}:bot:${id}`,
+                ),
+              ],
+            )
+          ).rows[0].n,
+          0,
+        );
+        for (const text of ['Yes', 'No', 'Maybe', 'Why is this happening?'])
+          assert.deepEqual(
+            classified.find((item) => item.text === text),
+            {
+              text,
+              confirmation: 'Cancel the first task?',
+            },
+          );
+        const notices: string[] = [];
+        for (const id of ['retired-uncertain', 'retired-classifier-failure']) {
+          const rows = (
+            await pool.query(
+              `SELECT i.state,i.turn_id,m.owner_id,m.thread_id,m.role,m.text,m.reply_to_message_id,o.state AS delivery
+               FROM channel_inbox i JOIN channel_outbox o ON o.source_id=i.source_id
+               JOIN messages m ON m.id=o.message_id WHERE i.source_id=$1`,
+              [`channel:${provider}:bot:${id}`],
+            )
+          ).rows;
+          assert.equal(rows.length, 1);
+          assert.equal(rows[0].state, 'submitted');
+          assert.equal(rows[0].turn_id, null);
+          assert.equal(rows[0].owner_id, 'local-development');
+          assert.equal(rows[0].thread_id, threadId);
+          assert.equal(rows[0].role, 'assistant');
+          assert.equal(rows[0].reply_to_message_id, null);
+          assert.equal(rows[0].delivery, 'sent');
+          assert.ok(rows[0].text);
+          notices.push(rows[0].text);
+        }
+        assert.equal(notices[0], notices[1]);
+        assert.equal(posts.filter((post) => post.text === notices[0]).length, 2);
+        await channels.drain();
+        assert.equal(posts.filter((post) => post.text === notices[0]).length, 2);
+        assert.ok((await turnOf('after-classifier-failure')).turn_id);
+        assert.equal(
+          submitted.some((item) => item.text === 'Why is this happening?'),
+          false,
+        );
+
+        await reply(initial, 'Cancel the fourth task?', hiddenAfterLookup, 5);
+        await channels.drain();
+        retireAfterHiddenLookup = true;
+        receive(
+          '111',
+          'retired-after-lookup',
+          'chat-a',
+          'Why is the fourth task still here?',
+          `provider-${posts.length}`,
+        );
+        receive('111', 'following-lookup-race', 'chat-a', 'Summarize the weather');
+        await channels.drain();
+        assert.equal(retireAfterHiddenLookup, false);
+        assert.deepEqual(
+          submitted.filter((item) => item.text === 'Why is the fourth task still here?'),
+          [{ text: 'Why is the fourth task still here?', target: undefined }],
+        );
+        assert.equal(
+          submittedAnswers.find((item) => item.text === 'Why is the fourth task still here?')
+            ?.answer,
+          undefined,
+        );
+        assert.ok(answered.includes('Why is the fourth task still here?'));
+        assert.ok((await turnOf('retired-after-lookup')).turn_id);
+        assert.ok((await turnOf('following-lookup-race')).turn_id);
+
+        await reply(initial, 'Cancel the fifth task?', lateReplacementConfirmation, 6);
+        await channels.drain();
+        receive(
+          '111',
+          'retired-late-replacement',
+          'chat-a',
+          'Yes, move the fifth task to tomorrow',
+          `provider-${posts.length}`,
+        );
+        receive('111', 'following-late-replacement', 'chat-a', 'Summarize my tasks');
+        await channels.drain();
+        assert.deepEqual(
+          submitted.filter((item) => item.text === 'Yes, move the fifth task to tomorrow'),
+          [
+            { text: 'Yes, move the fifth task to tomorrow', target: lateReplacementConfirmation },
+            { text: 'Yes, move the fifth task to tomorrow', target: undefined },
+          ],
+        );
+        assert.deepEqual(
+          submittedAnswers
+            .filter((item) => item.text === 'Yes, move the fifth task to tomorrow')
+            .map((item) => item.answer),
+          [{ approvalId: 'synthetic-approval', approved: true }, undefined],
+        );
+        assert.deepEqual(
+          classified.find((item) => item.text === 'Yes, move the fifth task to tomorrow'),
+          {
+            text: 'Yes, move the fifth task to tomorrow',
+            confirmation: 'Cancel the fifth task?',
+          },
+        );
+        assert.equal(
+          (
+            await pool.query('SELECT count(*)::int AS count FROM turns WHERE source_id=$1', [
+              `channel:${provider}:bot:retired-late-replacement`,
+            ])
+          ).rows[0].count,
+          1,
+        );
+        assert.ok((await turnOf('following-late-replacement')).turn_id);
       } finally {
         await channels.close();
       }
@@ -2059,6 +2912,7 @@ test(
     const app = Fastify();
     const key = randomBytes(32);
     let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
+    const observedChannels: ChannelConnectionObservation[][] = [];
     const settings = await createChannelSettings(pool, {
       ownerId: 'local-development',
       keyStore: { id: 'fixture', configured: true, getKey: async () => key },
@@ -2066,6 +2920,9 @@ test(
       apply: async (environment) =>
         channels!.replaceTransport(createChatSdkTransport(pool, environment)),
       paired: async (candidate, client) => channels!.announcePairing(candidate, client),
+      observed: () => (states) => {
+        observedChannels.push(states);
+      },
     });
     channels = await createChannels(pool, {
       ownerId: 'local-development',
@@ -2134,6 +2991,11 @@ test(
         },
       });
       assert.equal(saved.statusCode, 200);
+      await settings.status();
+      assert.deepEqual(observedChannels.at(-1), [
+        { channel: 'telegram', state: 'setup_pending' },
+        { channel: 'whatsapp', state: 'disabled' },
+      ]);
       const firstCode = new URL(saved.json().pairingUrl).searchParams.get('start')!;
       assert.equal(
         (
@@ -2218,6 +3080,10 @@ test(
       assert.equal((await confirm()).statusCode, 503);
       assert.equal((await telegram())?.pairingCandidate?.id, '123');
       assert.equal((await telegram())?.allowedUserId, undefined);
+      assert.deepEqual(observedChannels.at(-1)?.[0], {
+        channel: 'telegram',
+        state: 'setup_pending',
+      });
       assert.equal((await settings.environment()).TELEGRAM_ALLOWED_USER_ID, '');
       assert.equal((await pool.query('SELECT * FROM channel_inbox')).rowCount, 0);
       assert.equal((await pool.query('SELECT * FROM messages')).rowCount, 0);
@@ -2226,6 +3092,13 @@ test(
 
       const confirmed = await confirm();
       assert.equal(confirmed.statusCode, 200);
+      await settings.status();
+      assert.deepEqual(observedChannels.at(-1)?.[0], {
+        channel: 'telegram',
+        state: 'connected',
+      });
+      assert.equal(JSON.stringify(observedChannels).includes(token), false);
+      assert.equal(JSON.stringify(observedChannels).includes('123'), false);
       assert.equal(confirmed.json().channel.allowedUserId, '123');
       const bound = await settings.environment();
       assert.equal(bound.TELEGRAM_ALLOWED_USER_ID, '123');
@@ -3093,8 +3966,7 @@ test(
   async (t) => {
     const { createActivity } = await import('../src/server/activity.ts');
     const { pool, threadId, receive, turnOf, reply, create } = await outboxFixture(t);
-    await pool.query(`ALTER TABLE turns ADD COLUMN started_at timestamptz, ADD COLUMN IF NOT EXISTS message_id uuid;
-      CREATE TABLE tasks(id uuid,owner_id text,session_id uuid,title text,now_text text,message_id uuid,created_at timestamptz);
+    await pool.query(`CREATE TABLE tasks(id uuid,owner_id text,session_id uuid,title text,now_text text,message_id uuid,created_at timestamptz);
       CREATE TABLE turn_events(id uuid DEFAULT gen_random_uuid(),turn_id uuid,type text,summary text,site text,call_id uuid,created_at timestamptz DEFAULT clock_timestamp());`);
     const channels = await create();
     const activity = createActivity({ pool, ownerId: 'local-development' });

@@ -15,9 +15,11 @@ Nod follows your latest clear message's language, spoken or typed, including que
 
 Type in the message box and press Enter. Press Shift+Enter for a new line.
 
-You can paste Markdown or formatted text. Chat, feedback and message display use the same CommonMark parser, with GitHub Flavored Markdown support. When you send a message or restore an unsent draft, the serializer preserves the meaning of text and links. Markdown can use escapes for literal characters. These escapes do not change the displayed text or a link's destination. Code stays literal, including text that looks like a link or a code fence.
+Pasted text stays literal. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. An unsent pasted draft keeps them after a reload.
 
-Use the formatting toolbar to underline text. Pasted `<u>text</u>` also keeps its underline.
+Web and desktop chat limit text message attempts to 120 per minute and audio message attempts to 120 per minute. If you reach either limit, wait and send again.
+
+Use the formatting toolbar when you want formatted text, including underline. Code stays literal, including text that looks like a link or a code fence.
 
 - **Attach files.** Select **Attach files**, press Command+U on Mac or Ctrl+U on Windows and Linux while writing a message, paste an image or drop files anywhere in the conversation. Each file stays inside the composer while it uploads. Select it to open the same file viewer used for sent attachments, or retry or remove a failed upload. Each file can be 90 MB or smaller. Nod gets a copy in its [workspace](/use/workspace/). It sees PNG, JPEG and WebP images directly, up to 3.75 MB each and 16 MB per message, unless the model you chose can't read images.
 - **Reply to a message.** Hover over a message and select **Reply**. On touch screens or in a narrow chat, hold or right-click the bubble to open **Reply**, **React** and **Copy**. You can also focus a message and press Shift+F10. Replies show a formatted excerpt in the composer and sent reply. Select it to jump to the original message, then select **Return to where you were** to go back. To see the time inside the bottom-right corner of a bubble, hover over the message, focus one of its controls, or tap its text.
@@ -98,15 +100,15 @@ For large files or formats whose waveform your browser can't read, the player sh
 
 The message box stays open while Nod works, so you can send another message at any time. A status line beside the animated Nod mark always shows what's happening:
 
-| The line says                             | What it means                                                                                          |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| **Sending…**                              | Your message is on its way.                                                                            |
-| **Working…**                              | Nod has your message and is about to start.                                                            |
-| **Thinking…**                             | Your model is working out the next step.                                                               |
-| A step, such as "Comparing flight prices" | What Nod is doing now. A website or app after it, such as **· skyscanner.net**, is where it's working. |
-| **· 3 min** at the end                    | Nothing new has happened for that long. Slow models and websites can take minutes; **Stop** ends it.   |
+| The line says                                  | What it means                                                                                                                                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A rotating word, such as **Joining the dots…** | Nod is working but hasn't named a step yet. It appears the moment you send; Nod may be preparing your request or waiting on your model. Screen readers hear **Working…**. |
+| A step, such as "Comparing flight prices"      | What Nod is doing now. A website or app after it, such as **· skyscanner.net**, is where it's working.                                                                    |
+| **· 3 min** at the end                         | Nothing new has happened for that long. Slow models and websites can take minutes; **Stop** ends it.                                                                      |
 
-The line describes the work, never tool names. It never counts seconds or guesses when Nod will finish. It clears when Nod answers, asks you something or stops, and hides while the app reconnects. Tasks you started show their title above their step. A failed send clears the line and shows an error.
+The line describes the work, never tool names. It never counts seconds or guesses when Nod will finish. When Nod answers, the answer takes its place. It clears when Nod asks you something or stops, and hides while the app reconnects. A failed send clears the line and shows an error. Steps come from Nod's own short descriptions and, when your model shares a summary of its reasoning, from that summary's heading, such as "Researching Málaga travel ideas".
+
+The line follows only the work on your messages. A task shows its progress on its own card, so a step never appears twice. While anything works, the message box says **Send another message to Nod…**. While a task works, a small dot pulses just above the top-right corner of the message box. A task that needs your answer shows a slightly larger pink dot with a question mark. Hover over a dot or focus it to see which task it is. Select it to open the task's card with a soft highlight: if the card is already on screen, the chat stays where it is; otherwise the chat scrolls to it.
 
 ### Send more while Nod works
 
@@ -135,9 +137,9 @@ Nod keeps quick answers, simple lookups and status questions in chat. It starts 
 
 ## Notifications
 
-Choose **Enable notifications** after the first introduction, or turn them on in **Settings → General**. **Not now** dismisses the offer. Nod only asks your browser for permission after you choose to enable notifications. If you block the request, allow notifications in the browser’s site settings before trying again.
+Choose **Enable notifications** after the first introduction, or turn them on in **Settings → Notifications**. **Not now** dismisses the offer. Nod only asks your browser for permission after you choose to enable notifications. If you block the request, allow notifications in the browser’s site settings before trying again.
 
-If your browser resets or blocks permission, the switch turns off. Once your browser allows requests again, turn on **Browser notifications** in **Settings → General** to ask for permission. The switch stays off until permission is granted. Dismissing the request leaves it off; you can try again with the same switch. When enabled, **Send test notification** lets you check delivery.
+If your browser resets or blocks permission, the switch turns off. Once your browser allows requests again, turn on **Notifications** in **Settings → Notifications** to ask for permission. The switch stays off until permission is granted. Dismissing the request leaves it off; you can try again with the same switch. When enabled, **Send test notification** lets you check delivery.
 
 On desktop, enabling notifications sends a confirmation. If it does not appear, allow Nod in your computer’s notification settings and check Focus or Do Not Disturb.
 
@@ -169,7 +171,7 @@ Nod doesn't ask for passwords or card numbers in chat. It uses a saved login or 
 
 ## Stop Nod
 
-While Nod works, one progress indicator shows the chat's activity and any background tasks.
+While Nod works, the status line under the chat shows its work on your messages, and each task shows its progress on its card and as a dot above the message box.
 
 While the message box is empty, the send button becomes **Stop**. Select it to stop Nod. Typing a message restores **Send**.
 
@@ -177,7 +179,7 @@ The main Stop control ends active work, cancels queued messages and open questio
 
 You can also tell Nod in the main chat, from any app, for example "stop everything" or "stop the flight search". Nod stops every task, scheduled run and app check, or only the task you name, and tells you what it stopped. Nod reads your message after its current step, or after its current reply if you write from another app. For an immediate stop, use the Stop control, or `/stop` in Telegram.
 
-When a run you started stops on an error or on your spending limit, Nod tells you what failed, in the main chat or as a reply to the affected task, with the error's own details, such as low credits or a rejected key with your model provider. Its next turn knows what went wrong. If Nod restarts during a run you started, that run fails and Nod posts an interruption notice. Nod never repeats failed or interrupted work on its own. Saved tasks and waiting questions survive a restart.
+When a run you started stops on an error or on your spending limit, Nod tells you what failed in the main chat or as a reply to the affected task. If an agent model request fails with a recognizable quota or rate limit, Nod gives you a short explanation instead of the provider's raw response. For a temporary limit, Nod includes an approximate wait time when it can read a provider retry delay of up to two minutes. For an account or workspace usage cap, wait for the limit to reset or check its settings; a workspace admin may need to raise it. Other errors still include safe details, such as a rejected model key. Nod's next turn knows what went wrong. If Nod restarts during a run you started, that run fails and Nod posts an interruption notice. Nod never repeats failed or interrupted work on its own. Saved tasks and waiting questions survive a restart.
 
 If Nod may have sent or changed something, verify the result yourself or ask Nod to inspect it before continuing. Don't make a new attempt while the result is unclear.
 
@@ -219,7 +221,7 @@ In Telegram and WhatsApp, a screen link opens a public page. Select **Open in No
 
 You can also ask Nod to change supported settings from any channel. For example, ask it to use a connected model, set quiet hours, change the time zone or clock format, or set a spending limit. Nod uses its tools and reports the saved result. It asks when your request does not identify the target or value. Model sign-in and device settings, such as launch at login, still need the app.
 
-Links stay inline in the reply. Hover over a link, or focus it with the keyboard, to see its full address. Select a link, or press Enter while it is focused, to open its page. Telegram and WhatsApp control their own link previews.
+Links stay inline in the reply. Hover over a link, or focus it with the keyboard, to see its full address. Select a link, or press Enter while it is focused, to open its page. Nod sends Telegram and WhatsApp replies with link previews turned off.
 
 ## Replies go back where you wrote
 
@@ -238,6 +240,8 @@ Select **Review** to inspect the **Chat**, **Activity** and **Connections** tabs
 Preparing a report sends recent app activity and errors to your Nod runtime for redaction and assembly. The feedback recipient receives your submission only after you select **Send feedback**. If preparation fails, select **Continue without report**.
 
 In the desktop app, a new draft includes a screenshot of the Nod window when capture is available. Reopening a draft keeps its original screenshot. Nod skips private screens, embedded browsers, open dialogs, and unsent text or files. You can annotate or remove the screenshot. It is separate from the diagnostic report. Your feedback text and attachments are sent as provided.
+
+If delivery cannot be confirmed, Nod keeps the draft and checks its status for several minutes while the dialog is open. You can also select **Check submission status** or reopen the dialog later. **Send feedback** stays unavailable for that draft until Nod confirms the result, so an uncertain submission is not sent again. If only some attachments arrived, you can retry the missing files on the same feedback issue or finish without them. Discarding a draft removes its local text and files but cannot cancel feedback already received; sending the same feedback again could create a duplicate.
 
 ## Related resources
 

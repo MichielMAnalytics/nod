@@ -19,10 +19,13 @@ import {
 } from '../shared/models.ts';
 import type { ProductAnalytics } from '../ports/analytics.ts';
 import { createPostHogAnalytics } from '../providers/posthog/analytics.ts';
+import type { OnboardingEmailDelivery } from '../ports/onboarding-email.ts';
+import { createN8nOnboardingEmail } from '../providers/n8n/onboarding-email.ts';
 import {
   analyticsEnabled,
   analyticsEnvironment,
   createAnalytics,
+  snapshotAnalytics,
   toolUsed,
   type CaptureAnalytics,
 } from './analytics.ts';
@@ -43,6 +46,8 @@ import { privateEmailResult } from './integration-result.ts';
 import { createMailCheck } from './mail-check.ts';
 import type { CredentialKeyStore } from '../ports/key-store.ts';
 import type { PasswordManager } from '../ports/password-manager.ts';
+import type { Trash } from '../ports/trash.ts';
+import { desktopTrash } from '../providers/trash.ts';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { DecisionModel, ModelReview } from '../ports/decisions.ts';
 import { createDecisionModel, createOpenRouterDecisionCatalog } from '../providers/decisions.ts';
@@ -76,6 +81,7 @@ import {
 } from '../providers/discovered/remote.ts';
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
+import { createLocalFiles, isLocalFilesAction } from './local-files.ts';
 import { createAppGrantVault } from './vault-app-grants.ts';
 import { createDockerWorkspace } from '../providers/docker/index.ts';
 import { createEnvironmentKeyStore } from '../providers/environment/key-store.ts';
@@ -156,6 +162,7 @@ import { registerFeedback } from './feedback.ts';
 import { feedbackContext } from './feedback-context.ts';
 import { createPersonalService } from './personal.ts';
 import { createOnboardingSuggestions } from './onboarding-suggestions.ts';
+import { createOnboardingProfile } from './onboarding-profile.ts';
 import { createMemoryLearning, initializeMemoryLearning } from './memory-learning.ts';
 import { createMemoryService, importMemoryFile } from './memory.ts';
 import { createMemoryRecall } from './memory-recall.ts';
@@ -174,6 +181,7 @@ import {
   resumeAfterPayment,
   retryCredentials,
   startThreadWorkers,
+  stopSignal,
   stopThreadWorkers,
   withTurnLock,
   type TurnRef,
@@ -189,6 +197,7 @@ import { BrowserConnectionError, createBrowserConnections } from './browser-conn
 import { cachedIcons, registerLinkOpened } from './link-previews.ts';
 export interface ApplicationAdapters {
   analytics?: ProductAnalytics;
+  onboardingEmail?: OnboardingEmailDelivery;
   initialize?(): Promise<void>;
   observe?(turnId: string, event: RuntimeObservation): void;
   models?: ReturnType<typeof createModelService>;
@@ -203,6 +212,8 @@ export interface ApplicationAdapters {
   observations?: ObservationProvider[];
   keyStore: CredentialKeyStore;
   passwordManager?: PasswordManager;
+  trash?: Trash;
+  localFilesHome?: string;
   memoryCurator?: MemoryCurator;
   classificationCurator?: MemoryCurator;
   imageCurator?: MemoryCurator;
@@ -465,6 +476,7 @@ export function createDefaultAdapters(
     passwordManager: createOnePassword({
       open: desktopMode ? desktopOnePassword() : forkedOnePassword(env.NOD_APP_VERSION || 'source'),
     }),
+    trash: desktopMode ? desktopTrash() : undefined,
     workspace: createDockerWorkspace({
       container: env.WORKSPACE_CONTAINER || 'nod-workspace',
       workspaceRoot: join(dataRoot, 'workspaces'),
@@ -612,6 +624,11 @@ export function createDefaultAdapters(
       },
     },
     linkPreviews: createPublicLinkPreviewProvider(),
+    onboardingEmail: createN8nOnboardingEmail({
+      url:
+        env.NOD_ONBOARDING_EMAIL_URL ??
+        'https://internal.users.n8n.cloud/webhook/nod/onboarding-updates',
+    }),
     feedback: createN8nFeedback({
       enabled: feedbackEnabled,
       url: feedbackUrl,
@@ -677,6 +694,7 @@ async function initializeApplication(
     appVersion: process.env.NOD_APP_VERSION,
   });
   let observeConnections: ((only?: 'apps' | 'models') => Promise<void>) | undefined;
+  let observeChannels: (() => Promise<void>) | undefined;
   const feedbackActivity = createFeedbackActivity('runtime');
   const captureAnalytics: CaptureAnalytics = (event, delivery) => {
     feedbackActivity.record(event.event, 'properties' in event ? event.properties : undefined);
@@ -700,6 +718,8 @@ async function initializeApplication(
       (event.event === 'settings_updated' && event.properties.section === 'models')
     )
       void observeConnections?.('models');
+    if (event.event === 'settings_updated' && event.properties.section === 'channels')
+      void observeChannels?.();
   };
   captureAnalytics.snapshot = () => {
     const consent = analytics.consent(ownerId);
@@ -810,8 +830,6 @@ async function initializeApplication(
     withExecution: ledger.withExecution,
     prepareMemory: (context, execution, canContinue) =>
       ledger.withExecution(execution, () => memoryRecall.prepare(context, canContinue)),
-    reviewMemoryReply: (context, text, execution, visual) =>
-      ledger.withExecution(execution, () => memoryRecall.review(context, text, visual)),
     analyzeImages:
       analyzeImages &&
       ((images, request, signal, execution) =>
@@ -821,7 +839,7 @@ async function initializeApplication(
     workspace,
     redactError: createErrorRedactor(secrets),
     keepWarm: async (threadId) =>
-      !(await ledger.limitReached()) && (await activeThread(pool, ownerId)).id === threadId,
+      !(await ledger.reachedLimit()) && (await activeThread(pool, ownerId)).id === threadId,
     observe: (turnId, event) => {
       const { execution, id, type, name } = event;
       diagnostics.log?.record(
@@ -880,6 +898,51 @@ async function initializeApplication(
     store: memoryStore,
     analytics: captureAnalytics,
   });
+  const onboardingProfile = createOnboardingProfile({
+    memory,
+    profileAnalytics: analytics.personProfileAvailable
+      ? {
+          enabled: () => analytics.consent(ownerId).enabled,
+          version: () => analytics.consent(ownerId).version,
+          submit: (profile) => analytics.setOnboardingProfileAnswers(ownerId, profile),
+        }
+      : undefined,
+    updatesEmail:
+      analytics.personProfileAvailable && adapters.onboardingEmail?.configured
+        ? {
+            enabled: () => analytics.consent(ownerId).enabled,
+            submit: async (email, profile) => {
+              const consent = analytics.consent(ownerId);
+              if (!consent.enabled) return false;
+              const currentConsent = () => {
+                const current = analytics.consent(ownerId);
+                return (
+                  current.enabled &&
+                  !consent.signal.aborted &&
+                  current.signal === consent.signal &&
+                  current.version === consent.version &&
+                  current.revision === consent.revision
+                );
+              };
+              if (profile) {
+                const shared = await analytics.setOnboardingProfileProperties(
+                  ownerId,
+                  profile,
+                  consent,
+                );
+                if (!shared || !currentConsent()) return false;
+              }
+              const consentAt = new Date().toISOString();
+              const saved = await analytics.setUpdatesEmail(ownerId, email, consentAt, consent);
+              if (!saved || !currentConsent()) return false;
+              return adapters.onboardingEmail!.submit(
+                { email, ...(profile ? { profile } : {}) },
+                consent.signal,
+              );
+            },
+          }
+        : undefined,
+  });
   const memoryRecall = createMemoryRecall({ pool, ownerId, memory, curator });
   const writingStyle = createWritingStyleLearning({ memory, curator });
   const communication = createCommunication({
@@ -910,6 +973,9 @@ async function initializeApplication(
     redact: createErrorRedactor(secrets),
     analytics: captureAnalytics,
   });
+  let retireScheduleConfirmations:
+    | ((client: import('pg').PoolClient, id: string, waitForSend: boolean) => Promise<void>)
+    | undefined;
   const personal = createPersonalService({
     analytics: captureAnalytics,
     pool,
@@ -917,12 +983,19 @@ async function initializeApplication(
     scheduler: boss,
     enqueueTurn,
     refresh,
+    retireScheduleConfirmations: (client, id, waitForSend) => {
+      if (!retireScheduleConfirmations) throw new Error('Approvals are not ready.');
+      return retireScheduleConfirmations(client, id, waitForSend);
+    },
     memory,
     learnedSkills,
     models: adapters.models,
     consumers,
     stopConsumer: (id) => boss.offWork('scheduled-task', { id, wait: true }),
     sessionCosts: ledger.sessionCosts,
+    recentTurnCost: ledger.recentTurnCost,
+    watchable: async (connectionIds) => integrations.watchable(connectionIds),
+    watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
   await personal.initialize({ workers: options.workers });
   const tasks = createTasks({
@@ -949,6 +1022,7 @@ async function initializeApplication(
     },
     sweep: async () => {
       await sweepArtifacts();
+      await tasks.wakeDue().catch((error) => logFailure('task_wake', error));
       await vault.forgetExpiredHolds().catch((error) => logFailure('vault_expiry', error));
     },
     due: () => proactivity.due(),
@@ -997,8 +1071,16 @@ async function initializeApplication(
   let browserConnections!: Awaited<ReturnType<typeof createBrowserConnections>>;
   const previews = adapters.linkPreviews;
   const icon = previews ? cachedIcons((origin) => previews.icon(origin)) : undefined;
+  const localFiles = createLocalFiles(pool, ownerId, {
+    dataRoot,
+    home: adapters.localFilesHome,
+    trash: adapters.trash,
+    available: Boolean(adapters.trash),
+  });
   const integrations = await createIntegrations(pool, {
+    localFiles,
     mailCheck,
+    paused: async () => (await speechPreferences.get()).proactivePaused,
     analytics: captureAnalytics,
     analyticsConsent,
     admission,
@@ -1195,6 +1277,7 @@ async function initializeApplication(
         ? { turnId: provenance.turnId, signal: provenance.signal }
         : provenance.turnId;
       const scheduleWrite = [
+        'NOD_schedule_pause',
         'NOD_schedule_cancel',
         'NOD_schedule_create',
         'NOD_schedule_update',
@@ -1263,7 +1346,7 @@ async function initializeApplication(
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action.startsWith('NOD_')) {
         if (
-          ['NOD_schedule_update', 'NOD_schedule_cancel'].includes(action) &&
+          ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
           expectedRevision === undefined
         )
           throw Object.assign(new Error('This schedule needs a fresh approval.'), {
@@ -1276,6 +1359,7 @@ async function initializeApplication(
     communication.describe,
     captureAnalytics,
   );
+  retireScheduleConfirmations = approvals.retireScheduleConfirmations;
   let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
   const reactions = createAgentReactionService({
     pool,
@@ -1284,7 +1368,7 @@ async function initializeApplication(
     deliver: async (messageId, reaction, signal) =>
       channels ? channels.react(messageId, reaction, signal) : 'absent',
   });
-  const localAccounts = createAccountStore(pool);
+  const localAccounts = createAccountStore(pool, { onboard: ledger.onboard });
   const ownerNames = async () =>
     (await integrations.list(ownerId, { refresh: false }))
       .filter(connectedGmail)
@@ -1461,11 +1545,15 @@ async function initializeApplication(
                   ])
                 ).flat(),
           () => (only === 'apps' ? [] : (adapters.models?.analyticsConnections() ?? [])),
+          only !== 'models',
         ),
       )
       .catch(() => {}));
   const stopConnectionInventory = analytics.subscribe(ownerId, (enabled) => {
-    if (enabled) void observeConnections?.();
+    if (enabled) {
+      void observeConnections?.();
+      void observeChannels?.();
+    }
   });
   void observeConnections();
   await clearConversationAnalytics(pool, ownerId);
@@ -1508,8 +1596,13 @@ async function initializeApplication(
     pool,
     ownerId,
     review: async (instructions, input, signal, question) => {
-      if (question)
-        instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${question.choices.map(({ value }) => JSON.stringify(value)).join(', ')}.`;
+      if (question) {
+        const values = question.choices.map(({ value }) => JSON.stringify(value)).join(', ');
+        instructions +=
+          question.name === 'retiredReply'
+            ? `\nReply with only JSON containing exactly two properties: ${JSON.stringify(question.name)} set to one of ${values}, and "probability" set to a number from 0 to 1 expressing confidence in that label.`
+            : `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values}.`;
+      }
       return trustCurator.configured
         ? trustCurator.curate({ task: 'review', instructions, input }, signal)
         : undefined;
@@ -1595,9 +1688,23 @@ async function initializeApplication(
     resume: resumeAfterPayment,
     record: (turn, entry, client) => vaultAccess.record(turn, entry, client),
   });
+  const ownerMessageAccepted = () => {
+    const capture = snapshotAnalytics(captureAnalytics);
+    return (channel: string) => {
+      const source = channel.split(':')[0];
+      capture?.({
+        event: 'owner_message_accepted',
+        properties: {
+          channel:
+            source === 'web' || source === 'telegram' || source === 'whatsapp' ? source : 'other',
+        },
+      });
+    };
+  };
   const submittedMessages = createUserMessageService({
     confirmAction: approvals.chat,
     taskReply: tasks.resolveReply,
+    accepted: ownerMessageAccepted,
   });
   const userMessages = {
     ...submittedMessages,
@@ -1642,14 +1749,17 @@ async function initializeApplication(
       readArtifact: workspace.readArtifact.bind(workspace),
       mailCheck,
       executeConfirmation: approvals.executeConfirmed,
+      stoppedOutcomes: approvals.stoppedOutcomes,
       bindVerificationQuestion: chatVerification.bindQuestion,
       reactToMessage: reactions.react,
       proactivity: proactivity.context,
       runTurn: (context) =>
-        ledger.withTurn(context.turnId, () =>
-          runtime.runTurn(context).finally(() => proactivity.release(context.turnId)),
+        ledger.withTurn(
+          context.turnId,
+          () => runtime.runTurn(context).finally(() => proactivity.release(context.turnId)),
+          Boolean(context.spendingLimitReached),
         ),
-      spendingLimitReached: ledger.limitReached,
+      spendingLimit: ledger.reachedLimit,
       checkIn: ledger.checkIn,
       skipTurn: async (sourceId) =>
         sourceId.startsWith('proactivity:') && !(await proactivity.canRun()),
@@ -1797,7 +1907,7 @@ async function initializeApplication(
             'model_select',
             'schedule_create',
             'schedule_update',
-            'schedule_cancel',
+            'schedule_pause',
           ].includes(action)
         ) {
           if (
@@ -1809,10 +1919,10 @@ async function initializeApplication(
             );
           const input = await personal.validateReview(action, args);
           const schedule =
-            action === 'schedule_cancel' || action === 'schedule_update'
+            action === 'schedule_pause' || action === 'schedule_update'
               ? await personal.getSchedule(String(input.id))
               : undefined;
-          if (action === 'schedule_cancel' && schedule && !schedule.enabled) return schedule;
+          if (action === 'schedule_pause' && schedule && !schedule.enabled) return schedule;
           const current = schedule
             ? {
                 title: schedule.title,
@@ -2006,24 +2116,37 @@ async function initializeApplication(
         }
         return vault.request(turn, ownerId, request);
       },
+      localFiles: localFiles.available,
       integration: async (turn, action, args, options) => {
+        if (action === 'LOCAL_FILES_KEEP_OUT') {
+          await options.admit?.(false);
+          return withTurnLock({ turnId: turn.turnId, signal: options.signal }, async (client) => ({
+            keptOut: await localFiles.keepOut(turn, String(args.path ?? ''), client),
+          }));
+        }
         if (action === 'SEARCH_TOOLS') {
           await options.admit?.(false);
           const result = await integrations.execute(ownerId, action, args, turn, options.signal);
           return result;
         }
-        const verdict = await trust.check(turn, action, args, options.signal);
+        const prepare = () =>
+          hasWorkspaceFiles(args)
+            ? withTurnLock(turn.turnId, (client) =>
+                integrations.prepare(ownerId, action, args, turn, options.signal, true, client),
+              )
+            : isLocalFilesAction(action)
+              ? integrations.prepare(ownerId, action, args, turn, options.signal)
+              : integrations.prepare(ownerId, action, args);
+        const resolved = isLocalFilesAction(action) ? await prepare() : undefined;
+        const verdict = await trust.check(turn, action, resolved ?? args, options.signal);
         await options.admit?.(verdict.confirm);
-        const prepared = hasWorkspaceFiles(args)
-          ? await withTurnLock(turn.turnId, (client) =>
-              integrations.prepare(ownerId, action, args, turn, options.signal, true, client),
-            )
-          : await integrations.prepare(ownerId, action, args);
-        const account = verdict.confirm
-          ? (await integrations.list(ownerId, { refresh: false })).find(
-              (item) => item.connectionId === prepared.connectionId,
-            )
-          : undefined;
+        const prepared = resolved ?? (await prepare());
+        const account =
+          verdict.confirm && typeof prepared.connectionId === 'string'
+            ? (await integrations.list(ownerId, { refresh: false })).find(
+                (item) => item.connectionId === prepared.connectionId,
+              )
+            : undefined;
         const path = account?.accessPaths?.find((item) => item.id === prepared.pathId);
         const result = await approvals.request(turn, action, prepared, {
           allowed: !verdict.confirm,
@@ -2140,6 +2263,7 @@ async function initializeApplication(
     onboardingMissing: async () => (adapters.model.configured ? null : 'brain'),
     traces: adapters.traces?.available ?? false,
     onTraces: (enabled) => adapters.traces?.configure({ enabled }),
+    updatesEmail: onboardingProfile.available,
   }).register(app);
   ledger.registerRoutes(app);
   registerSpeechSettings(app, {
@@ -2155,11 +2279,14 @@ async function initializeApplication(
   browserConnections.registerRoutes(app);
   adapters.integrationBrowser?.registerRoutes(app);
   integrations.registerRoutes(app);
+  localFiles.registerRoutes(app);
   personal.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
+  onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   triage.registerRoutes(app);
   let channelSettings: Awaited<ReturnType<typeof createChannelSettings>> | undefined;
+  let lastChannelObservation: { consentVersion: number; signature: string } | undefined;
   if (options.channels !== false && (adapters.messaging || adapters.messagingSetup)) {
     const setup = adapters.messagingSetup;
     if (setup) {
@@ -2185,6 +2312,29 @@ async function initializeApplication(
           if (!channels) throw new Error('Messaging is not ready.');
           return channels.announcePairing(candidate, client);
         },
+        observed: () => {
+          const consent = analytics.consent(ownerId);
+          return (states) => {
+            if (
+              !consent.enabled ||
+              consent.signal.aborted ||
+              consent.version !== analytics.consent(ownerId).version
+            )
+              return;
+            const signature = JSON.stringify(states);
+            if (
+              lastChannelObservation?.consentVersion === consent.version &&
+              lastChannelObservation.signature === signature
+            )
+              return;
+            for (const properties of states)
+              captureAnalytics(
+                { event: 'channel_connection_observed', properties },
+                { consentRevision: consent.revision },
+              );
+            lastChannelObservation = { consentVersion: consent.version, signature };
+          };
+        },
       });
       channelSettings.registerRoutes(app);
     }
@@ -2202,6 +2352,8 @@ async function initializeApplication(
       attributeMediaUsage: ledger.attributeMediaUsage,
       ...(channelSettings ? { pair: channelSettings.pair } : {}),
       transport: messaging,
+      isRetirableScheduleConfirmation: approvals.isRetirableScheduleConfirmation,
+      classifyRetiredReply: trust.classifyRetiredReply,
       acceptVerification: (text, input) => chatVerification.accept(text, input),
       reacted: (messageId, reaction) =>
         reactToAssistantMessage(messageId, reaction, adapters.model.configured),
@@ -2271,6 +2423,8 @@ async function initializeApplication(
         answer,
         replyToMessageId,
         attachments,
+        onInserted,
+        stopSignal,
       ) =>
         (
           await userMessages.submit(text, attachments, {
@@ -2280,13 +2434,24 @@ async function initializeApplication(
             clientMessageId: messageId,
             replyToMessageId,
             answer,
+            onInserted,
+            stopSignal,
           })
         ).turnId,
+      stopSignal,
+      messageAccepted: ownerMessageAccepted,
       answer: (text, channel, replyToMessageId) =>
         userMessages.answer(text, { channel, replyToMessageId }),
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();
+    if (channelSettings) {
+      const settings = channelSettings;
+      observeChannels = async () => {
+        await settings.status().catch(() => {});
+      };
+      void observeChannels();
+    }
   }
   await onboardingSuggestions.initialize();
   if (adapters.model.configured)

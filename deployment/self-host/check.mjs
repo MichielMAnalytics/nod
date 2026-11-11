@@ -141,6 +141,10 @@ try {
     assert.equal(Buffer.from(vault, 'base64').length, 32);
     for (const secret of [originalToken, password, vault]) assert.ok(!installed.includes(secret));
     assert.ok(installed.includes(origin));
+    assert.equal(
+      (await compose('exec', '-T', 'server', 'node', '-p', 'process.env.NOD_APP_VERSION')).trim(),
+      (await readFile(join(directory, 'source-revision'), 'utf8')).trim(),
+    );
     await writeEnvironment(originalToken);
     console.log(
       'Standalone installation generates private keys and rejects corrupt or wrong-architecture bundles.',
@@ -217,7 +221,7 @@ try {
       ].join('\n'),
       { mode: 0o600 },
     );
-    for (const service of ['server', 'workspace', 'browser'])
+    for (const service of ['server', 'workspace', 'browser', 'workspace-network'])
       await compose(
         'run',
         '--rm',

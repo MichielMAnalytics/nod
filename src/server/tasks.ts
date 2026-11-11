@@ -102,8 +102,7 @@ function status(row: Row): TaskStatus {
   if (row.turn_status === 'queued') return 'queued';
   if (row.turn_status === 'running') return 'working';
   if (row.turn_status === 'failed') return 'failed';
-  if (['waiting', 'failed', 'cancelled'].includes(row.turn_status ?? '') && !row.answered)
-    return 'needs_you';
+  if (row.turn_status === 'waiting' && !row.answered) return 'needs_you';
   if (row.waiting_for.length) return 'waiting';
   if (row.next_check) return 'scheduled';
   return 'needs_you';
@@ -160,11 +159,15 @@ export function createTasks(options: {
            EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.thread_id=u.thread_id
              AND n.session_id=u.session_id AND n.parent_turn_id=u.id) AS answered,
            COALESCE(${activeHandoffSql},false) AS handoff,
-           q.text AS question,q.id AS question_message_id
+           COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
+           COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          LEFT JOIN LATERAL (SELECT m.id,m.text FROM messages m
-           WHERE u.status='waiting' AND m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>''
+           WHERE u.status='waiting' AND m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1) q ON true
+         LEFT JOIN messages continuation ON continuation.id=t.continuation_message_id
+           AND continuation.owner_id=t.owner_id AND continuation.thread_id=u.thread_id
+           AND continuation.turn_id=u.id AND continuation.role='assistant' AND continuation.hidden_at IS NULL
          WHERE t.position<=100 OR t.source_message_id IN (
            SELECT requested.id FROM messages offer
            CROSS JOIN LATERAL jsonb_array_elements(offer.suggestions->'tasks') idea
@@ -517,6 +520,7 @@ export function createTasks(options: {
       `SELECT t.id,t.next_check,(SELECT u.id FROM turns u WHERE u.owner_id=t.owner_id AND u.session_id=t.session_id
          ORDER BY u.created_at DESC,u.id DESC LIMIT 1) AS turn_id
        FROM tasks t WHERE t.owner_id=$1 AND t.state='open' AND t.next_check<=now()
+         AND (t.activity_key IS NULL OR NOT EXISTS (SELECT 1 FROM preferences p WHERE p.owner_id=t.owner_id AND p.proactive_paused))
          AND EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=t.owner_id AND u.session_id=t.session_id AND u.thread_id=$2)
          AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=t.owner_id AND u.session_id=t.session_id
            AND u.status IN ('queued','running','waiting'))`,
@@ -525,7 +529,8 @@ export function createTasks(options: {
     for (const row of rows)
       await transaction(async (client) => {
         const due = await client.query(
-          'UPDATE tasks SET next_check=NULL WHERE id=$1 AND owner_id=$2 AND next_check=$3',
+          `UPDATE tasks t SET next_check=NULL WHERE t.id=$1 AND t.owner_id=$2 AND t.next_check=$3
+           AND (t.activity_key IS NULL OR NOT EXISTS (SELECT 1 FROM preferences p WHERE p.owner_id=t.owner_id AND p.proactive_paused))`,
           [row.id, ownerId, row.next_check],
         );
         if (due.rowCount)
@@ -538,6 +543,10 @@ export function createTasks(options: {
           );
       }, pool);
     if (rows.length) refresh();
+  }
+
+  async function wakeDue() {
+    await resumeDue((await transaction((client) => lockThread(client), pool)).id);
   }
 
   async function inherit(turn: TurnRef) {
@@ -621,6 +630,7 @@ export function createTasks(options: {
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS session_id uuid;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source_message_id uuid REFERENCES messages(id);
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS message_id uuid REFERENCES messages(id);
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS continuation_message_id uuid REFERENCES messages(id);
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS brief text NOT NULL DEFAULT '';
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS activity_key text;
       CREATE UNIQUE INDEX IF NOT EXISTS tasks_activity ON tasks(owner_id,activity_key) WHERE activity_key IS NOT NULL;
@@ -707,7 +717,7 @@ export function createTasks(options: {
          UNION ALL
          SELECT m.id,'message',m.text,NULL,NULL,NULL,m.created_at
          FROM messages m JOIN turns u ON u.id=m.turn_id
-         WHERE u.task_id=$1 AND u.owner_id=$2 AND m.owner_id=$2 AND m.role='assistant' AND m.text<>''
+         WHERE u.task_id=$1 AND u.owner_id=$2 AND m.owner_id=$2 AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
          ORDER BY 7,1`,
           [id, ownerId],
         )
@@ -831,6 +841,7 @@ export function createTasks(options: {
     chatCommand,
     read: (thread?: string) => read(pool, { closed: true, thread }),
     resumeDue,
+    wakeDue,
     registerRoutes,
   };
 }

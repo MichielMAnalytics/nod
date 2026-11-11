@@ -58,9 +58,13 @@ import {
   type EmailCodeRequest,
 } from './email-code.ts';
 import { logFailure } from './failure-log.ts';
+import { isLocalFilesAction, type LocalFiles } from './local-files.ts';
 
 const unverifiedAccount =
   "Nod can't confirm this is the same account, so it can't reconnect it in place. Connect the app again as a new connection; the old one stays in Apps until you remove it.";
+const retiredNotionMcp = 'notion_mcp';
+const retiredNotionMessage =
+  'This older Notion MCP connection cannot read pages. Connect Notion again, then remove this connection in Apps.';
 
 const slugSchema = z.string().regex(/^[a-z][a-z0-9_]{0,79}$/);
 type Slug = z.infer<typeof slugSchema>;
@@ -167,10 +171,12 @@ type IntegrationOptions = {
   callbackReturnTo?: 'window';
   refresh?(): void;
   discovered?: Awaited<ReturnType<typeof createDiscoveredConnections>>;
+  localFiles?: LocalFiles;
   browserAccounts?: (client?: PoolClient) => Promise<VaultLoginEntry[]>;
   browserConnections?: (client?: PoolClient) => Promise<Connection[]>;
   icon?: (origin: string) => Promise<SiteIcon | null>;
   mailCheck?: MailCheck;
+  paused?(): Promise<boolean>;
 };
 
 function browserService(origin: string) {
@@ -440,7 +446,11 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
       logFailure('app_catalog_failed', error);
       throw new IntegrationError('The app catalog is unavailable. Try again later.', 502);
     }
-    serviceCatalog = new Map(entries.map((entry) => [entry.slug, entry]));
+    serviceCatalog = new Map(
+      entries
+        .filter((entry) => entry.slug !== retiredNotionMcp)
+        .map((entry) => [entry.slug, entry]),
+    );
     return serviceCatalog;
   }
 
@@ -451,7 +461,10 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
   }
 
   async function catalog(): Promise<Connection[]> {
-    return [...(await providerCatalog()).values()]
+    const services = await providerCatalog();
+    if (options.discovered && !services.has('notion'))
+      services.set('notion', serviceInfo('notion'));
+    return [...services.values()]
       .sort((left, right) => {
         const featured = (slug: string) => {
           const index = (integrationServiceIds as readonly string[]).indexOf(slug);
@@ -553,6 +566,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     const pending = rows.filter(
       (row) =>
         row.account_id &&
+        row.slug !== retiredNotionMcp &&
         !row.revoked &&
         configurationMatches(row) &&
         (!row.account_checked_at || Date.now() - row.account_checked_at.getTime() > 60_000),
@@ -646,6 +660,25 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           supportsTriggers: false,
           description: service.description,
         });
+        continue;
+      }
+      if (slug === retiredNotionMcp) {
+        for (const row of rows.filter((entry) => entry.slug === slug && entry.account_id))
+          result.push({
+            slug,
+            name: 'Notion MCP',
+            description: retiredNotionMessage,
+            status: 'disconnected',
+            connectionId: row.id,
+            accountId: row.account_id!,
+            accountName: row.account_name ?? undefined,
+            accountEmail: row.account_email ?? undefined,
+            disconnectPending: row.revoked,
+            reconnectRequired: true,
+            canReconnect: false,
+            triggersEnabled: false,
+            supportsTriggers: false,
+          });
         continue;
       }
       const accounts = rows.filter((row) => row.slug === slug && row.account_id);
@@ -835,6 +868,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     turn?: TurnRef,
     replacement?: ConnectionRow,
   ) {
+    if (slug === retiredNotionMcp) throw new IntegrationError(retiredNotionMessage, 409);
     await requireService(slug);
     await pool.query(
       `DELETE FROM app_connections WHERE owner_id=$1 AND account_id IS NULL AND callback_expires<now()
@@ -1018,6 +1052,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     returnTo: ReturnTarget,
     turn?: TurnRef,
   ) {
+    if (slug === retiredNotionMcp) throw new IntegrationError(retiredNotionMessage, 409);
     const row = await selectConnection(configuredOwner, slug, connectionId, true);
     if (protectedCallback(row))
       throw new IntegrationError(
@@ -1432,6 +1467,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
       throw new IntegrationError('This connected account is unavailable.', 404);
     const slug = matchingService(action, knownServices(rows));
     if (!slug) throw new IntegrationError('This action is outside the connected apps.', 403);
+    if (slug === retiredNotionMcp) throw new IntegrationError(retiredNotionMessage, 409);
     if (selected && selected.slug !== slug)
       throw new IntegrationError('This connected account is unavailable.', 404);
     return slug;
@@ -1451,6 +1487,30 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     return row;
   }
 
+  async function workspaceBytes(
+    turn: TurnRef | undefined,
+    input: { workspaceFile: string; size?: number; sha256?: string },
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
+    if (!turn || !options.readWorkspaceFile)
+      throw new IntegrationError('Workspace files are unavailable.', 503);
+    const bytes = await options.readWorkspaceFile(turn, input.workspaceFile, fileBytes);
+    if (!bytes.byteLength || bytes.byteLength > fileBytes)
+      throw new IntegrationError(
+        `The file must be between 1 byte and ${fileBytes / 1024 / 1024} MB.`,
+      );
+    if (
+      input.sha256 !== undefined &&
+      (bytes.byteLength !== input.size || fileDigest(bytes) !== input.sha256)
+    )
+      throw new IntegrationError(
+        `${input.workspaceFile} changed after this action was confirmed, so nothing was written.`,
+        409,
+      );
+    return bytes;
+  }
+
   async function executeApproved(
     ownerId: string,
     action: string,
@@ -1459,6 +1519,24 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     signal?: AbortSignal,
     expectedBinding?: string,
   ) {
+    if (isLocalFilesAction(action)) {
+      assertOwner(ownerId);
+      signal?.throwIfAborted();
+      const localFiles = options.localFiles;
+      if (!localFiles) throw new IntegrationError('Local files are unavailable.', 503);
+      await localFiles.assertStartedByOwner(turn);
+      return withServiceAnalytics(
+        options.analytics,
+        { connection_method: 'local', consentRevision: options.analyticsConsent?.().revision },
+        () =>
+          localFiles.execute(action, args, {
+            signal,
+            read: (input) => workspaceBytes(turn, input, signal),
+          }),
+        signal,
+        (result) => !(result as { failed?: unknown[] }).failed?.length,
+      );
+    }
     if (
       action === 'CONNECTED_HTTP' ||
       action === 'CONNECTED_MCP_CALL' ||
@@ -1550,6 +1628,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
             row.account_id &&
             !row.revoked &&
             row.account_active &&
+            row.slug !== retiredNotionMcp &&
             configurationMatches(row) &&
             (!connectionId || row.id === connectionId),
         );
@@ -1569,11 +1648,14 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
                 const slug = matchingService(action, services);
                 return (
                   !(slug && officialMcp.has(slug)) &&
+                  slug !== retiredNotionMcp &&
                   (!connectionId || rows.some((row) => row.slug === slug))
                 );
               }),
             );
-            suggestions = found.suggestions;
+            suggestions = found.suggestions.filter((suggestion) =>
+              suggestion.primaryToolSlugs.every((action) => Object.hasOwn(tools, action)),
+            );
             searched = true;
           } catch (error) {
             signal?.throwIfAborted();
@@ -1689,6 +1771,16 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
   ) {
     assertOwner(ownerId);
     signal?.throwIfAborted();
+    if (isLocalFilesAction(action)) {
+      if (!options.localFiles) throw new IntegrationError('Local files are unavailable.', 503);
+      if (turn) await options.localFiles.assertStartedByOwner(turn);
+      const prepared = (await options.localFiles.prepare(action, args)) as Record<string, unknown>;
+      if (!hasWorkspaceFiles(prepared) || (!turn && !pin && pinnedWorkspaceFiles(prepared)))
+        return prepared;
+      return (await pinWorkspaceFiles(prepared, (input) =>
+        workspaceBytes(turn, input, signal),
+      )) as Record<string, unknown>;
+    }
     if (['CONNECTED_HTTP', 'CONNECTED_MCP_CALL', 'CONNECTED_CLI'].includes(action)) {
       if (!options.discovered)
         throw new IntegrationError('Discovered connections are unavailable.', 503);
@@ -1915,6 +2007,55 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
       });
   }
 
+  function changeSignal(row: ConnectionRow) {
+    return (
+      row.account_id &&
+      row.account_active &&
+      row.watch_requested &&
+      !row.revoked &&
+      configurationMatches(row) &&
+      ((inboxPolled(row.slug) && !row.inbox_failed && !row.inbox_reconnect_required) ||
+        (activityReader(row.slug)?.changeToken && !row.activity_failed) ||
+        (row.triggers_enabled && row.trigger_id))
+    );
+  }
+
+  async function watchable(connectionIds: string[]) {
+    const rows = await connectionRows(configuredOwner);
+    return connectionIds.every((id) => rows.some((row) => row.id === id && changeSignal(row)));
+  }
+
+  async function watchState(connectionIds: string[]) {
+    if (!(await watchable(connectionIds))) return null;
+    await Promise.all([pollInboxes(connectionIds), pollActivityChanges(connectionIds)]);
+    const rows = (await connectionRows(configuredOwner)).filter((row) =>
+      connectionIds.includes(row.id),
+    );
+    if (rows.length !== new Set(connectionIds).size || !rows.every(changeSignal)) return null;
+    const events = await pool.query<{ account_id: string; slug: string; latest: string }>(
+      `SELECT account_id,slug,max(created_at)::text AS latest FROM integration_events
+       WHERE owner_id=$1 AND provider_id=$2 AND account_id=ANY($3::text[]) GROUP BY 1,2`,
+      [configuredOwner, providerId, rows.map((row) => row.account_id)],
+    );
+    return createHash('sha256')
+      .update(
+        JSON.stringify(
+          rows
+            .sort((a, b) => a.id.localeCompare(b.id))
+            .map((row) => [
+              row.id,
+              row.watch_revision,
+              row.inbox_cursor,
+              row.activity_token,
+              events.rows.find(
+                (event) => event.account_id === row.account_id && event.slug === row.slug,
+              )?.latest ?? null,
+            ]),
+        ),
+      )
+      .digest('hex');
+  }
+
   async function readActivity(
     input: ObservationQuery & { connectionId: string },
     signal: AbortSignal,
@@ -1953,18 +2094,20 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     );
   }
 
-  function pollActivityChanges() {
+  function pollActivityChanges(only?: string[]): Promise<void> {
     const services = Object.entries(provider.activity ?? {})
       .filter(([, reader]) => reader.changeToken)
       .map(([service]) => service);
     if (closed || !provider.configured || !services.length) return Promise.resolve();
-    if (activityPolling) return activityPolling;
+    if (activityPolling)
+      return only ? activityPolling.then(() => pollActivityChanges(only)) : activityPolling;
     activityPolling = (async () => {
       const { rows } = await pool.query<ConnectionRow>(
         `WITH due AS (SELECT id FROM app_connections WHERE owner_id=$1 AND provider_id=$2 AND slug=ANY($3::text[])
         AND watch_requested AND account_active AND NOT revoked AND account_id IS NOT NULL
-        AND ($4::text IS NULL OR configuration_id=$4) AND (activity_poll_at IS NULL OR activity_poll_at<=now())
-        ORDER BY activity_poll_at NULLS FIRST LIMIT 4 FOR UPDATE SKIP LOCKED)
+        AND ($4::text IS NULL OR configuration_id=$4)
+        AND ($6::uuid[] IS NULL AND (activity_poll_at IS NULL OR activity_poll_at<=now()) OR id=ANY($6::uuid[]))
+        ORDER BY activity_poll_at NULLS FIRST LIMIT CASE WHEN $6::uuid[] IS NULL THEN 4 END FOR UPDATE SKIP LOCKED)
         UPDATE app_connections c SET activity_poll_at=now()+interval '30 minutes',activity_claim_id=$5
         FROM due WHERE c.id=due.id RETURNING c.*`,
         [
@@ -1973,6 +2116,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           services,
           provider.configurationId ?? null,
           randomBytes(16).toString('hex'),
+          only ?? null,
         ],
       );
       await Promise.all(
@@ -2036,15 +2180,17 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     return activityPolling;
   }
 
-  function pollInboxes() {
+  function pollInboxes(only?: string[]): Promise<void> {
     if (closed || !provider.configured || !provider.pollInbox) return Promise.resolve();
-    if (polling) return polling;
+    if (polling) return only ? polling.then(() => pollInboxes(only)) : polling;
     polling = (async () => {
+      if (!only && (await options.paused?.())) return;
       const { rows } = await pool.query<ConnectionRow>(
         `WITH due AS (SELECT id FROM app_connections WHERE owner_id=$1 AND provider_id=$2 AND slug='gmail'
          AND watch_requested AND account_active AND NOT revoked AND NOT inbox_reconnect_required AND account_id IS NOT NULL
          AND ($4::text IS NULL OR configuration_id=$4)
-         AND (inbox_poll_at IS NULL OR inbox_poll_at<=now()) ORDER BY inbox_poll_at NULLS FIRST LIMIT 4 FOR UPDATE SKIP LOCKED)
+         AND ($5::uuid[] IS NULL AND (inbox_poll_at IS NULL OR inbox_poll_at<=now()) OR id=ANY($5::uuid[]))
+         ORDER BY inbox_poll_at NULLS FIRST LIMIT CASE WHEN $5::uuid[] IS NULL THEN 4 END FOR UPDATE SKIP LOCKED)
          UPDATE app_connections c SET inbox_poll_at=now()+interval '15 minutes',inbox_claim_id=$3
          FROM due WHERE c.id=due.id RETURNING c.*`,
         [
@@ -2052,6 +2198,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           providerId,
           randomBytes(16).toString('hex'),
           provider.configurationId ?? null,
+          only ?? null,
         ],
       );
       await Promise.all(
@@ -2238,8 +2385,8 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
   const timer = setInterval(() => {
     void background(drain)?.catch(() => {});
     void background(syncWatches)?.catch(() => {});
-    void background(pollInboxes)?.catch(() => {});
-    void background(pollActivityChanges)?.catch(() => {});
+    void background(() => pollInboxes())?.catch(() => {});
+    void background(() => pollActivityChanges())?.catch(() => {});
   }, 5000);
   timer.unref();
 
@@ -2420,20 +2567,24 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           })
           .strict()
           .parse(request.body ?? {});
-        if (officialMcp.has(request.params.slug)) {
+        const service = request.params.slug === retiredNotionMcp ? 'notion' : request.params.slug;
+        if (request.params.slug === retiredNotionMcp && input.connectionId)
+          throw new IntegrationError(retiredNotionMessage, 409);
+        if (officialMcp.has(service)) {
           if (!options.discovered)
             throw new IntegrationError('Discovered connections are unavailable.', 503);
           const selected = (await options.discovered.list()).find(
-            (entry) =>
-              entry.connectionId === input.connectionId && entry.slug === request.params.slug,
+            (entry) => entry.connectionId === input.connectionId && entry.slug === service,
           );
           if (input.restartAttempt && input.connectionId && !selected)
             throw new IntegrationError(
               'This sign-in changed. Use the newest window or try again.',
               409,
             );
+          if (input.connectionId && !selected)
+            throw new IntegrationError('This connected account is unavailable.', 404);
           return options.discovered.authorize(
-            request.params.slug,
+            service,
             selected?.status === 'disconnected' && !input.newAccount
               ? input.connectionId
               : undefined,
@@ -2650,7 +2801,11 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
         if (!event.id || event.id.length > 200)
           return reply.code(400).send({ error: 'The webhook event has no valid identity.' });
         const messageId = slug.data === 'gmail' && messageIdentity(event.data, 'message');
-        const summary = `Source connectionId: ${row.id}.\n${await eventOverview(slug.data, event.trigger, event.data, mailCheck)}`;
+        const summary = `Source connectionId: ${row.id}.\n${
+          (await options.paused?.())
+            ? `Connected-app event from ${slug.data}; trigger ${event.trigger}. Read the source for its current state.`
+            : await eventOverview(slug.data, event.trigger, event.data, mailCheck)
+        }`;
         await pool.query(
           'INSERT INTO integration_events (id,owner_id,summary,slug,account_id,trigger_id,provider_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING',
           [
@@ -2678,6 +2833,8 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     binding,
     activitySources,
     readActivity,
+    watchable,
+    watchState,
     execute,
     executeApproved,
     prepare,
@@ -2808,7 +2965,9 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           throw new IntegrationError('Discovered connections are unavailable.', 503);
         return options.discovered.propose(proposal, turn);
       }
-      const slug = slugSchema.parse(service);
+      const slug = slugSchema.parse(service === retiredNotionMcp ? 'notion' : service);
+      if (service === retiredNotionMcp && connectionId)
+        throw new IntegrationError(retiredNotionMessage, 409);
       if (officialMcp.has(slug)) {
         if (!options.discovered)
           throw new IntegrationError('Discovered connections are unavailable.', 503);

@@ -2,6 +2,162 @@
 
 Releases from before the rename to Nod are the `desktop-v*` [GitHub releases](https://github.com/n8n-io/nod/releases).
 
+## 0.6.2 - 2026-11-11
+
+### Features
+
+- **analytics:** Measure onboarding and first-week use. [#664](https://github.com/n8n-io/nod/pull/664) (b3c7db9)
+- Capture consented Nod onboarding profiles in Customer.io. [#667](https://github.com/n8n-io/nod/pull/667) (776ddbe)
+- **onboarding:** Separate unsubscribing from unlinking the email. [#680](https://github.com/n8n-io/nod/pull/680) (67f4090)
+- **chat:** Hand the thinking line straight to the reply. [#675](https://github.com/n8n-io/nod/pull/675) (9e569d1)
+- **desktop:** Use GitHub Releases for public upgrades. [commit](https://github.com/n8n-io/nod/commit/9ee0e17772a59cc339687cbc893caba99735d215) (9ee0e17)
+- **privacy:** Apply Legal's compromise consent wording. [#670](https://github.com/n8n-io/nod/pull/670) (83141a3)
+- **legal:** Link the Nod Terms of Use and save the exact consent wording. [#666](https://github.com/n8n-io/nod/pull/666) (f7e50c8)
+- **landing:** Render text with antialiased font smoothing. [#669](https://github.com/n8n-io/nod/pull/669) (8b9fb85)
+- **landing:** Make header labels plain text and let the unmute button fade. [#668](https://github.com/n8n-io/nod/pull/668) (e138f1c)
+
+### Fixes
+
+- **proactivity:** Keep app changes visible to screening. [#681](https://github.com/n8n-io/nod/pull/681) (f5c63e1)
+- **landing:** Restore brand pink and simplify benchmark cards. [#684](https://github.com/n8n-io/nod/pull/684) (cece17f)
+- **chat:** Preserve pasted text before Nod sees it (LAB-886). [#674](https://github.com/n8n-io/nod/pull/674) (ec9ee60)
+- **schedules:** Describe stopped schedules as paused. [#673](https://github.com/n8n-io/nod/pull/673) (2baf9b8)
+- Keep question choices visible after absorbed follow-ups (LAB-913). [#671](https://github.com/n8n-io/nod/pull/671) (fc33735)
+- **landing:** Tidy the page on phones and match the social image to the tagline. [#672](https://github.com/n8n-io/nod/pull/672) (711b4b7)
+
+### Performance
+
+- Stream memory replies and cut reminder and calendar round trips. [#655](https://github.com/n8n-io/nod/pull/655) (d5e7ae2)
+
+### Documentation
+
+- Simplify the README into one story. [#685](https://github.com/n8n-io/nod/pull/685) (fe9faf8)
+- Explain benchmark results and evaluation methods. [#683](https://github.com/n8n-io/nod/pull/683) (ffbc936)
+- Turn the README into a launch page with every benchmark. [#678](https://github.com/n8n-io/nod/pull/678) (b6c5f17)
+- Refresh README and scope checks to each change. [#677](https://github.com/n8n-io/nod/pull/677) (70c11ad)
+
+<details>
+<summary>Maintenance (1 changes)</summary>
+
+- Allow the public PostHog token in posthog-host.json. [#679](https://github.com/n8n-io/nod/pull/679) (e91aea2)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.6.1...b3c7db9f23800e8a8e2cdbff8cb2fa76bd568ec7)
+
+<details>
+<summary>Build details</summary>
+
+Source: `b3c7db9f23800e8a8e2cdbff8cb2fa76bd568ec7`
+Previous release: `nod-v0.6.1`
+
+</details>
+
+## 0.6.1 - 2026-11-10
+
+### Features
+
+- **landing:** Load Google Tag Manager on nod.n8n.io. [#662](https://github.com/n8n-io/nod/pull/662) (ac9a1f3)
+- **landing:** Match the social image to the new headline. [#663](https://github.com/n8n-io/nod/pull/663) (44d780f)
+- **landing:** Put Nod in the headline and polish the page. [#661](https://github.com/n8n-io/nod/pull/661) (c1e3f0b)
+- **landing:** Pick each visitor's installer and refresh the social image. [#660](https://github.com/n8n-io/nod/pull/660) (4ce2c1e)
+- **landing:** Ship the new nod.n8n.io landing page. [#659](https://github.com/n8n-io/nod/pull/659) (0790b6a)
+- **onboarding:** Put the usage data note in About you's opening message. [commit](https://github.com/n8n-io/nod/commit/5140548e4c8086d43d4a50c6fb47f068a6668e9b) (5140548)
+- **privacy:** Apply Legal's in-app data texts for launch. [commit](https://github.com/n8n-io/nod/commit/ee4bdca74666edefdd8c6438398e42f0fc0ae147) (ee4bdca)
+- **chat:** Make the live line clearer while Nod works. [commit](https://github.com/n8n-io/nod/commit/755189b90c45ee99b03d109a541f167085db8ba0) (755189b)
+
+### Fixes
+
+- Cap automatic selection latency. [#640](https://github.com/n8n-io/nod/pull/640) (0bf56a2)
+- **feedback:** Reconcile uncertain submissions. [#643](https://github.com/n8n-io/nod/pull/643) (339e908)
+- Clarify model quota and rate limit failures. [#641](https://github.com/n8n-io/nod/pull/641) (3d6aa64)
+- Preserve null diagnostic report fields. [#652](https://github.com/n8n-io/nod/pull/652) (807be28)
+- **runtime:** Deliver long research results as Markdown files. [#645](https://github.com/n8n-io/nod/pull/645) (a482e99)
+- Retire stale schedule confirmations (LAB-795). [#647](https://github.com/n8n-io/nod/pull/647) (ca4c240)
+- **apps:** Route Notion MCP to its official connection. [#644](https://github.com/n8n-io/nod/pull/644) (3e9b25e)
+- **browser:** Copy selected text from handoff (LAB-855). [#649](https://github.com/n8n-io/nod/pull/649) (4322530)
+- **pi:** Recover incomplete assistant blocks. [#646](https://github.com/n8n-io/nod/pull/646) (a6235a2)
+- Point task rules to Chat. [#648](https://github.com/n8n-io/nod/pull/648) (ccc23eb)
+- **chat:** Address review on the live line and task dots. [commit](https://github.com/n8n-io/nod/commit/229a62451216e7213808ae984d37856d9fbdda05) (229a624)
+
+### Performance
+
+- Cut background model spend and show it in Usage. [#656](https://github.com/n8n-io/nod/pull/656) (f9808ea)
+- **integrations:** Narrow connected app discovery. [#651](https://github.com/n8n-io/nod/pull/651) (828a73e)
+
+### Documentation
+
+- Show the OpenSSF Best Practices badge. [#658](https://github.com/n8n-io/nod/pull/658) (26eb290)
+- Point every link at nod.n8n.io. [#653](https://github.com/n8n-io/nod/pull/653) (9f3de9f)
+
+<details>
+<summary>Maintenance (1 changes)</summary>
+
+- Add OpenSSF Best Practices answers. [#657](https://github.com/n8n-io/nod/pull/657) (18851d6)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.6.0...f9808ea0a6276a7f84157bf78ad22bb62d9de621)
+
+<details>
+<summary>Build details</summary>
+
+Source: `f9808ea0a6276a7f84157bf78ad22bb62d9de621`
+Previous release: `nod-v0.6.0`
+
+</details>
+
+## 0.6.0 - 2026-11-09
+
+### Features
+
+- **onboarding:** Add About you and Join us steps. [#596](https://github.com/n8n-io/nod/pull/596) (94fee2e)
+- Show that Nod is working at every moment. [#630](https://github.com/n8n-io/nod/pull/630) (78fa31c)
+- **onboarding:** Explain how Nod uses your data. [#629](https://github.com/n8n-io/nod/pull/629) (7fcb5de)
+
+### Fixes
+
+- Require owner-stated names in replies. [#634](https://github.com/n8n-io/nod/pull/634) (1da121a)
+- **desktop:** Keep Nod on screen through an update and reopen it as it was. [#637](https://github.com/n8n-io/nod/pull/637) (d4ab29c)
+- **pi:** Distinguish full-context cutoffs. [commit](https://github.com/n8n-io/nod/commit/3d053c4ceeb587f9d1085af309cb1b710ce30b4e) (3d053c4)
+- **browser:** Make task browser handoffs easy to find. [#632](https://github.com/n8n-io/nod/pull/632) (ba940dc)
+- Answer before compacting and say what questions are for. [#631](https://github.com/n8n-io/nod/pull/631) (3642fe2)
+- **ci:** Verify Mac fixtures with pinned Electron checksums. [commit](https://github.com/n8n-io/nod/commit/cca91048e8bc36cfd8ecfb32fddf1b2508b3ff14) (cca9104)
+- **deps:** Adapt schema and speech APIs for dependency updates. [commit](https://github.com/n8n-io/nod/commit/36ea031e36de78428120d1c6d914cae9550e5267) (36ea031)
+- **runtime:** Keep browser and tool state consistent. [commit](https://github.com/n8n-io/nod/commit/3fae2e06ad5b0565677983de13f645db28bfebdf) (3fae2e0)
+
+### Documentation
+
+- Lead the privacy page with an example of what Nod shares. [#633](https://github.com/n8n-io/nod/pull/633) (eaf8590)
+
+<details>
+<summary>Maintenance (12 changes)</summary>
+
+- **pi:** Reproduce full-context continue loop. [commit](https://github.com/n8n-io/nod/commit/d232ac36dd4053e756c45c30ef4e5c56c4934aa4) (d232ac3)
+- **deps:** Bump typebox from 1.3.27 to 1.4.4. [commit](https://github.com/n8n-io/nod/commit/29241c5e25010a3e2a0ca737885728d2236be50b) (29241c5)
+- **deps:** Bump @fastify/multipart from 10.1.4 to 10.1.7. [commit](https://github.com/n8n-io/nod/commit/9360edbd92a449cec2c652b0ca86cf8f6d8aa1eb) (9360edb)
+- **deps-dev:** Bump the tailwindcss group across 1 directory with 2 updates. [commit](https://github.com/n8n-io/nod/commit/8ccd8827a0201c60a4d8f85a0e5b266abbc528ec) (8ccd882)
+- **deps:** Bump the chat-sdk group across 1 directory with 4 updates. [commit](https://github.com/n8n-io/nod/commit/5e742f16e8939a6057f91b13a83cde2b92949df4) (5e742f1)
+- **deps-dev:** Bump the tiptap group across 1 directory with 9 updates. [commit](https://github.com/n8n-io/nod/commit/235fa186e2ddec340bb8f611fb503a5e8d551547) (235fa18)
+- **deps:** Bump the pi group across 1 directory with 2 updates. [commit](https://github.com/n8n-io/nod/commit/d89e4aa8e344cc1824971c44a26f190550f7fa2b) (d89e4aa)
+- **deps:** Bump the actions group with 4 updates. [commit](https://github.com/n8n-io/nod/commit/3082d09819a8c6e24b12c9540b0f20fcad2acd2d) (3082d09)
+- **deps-dev:** Bump @napi-rs/canvas from 1.0.10 to 1.1.0. [commit](https://github.com/n8n-io/nod/commit/d76a65b0c57969a0373e89148d5f65c83365668f) (d76a65b)
+- **deps:** Bump @audio/decode-webm from 1.4.1 to 1.6.1. [commit](https://github.com/n8n-io/nod/commit/0042c4304695850d16c8766e7443447eda197ef8) (0042c43)
+- **deps:** Bump @huggingface/transformers from 3.8.1 to 4.3.2. [commit](https://github.com/n8n-io/nod/commit/62c850ae60e8508055c062ac0b3246ba68eccc78) (62c850a)
+- **deps:** Bump jose from 6.2.13 to 6.2.14. [commit](https://github.com/n8n-io/nod/commit/7cd90439e83f12245115077d7ff61c07512919c7) (7cd9043)
+
+</details>
+
+[Full changelog](https://github.com/n8n-io/nod/compare/nod-v0.5.2...94fee2e6a7dfdf6b278f1573f382a09eb5ac2e24)
+
+<details>
+<summary>Build details</summary>
+
+Source: `94fee2e6a7dfdf6b278f1573f382a09eb5ac2e24`
+Previous release: `nod-v0.5.2`
+
+</details>
+
 ## 0.5.2 - 2026-11-08
 
 ### Features

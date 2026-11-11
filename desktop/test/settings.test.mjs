@@ -46,6 +46,7 @@ import { createMacEncryption } from '../main/mac-encryption.mjs';
 import { waitFor } from '../runtime/index.mjs';
 import { appOpenPath } from '../main/app-links.mjs';
 import appPages from '../../src/shared/app-pages.json' with { type: 'json' };
+import posthogHost from '../../src/shared/posthog-host.json' with { type: 'json' };
 
 test('setup resources cannot read other origins or local files', () => {
   assert.equal(setupResource('nod-setup://app/index.html?firstSetup=true'), 'index.html');
@@ -430,12 +431,17 @@ async function runningDesktop(
     environment = {},
     platform = process.platform === 'win32' ? 'win32' : 'darwin',
     packaged = false,
+    existingProfileRoot = false,
     buildMetadata,
+    nativeMetadataRead = () => {},
+    nativeAnalyticsResponse = () => Response.json({ status: 'Ok' }),
     version = '0.0.0-test',
     argv = [],
     prompt = () => assert.fail('No restart prompt is needed.'),
     reveal = () => assert.fail('No file should be revealed.'),
     openExternal,
+    quitAndInstall = () => assert.fail('No update should install.'),
+    displays = [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }],
   } = {},
 ) {
   const storage = storedProfile
@@ -449,8 +455,11 @@ async function runningDesktop(
     });
     await storage.store.save({ notifications: false, launchAtLogin: false });
   }
+  if (packaged && (existingProfileRoot || storedProfile || initialState !== 'fresh'))
+    await mkdir(join(dirname(storage.path), 'nod', 'profiles', 'local'), { recursive: true });
   const windows = [];
   const children = [];
+  const nativeAnalytics = [];
   const helpers = [];
   const paths = new Map();
   const handlers = new Map();
@@ -462,6 +471,7 @@ async function runningDesktop(
   const notifications = [];
   const appEvents = new EventEmitter();
   const externalURLs = [];
+  const trashed = [];
   const updateMenu = {};
   const restartMenu = {};
   const ipc = Object.assign(new EventEmitter(), {
@@ -475,6 +485,7 @@ async function runningDesktop(
   const fromPartition = (partition) => {
     if (!appSessions.has(partition)) {
       const appSession = Object.assign(new EventEmitter(), {
+        flushStorageData() {},
         setPermissionCheckHandler: (handler) => {
           permissionCheck = handler;
           appSession.permissionCheck = handler;
@@ -497,10 +508,13 @@ async function runningDesktop(
     return appSessions.get(partition);
   };
   const context = {
-    readFileSync: () => JSON.stringify(appPages),
+    readFileSync: (path) =>
+      JSON.stringify(path.endsWith('posthog-host.json') ? posthogHost : appPages),
     appOpenPath,
     app: {
       on: (name, listener) => appEvents.on(name, listener),
+      once: (name, listener) => appEvents.once(name, listener),
+      removeListener: (name, listener) => appEvents.removeListener(name, listener),
       isPackaged: packaged,
       commandLine: { removeSwitch() {} },
       setName() {},
@@ -540,7 +554,14 @@ async function runningDesktop(
       resourcesPath: dirname(storage.path),
     },
     ipcMain: ipc,
+    autoUpdater: Object.assign(new EventEmitter(), {
+      quitAndInstall() {
+        quitAndInstall();
+        appEvents.emit('before-quit', { preventDefault() {} });
+      },
+    }),
     session: { fromPartition },
+    screen: { getAllDisplays: () => displays },
     protocol: { registerSchemesAsPrivileged() {} },
     dialog: { showMessageBox: async (options) => prompt(options) },
     Menu: {
@@ -549,6 +570,10 @@ async function runningDesktop(
       }),
     },
     shell: {
+      trashItem: async (path) => {
+        if (path.includes('locked')) throw new Error('Synthetic locked file');
+        trashed.push(path);
+      },
       showItemInFolder: reveal,
       openExternal: async (url) => {
         externalURLs.push(url);
@@ -567,7 +592,9 @@ async function runningDesktop(
     appendFile,
     readFile: (file, ...args) =>
       buildMetadata && file === fileURLToPath(new URL('../package.json', import.meta.url))
-        ? Promise.resolve(JSON.stringify({ nodBuild: buildMetadata }))
+        ? Promise.resolve(nativeMetadataRead()).then(() =>
+            JSON.stringify({ nodBuild: buildMetadata }),
+          )
         : readFile(file, ...args),
     open: openFile,
     rename,
@@ -582,7 +609,13 @@ async function runningDesktop(
     Date,
     setTimeout,
     clearTimeout,
-    fetch: request,
+    fetch: (resource, options) => {
+      if (String(resource) === `${posthogHost.host}/i/v0/e/`) {
+        nativeAnalytics.push(JSON.parse(options.body));
+        return nativeAnalyticsResponse(resource, options);
+      }
+      return request(resource, options);
+    },
     createSettingsStore: () => storage.store,
     createMacEncryption,
     serverOrigin,
@@ -711,6 +744,13 @@ async function runningDesktop(
       isMinimized() {
         return this.minimized === true;
       }
+      isMaximized() {
+        return this.maximized === true;
+      }
+      maximize() {
+        this.maximized = true;
+        this.visible = true;
+      }
       loadURL(url) {
         const setup = setupResource(url) === 'index.html';
         if (setup) {
@@ -822,6 +862,8 @@ async function runningDesktop(
       close: async () => { quitting = true; await lifecycle.close(); },
       profileRoot,
       profileOwner,
+      nativeOpening: () => freshAppOpenCapture,
+      captureStartupPath,
       showEngine,
       showSettings,
       replayOnboarding,
@@ -833,6 +875,7 @@ async function runningDesktop(
       checkUpdates: (updater, manual = true, restartReady = false) => { updates = updater; return checkForUpdates(manual, restartReady); },
       registerFiles: () => { ${source.slice(source.indexOf('      disposeArtifactFiles = registerArtifactFileHandlers('), source.indexOf("      ipcMain.handle('nod:renderer-ready'"))} },
       quit,
+      restartForUpdate,
       crash: () => { engine = undefined; enginePreferencesReady = false; },
     };
     })()`,
@@ -843,11 +886,13 @@ async function runningDesktop(
     openLink: (value) => appEvents.emit('open-url', { preventDefault() {} }, value),
     windows,
     children,
+    nativeAnalytics,
     helpers,
     storage,
     handlers,
     notifications,
     externalURLs,
+    trashed,
     rendererReady,
     updateMenu,
     restartMenu,
@@ -914,6 +959,372 @@ test('the normal engine uses the release boundary for analytics during first set
           assert.ok(
             f.children.every((child) => child.environment.NOD_ANALYTICS_ENABLED === 'false'),
           );
+      } finally {
+        await f.close();
+      }
+    });
+  }
+});
+
+test('fresh packaged Welcome captures one bounded opening and preserves an uncertain send for the app', async (t) => {
+  for (const accepted of [true, false]) {
+    await t.test(accepted ? 'accepted' : 'offline', async (t) => {
+      const f = await runningDesktop(
+        t,
+        async (url) =>
+          Response.json(
+            new URL(url).pathname === '/api/account'
+              ? { settings: { usageData: true } }
+              : { ok: true },
+          ),
+        {
+          initialState: 'fresh',
+          allowStart: true,
+          packaged: true,
+          buildMetadata: { release: true },
+          version: '0.1.17',
+          nativeAnalyticsResponse: accepted
+            ? undefined
+            : async () => {
+                throw new Error('Synthetic offline capture');
+              },
+        },
+      );
+      try {
+        await f.launch();
+        for (let attempt = 0; !f.nativeAnalytics.length && attempt < 100; attempt++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(f.nativeAnalytics.length, 1);
+        const event = f.nativeAnalytics[0];
+        assert.equal(event.api_key, posthogHost.key);
+        assert.equal(event.event, 'app_opened');
+        assert.match(event.distinct_id, /^local:[0-9a-f-]{36}$/);
+        assert.equal(event.properties.analytics_schema, posthogHost.schemaVersion);
+        assert.equal(event.properties.environment, 'production');
+        assert.equal(event.properties.surface, 'desktop');
+        assert.equal(event.properties.app_version, '0.1.17');
+        assert.equal(event.properties.entry, 'native_setup');
+        assert.equal(event.properties.server_connection_telemetry_available, true);
+        assert.equal(event.properties.$geoip_disable, true);
+        assert.equal(event.properties.$process_person_profile, false);
+        assert.deepEqual(
+          Object.keys(event.properties).sort(),
+          [
+            '$current_url',
+            '$geoip_disable',
+            '$host',
+            '$pathname',
+            '$process_person_profile',
+            'analytics_schema',
+            'app_version',
+            'entry',
+            'environment',
+            'route',
+            'server_connection_telemetry_available',
+            'surface',
+          ].sort(),
+        );
+        let setup = f.windows[0];
+        let setupEvent = {
+          sender: setup.webContents,
+          senderFrame: setup.webContents.mainFrame,
+        };
+        if (accepted) {
+          await f.handlers.get('nod:connection:open')(setupEvent);
+          const server = f.windows.at(-1);
+          assert.notEqual(server, setup);
+          f.handlers.get('nod:connection:close')({
+            sender: server.webContents,
+            senderFrame: server.webContents.mainFrame,
+          });
+          setup = f.windows.at(-1);
+          assert.notEqual(setup, server);
+          setupEvent = {
+            sender: setup.webContents,
+            senderFrame: setup.webContents.mainFrame,
+          };
+          await f.handlers.get('nod:settings:save')(setupEvent, {
+            welcome: { usageData: true, continued: false },
+          });
+          await waitFor(
+            () => {
+              const paths = f.nativeAnalytics
+                .filter((item) => item.event === 'startup_path_selected')
+                .map((item) => item.properties.path);
+              assert.deepEqual(paths, ['remote', 'welcome', 'local']);
+              return paths;
+            },
+            { attempts: 40, interval: 10 },
+          );
+          assert.ok(f.nativeAnalytics.every((item) => item.distinct_id === event.distinct_id));
+        }
+        await f.handlers.get('nod:settings:save')(setupEvent, {
+          welcome: { usageData: true, continued: true },
+        });
+        await f.prepare();
+        const engine = f.windows.find((window) => window.url?.startsWith('http://'));
+        assert.ok(engine);
+        const engineEvent = {
+          sender: engine.webContents,
+          senderFrame: engine.webContents.mainFrame,
+        };
+        const take = f.handlers.get('nod:analytics:opening');
+        await assert.rejects(take(setupEvent, true, event.distinct_id));
+        const opening = await take(engineEvent, true, event.distinct_id);
+        if (accepted) assert.equal(opening, null);
+        else {
+          assert.equal(opening.uuid, event.uuid);
+          assert.equal(opening.openedAt, new Date(event.timestamp).getTime());
+          assert.equal(opening.entry, 'native_setup');
+          assert.equal(opening.serverConnectionTelemetryAvailable, true);
+          assert.deepEqual(await take(engineEvent, true, event.distinct_id), opening);
+          await take(engineEvent, false, null);
+          const enabledAt = Date.now();
+          const resumed = await take(engineEvent, true, event.distinct_id);
+          assert.equal(resumed.entry, 'app_ui');
+          assert.equal(resumed.serverConnectionTelemetryAvailable, undefined);
+          assert.ok(resumed.openedAt >= enabledAt);
+          assert.notEqual(resumed.uuid, event.uuid);
+        }
+        if (accepted) {
+          const beforeSettings = f.nativeAnalytics.length;
+          await f.showConnectionSettings();
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          assert.equal(f.nativeAnalytics.length, beforeSettings);
+        }
+        assert.equal(f.nativeAnalytics.filter((item) => item.event === 'app_opened').length, 1);
+      } finally {
+        await f.close();
+      }
+    });
+  }
+});
+
+test('opting out on Welcome stops later startup path events', async (t) => {
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    initialState: 'fresh',
+    packaged: true,
+    buildMetadata: { release: true },
+    version: '0.1.17',
+  });
+  try {
+    await f.launch();
+    await waitFor(
+      () => {
+        assert.equal(f.nativeAnalytics.length, 1);
+        return f.nativeAnalytics[0];
+      },
+      { attempts: 40, interval: 10 },
+    );
+    const setup = f.windows[0];
+    const setupEvent = {
+      sender: setup.webContents,
+      senderFrame: setup.webContents.mainFrame,
+    };
+    await f.handlers.get('nod:settings:save')(setupEvent, {
+      welcome: { usageData: false, continued: false },
+    });
+    await f.handlers.get('nod:connection:open')(setupEvent);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(
+      f.nativeAnalytics.map((item) => item.event),
+      ['app_opened'],
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test(
+  'native opening and path captures stop when Welcome opts out during metadata loading',
+  { timeout: 15_000 },
+  async (t) => {
+    for (const event of ['app_opened', 'startup_path_selected']) {
+      await t.test(event, async (t) => {
+        const metadata = deferred();
+        const loading = deferred();
+        let metadataReads = 0;
+        const f = await runningDesktop(
+          t,
+          async (url) =>
+            Response.json(
+              new URL(url).pathname === '/api/account'
+                ? { settings: { usageData: true } }
+                : { ok: true },
+            ),
+          {
+            initialState: 'fresh',
+            allowStart: true,
+            packaged: true,
+            buildMetadata: { release: true },
+            version: '0.1.17',
+            existingProfileRoot: event === 'startup_path_selected',
+            nativeMetadataRead: () => {
+              if (++metadataReads === 1) return;
+              loading.resolve();
+              return metadata.promise;
+            },
+          },
+        );
+        try {
+          if (event === 'startup_path_selected')
+            await f.storage.store.save({ welcome: { usageData: true, continued: false } });
+          await f.launch();
+          const capture =
+            event === 'app_opened' ? f.nativeOpening() : f.captureStartupPath('remote');
+          await loading.promise;
+          if (event === 'app_opened') {
+            const setup = f.windows[0];
+            await f.handlers.get('nod:settings:save')(
+              { sender: setup.webContents, senderFrame: setup.webContents.mainFrame },
+              { welcome: { usageData: false, continued: false } },
+            );
+          } else await f.storage.store.save({ welcome: { usageData: false, continued: false } });
+          metadata.resolve();
+          await capture;
+          assert.deepEqual(f.nativeAnalytics, []);
+          if (event === 'app_opened') {
+            const enabledAt = Date.now();
+            const setup = f.windows[0];
+            await f.handlers.get('nod:settings:save')(
+              { sender: setup.webContents, senderFrame: setup.webContents.mainFrame },
+              { welcome: { usageData: true, continued: true } },
+            );
+            await f.prepare();
+            const engine = f.windows.find((window) => window.url?.startsWith('http://'));
+            assert.ok(engine);
+            const distinctId = `local:${(await readFile(join(f.profileRoot, 'analytics-id'), 'utf8')).trim()}`;
+            const opening = await f.handlers.get('nod:analytics:opening')(
+              { sender: engine.webContents, senderFrame: engine.webContents.mainFrame },
+              true,
+              distinctId,
+            );
+            assert.equal(opening.entry, 'app_ui');
+            assert.ok(opening.openedAt >= enabledAt);
+          }
+        } finally {
+          metadata.resolve();
+          await f.close();
+        }
+      });
+    }
+  },
+);
+
+test('a later local choice replaces an earlier remote startup path under the same ID', async (t) => {
+  const options = {
+    initialState: 'fresh',
+    packaged: true,
+    buildMetadata: { release: true },
+    version: '0.1.17',
+  };
+  const first = await runningDesktop(t, async () => Response.json({ ok: true }), options);
+  let distinctId;
+  try {
+    await first.launch();
+    await waitFor(
+      () => {
+        const opened = first.nativeAnalytics.find((item) => item.event === 'app_opened');
+        assert.ok(opened);
+        distinctId = opened.distinct_id;
+        return opened;
+      },
+      { attempts: 40, interval: 10 },
+    );
+    const setup = first.windows[0];
+    await first.handlers.get('nod:connection:open')({
+      sender: setup.webContents,
+      senderFrame: setup.webContents.mainFrame,
+    });
+    await waitFor(
+      () => {
+        const remote = first.nativeAnalytics.find((item) => item.event === 'startup_path_selected');
+        assert.equal(remote?.properties.path, 'remote');
+        return remote;
+      },
+      { attempts: 40, interval: 10 },
+    );
+  } finally {
+    await first.close();
+  }
+
+  const second = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    ...options,
+    storedProfile: first.storage,
+  });
+  try {
+    await second.launch();
+    const setup = second.windows[0];
+    await second.handlers.get('nod:settings:save')(
+      { sender: setup.webContents, senderFrame: setup.webContents.mainFrame },
+      { welcome: { usageData: true, continued: false } },
+    );
+    await waitFor(
+      () => {
+        const local = second.nativeAnalytics.find((item) => item.event === 'startup_path_selected');
+        assert.equal(local?.properties.path, 'local');
+        return local;
+      },
+      { attempts: 40, interval: 10 },
+    );
+    assert.equal(second.nativeAnalytics.length, 1);
+    assert.equal(second.nativeAnalytics[0].distinct_id, distinctId);
+  } finally {
+    await second.close();
+  }
+});
+
+test('native first open waits for consent on disabled and returning profiles', async (t) => {
+  for (const scenario of [
+    { name: 'disabled', environment: { NOD_ANALYTICS_ENABLED: 'false' } },
+    { name: 'injected ID', environment: { NOD_ANALYTICS_ID: randomUUID() } },
+    { name: 'prior profile root', existingProfileRoot: true },
+    {
+      name: 'returning opted-out profile',
+      existingProfileRoot: true,
+      persistedWelcome: { usageData: false, continued: true },
+    },
+    { name: 'isolated test install', buildMetadata: { release: true, testProfile: true } },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const f = await runningDesktop(
+        t,
+        async (url) =>
+          Response.json(
+            new URL(url).pathname === '/api/account'
+              ? { settings: { usageData: false } }
+              : { ok: true },
+          ),
+        {
+          initialState: 'fresh',
+          allowStart: true,
+          packaged: true,
+          buildMetadata: { release: true },
+          version: '0.1.17',
+          ...scenario,
+        },
+      );
+      try {
+        if (scenario.persistedWelcome)
+          await f.storage.store.save({ welcome: scenario.persistedWelcome });
+        await f.launch();
+        await f.prepare();
+        assert.equal(f.nativeAnalytics.length, 0);
+        if (scenario.name === 'returning profile') {
+          f.showEngine();
+          const engine = f.windows.find((window) => window.url?.startsWith('http://'));
+          assert.ok(engine);
+          const engineEvent = {
+            sender: engine.webContents,
+            senderFrame: engine.webContents.mainFrame,
+          };
+          const take = f.handlers.get('nod:analytics:opening');
+          assert.equal(await take(engineEvent, false, null), null);
+          const enabledAt = Date.now();
+          const opening = await take(engineEvent, true, 'local:' + randomUUID());
+          assert.equal(opening.entry, 'app_ui');
+          assert.ok(opening.openedAt >= enabledAt);
+        }
       } finally {
         await f.close();
       }
@@ -1119,7 +1530,9 @@ test('local selection shows startup progress and hands off to app onboarding bef
         assert.equal(choices.length, 0);
         return;
       }
-      page.window.document.querySelector('[data-step="welcome"] button').click();
+      [...page.window.document.querySelectorAll('[data-step="welcome"] button')]
+        .find((button) => button.textContent === 'Get started')
+        .click();
       await settle(() => choices.length >= 1 && calls.length >= 1);
       assert.deepEqual(JSON.parse(JSON.stringify(choices[0])), {
         usageData: true,
@@ -1714,7 +2127,8 @@ test('native windows wait for owned renderer readiness before replacing startup'
         await f.storage.store.save({ welcome: { usageData: false, continued: true } });
       try {
         const launched = f.launch();
-        for (let i = 0; !f.windows.length && i < 50; i++) await new Promise(setImmediate);
+        for (let i = 0; !f.windows.length && i < 100; i++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
         const setup = f.windows[0];
         assert.ok(setup);
         assert.equal(setup.isVisible(), false);
@@ -2695,6 +3109,80 @@ test('quit removes temporary files and stops downloads before the updater can qu
     });
 });
 
+test('an update restart keeps Nod on screen and reopens it as it was', async (t) => {
+  for (const scenario of ['open', 'minimized', 'setup', 'closed', 'offscreen'])
+    await t.test(scenario, async (t) => {
+      let shown;
+      const request = async (url) =>
+        Response.json(
+          new URL(url).pathname === '/api/desktop/status' ? { running: [] } : { ok: true },
+        );
+      const f = await runningDesktop(t, request, {
+        allowStart: true,
+        platform: 'darwin',
+        quitAndInstall: () => {
+          shown = f.windows.filter((window) => window.isVisible());
+        },
+      });
+      t.after(() => f.close());
+      f.crash();
+      assert.equal((await f.prepare()).phase, 'ready');
+      f.showEngine();
+      await new Promise(setImmediate);
+      const chat = f.windows.at(-1);
+      assert.equal(chat.isVisible(), true);
+      chat.bounds = { x: scenario === 'offscreen' ? 4000 : 140, y: 90, width: 1000, height: 760 };
+      chat.maximized = true;
+      chat.webContents.mainFrame.url = `${new URL(chat.url).origin}/usage`;
+      let setup;
+      if (scenario === 'setup') {
+        f.showSettings('general', true);
+        await new Promise(setImmediate);
+        setup = f.windows.at(-1);
+        Object.assign(setup, { bounds: { ...chat.bounds }, maximized: true });
+      }
+      if (scenario === 'closed' || scenario === 'setup') chat.destroy();
+      if (scenario === 'minimized') chat.minimize();
+      await f.restartForUpdate();
+      assert.equal(f.children[0].killed, true);
+      assert.equal(f.status().phase, 'updating');
+      assert.equal(shown.length, 1);
+      if (scenario === 'closed') assert.equal(shown[0].path, '/index.html');
+      else assert.equal(shown[0], setup ?? chat);
+
+      const next = await runningDesktop(t, request, {
+        storedProfile: f.storage,
+        initialState: 'upgrade',
+        allowStart: true,
+        platform: 'darwin',
+      });
+      try {
+        await next.launch();
+        await next.settle();
+        assert.equal(next.children[0].port, f.children[0].port);
+        const reopened = next.windows.find((window) => window.url && window.isVisible());
+        assert.ok(reopened);
+        if (['open', 'minimized', 'setup'].includes(scenario)) {
+          assert.deepEqual(reopened.bounds, chat.bounds);
+          assert.equal(reopened.isMaximized(), true);
+          assert.deepEqual(
+            reopened.sent.find(([channel]) => channel === 'nod:navigate'),
+            scenario === 'setup' ? undefined : ['nod:navigate', '/usage'],
+          );
+        } else {
+          assert.deepEqual(reopened.bounds, { x: 0, y: 0, width: 1200, height: 860 });
+          assert.equal(reopened.isMaximized(), false);
+        }
+        assert.equal(
+          next.windows.some((window) => window.path && !window.isDestroyed()),
+          false,
+        );
+      } finally {
+        await next.close();
+      }
+    });
+});
+
 test('desktop proxy overrides reach only isolated source engines and retain origin validation', async (t) => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
   for (const scenario of [
@@ -2849,6 +3337,12 @@ test('packaged pages add their content policy without replacing server policy or
   );
   assert.equal(response.responseHeaders['content-security-policy'][0], original);
   assert.equal(response.responseHeaders['content-security-policy'].length, 2);
+  assert.equal(
+    response.responseHeaders['content-security-policy'][1]
+      .split('; ')
+      .find((directive) => directive.startsWith('connect-src')),
+    `connect-src 'self' ${new URL(posthogHost.host).origin}`,
+  );
   for (const url of [
     'https://other.example.test/',
     'http://127.0.0.1:4310/api/artifacts/synthetic',
@@ -3390,6 +3884,30 @@ test('the engine reaches 1Password only through a separate helper that may load 
   assert.equal(helper.killed, true);
 });
 
+test('the engine moves only absolute paths to the system Trash and hears the result', async (t) => {
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), { allowStart: true });
+  f.crash();
+  assert.equal((await f.prepare()).phase, 'ready');
+  const [engine] = f.children;
+  const replies = () =>
+    JSON.parse(
+      JSON.stringify(engine.sent.filter((message) => message?.type === 'nod-trash-result')),
+    );
+  engine.emit('message', {
+    type: 'nod-trash',
+    id: 'a',
+    path: '/Users/synthetic/Downloads/old.zip',
+  });
+  engine.emit('message', { type: 'nod-trash', id: 'b', path: 'relative/old.zip' });
+  engine.emit('message', { type: 'nod-trash', id: 'c', path: '/Users/synthetic/locked.txt' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.trashed, ['/Users/synthetic/Downloads/old.zip']);
+  assert.deepEqual(replies(), [
+    { type: 'nod-trash-result', id: 'a' },
+    { type: 'nod-trash-result', id: 'c', error: 'The item could not be moved to the Trash.' },
+  ]);
+});
+
 test('a stale engine cannot open a 1Password helper', async (t) => {
   const f = await runningDesktop(t, async () => Response.json({ ok: true }), { allowStart: true });
   f.crash();
@@ -3507,6 +4025,214 @@ test('a fresh desktop connects to a server without creating a local Vault, owner
     assert.equal(preparations, 0);
   } finally {
     await f.close();
+  }
+});
+
+test('verified server connections use the desktop ID and require both sharing gates', async (t) => {
+  for (const scenario of [
+    { name: 'sharing enabled', usageData: true, serverAnalytics: true, expected: true },
+    { name: 'server opt-out', usageData: false, serverAnalytics: true, expected: false },
+    {
+      name: 'older server without consent revision',
+      usageData: true,
+      serverAnalytics: true,
+      olderServer: true,
+      expected: false,
+    },
+    {
+      name: 'server collection disabled',
+      usageData: true,
+      serverAnalytics: false,
+      expected: false,
+    },
+    {
+      name: 'local Welcome opt-out',
+      usageData: true,
+      serverAnalytics: true,
+      localOptOut: true,
+      expected: false,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const url = 'https://assistant.example.test';
+      const token = randomBytes(32).toString('base64url');
+      const f = await runningDesktop(
+        t,
+        async () =>
+          Response.json({
+            user: { id: 'server-owner' },
+            settings: {
+              onboardingCompleted: true,
+              usageData: scenario.usageData,
+              ...(scenario.olderServer ? {} : { usageDataRevision: '1' }),
+            },
+            analytics: { enabled: scenario.serverAnalytics },
+          }),
+        {
+          initialState: 'fresh',
+          packaged: true,
+          buildMetadata: { release: true },
+          version: '0.1.17',
+          prepareRuntime: () => assert.fail('A remote client must not prepare a local runtime.'),
+        },
+      );
+      try {
+        await f.launch();
+        const opening = await waitFor(
+          () => {
+            const events = f.nativeAnalytics.filter((item) => item.event === 'app_opened');
+            assert.equal(events.length, 1);
+            return events[0];
+          },
+          { attempts: 40, interval: 10 },
+        );
+        await f.checkRemoteConnection({ url, token });
+        assert.equal(
+          f.nativeAnalytics.filter((item) => item.event === 'server_connection_verified').length,
+          0,
+        );
+        if (scenario.localOptOut) {
+          const setup = f.windows[0];
+          await f.handlers.get('nod:settings:save')(
+            { sender: setup.webContents, senderFrame: setup.webContents.mainFrame },
+            { welcome: { usageData: false, continued: false } },
+          );
+        }
+        await f.storage.store.saveConnection({ url, token });
+        assert.equal((await f.prepare()).phase, 'ready');
+        if (scenario.expected)
+          await waitFor(
+            () => {
+              assert.equal(
+                f.nativeAnalytics.filter((item) => item.event === 'server_connection_verified')
+                  .length,
+                1,
+              );
+              return true;
+            },
+            { attempts: 40, interval: 10 },
+          );
+        else await new Promise((resolve) => setTimeout(resolve, 50));
+        const verified = f.nativeAnalytics.filter(
+          (item) => item.event === 'server_connection_verified',
+        );
+        assert.equal(verified.length, scenario.expected ? 1 : 0);
+        if (!scenario.expected) return;
+        assert.equal(verified[0].api_key, posthogHost.key);
+        assert.equal(verified[0].distinct_id, opening.distinct_id);
+        assert.match(verified[0].distinct_id, /^local:[0-9a-f-]{36}$/);
+        assert.match(
+          verified[0].uuid,
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        assert.ok(new Date(verified[0].timestamp) >= new Date(opening.timestamp));
+        assert.deepEqual(Object.keys(verified[0]).sort(), [
+          'api_key',
+          'distinct_id',
+          'event',
+          'properties',
+          'timestamp',
+          'uuid',
+        ]);
+        assert.deepEqual(verified[0].properties, {
+          analytics_schema: posthogHost.schemaVersion,
+          environment: 'production',
+          surface: 'desktop',
+          app_version: '0.1.17',
+          route: '/server',
+          $current_url: 'https://app.example/server',
+          $pathname: '/server',
+          $host: 'app.example',
+          $process_person_profile: false,
+          $geoip_disable: true,
+        });
+      } finally {
+        await f.close();
+      }
+    });
+  }
+});
+
+test('server consent changes during native capture suppress a verified connection', async (t) => {
+  for (const scenario of [
+    { name: 'opt-out', finalSharing: false, finalRevision: '2' },
+    { name: 'opt-out then opt-in', finalSharing: true, finalRevision: '3' },
+  ]) {
+    await t.test(scenario.name, { timeout: 15_000 }, async (t) => {
+      const url = 'https://assistant.example.test';
+      const token = randomBytes(32).toString('base64url');
+      const loading = deferred();
+      const metadata = deferred();
+      let capturePending = false;
+      let serverSharing = true;
+      let usageDataRevision = '1';
+      const observedSessions = [];
+      const f = await runningDesktop(
+        t,
+        async (resource) => {
+          if (String(resource) === `${url}/api/session`)
+            observedSessions.push({ usageData: serverSharing, revision: usageDataRevision });
+          return Response.json({
+            user: { id: 'server-owner' },
+            settings: {
+              onboardingCompleted: true,
+              usageData: serverSharing,
+              usageDataRevision,
+            },
+            analytics: { enabled: true },
+          });
+        },
+        {
+          initialState: 'fresh',
+          packaged: true,
+          buildMetadata: { release: true },
+          version: '0.1.17',
+          prepareRuntime: () => assert.fail('A remote client must not prepare a local runtime.'),
+          nativeMetadataRead: () => {
+            if (!capturePending) return;
+            loading.resolve();
+            return metadata.promise;
+          },
+        },
+      );
+      try {
+        await f.launch();
+        await waitFor(
+          () => {
+            assert.equal(f.nativeAnalytics.filter((item) => item.event === 'app_opened').length, 1);
+            return true;
+          },
+          { attempts: 40, interval: 10 },
+        );
+        capturePending = true;
+        await f.storage.store.saveConnection({ url, token });
+        assert.equal((await f.prepare()).phase, 'ready');
+        await loading.promise;
+        assert.deepEqual(observedSessions, [{ usageData: true, revision: '1' }]);
+        serverSharing = scenario.finalSharing;
+        usageDataRevision = scenario.finalRevision;
+        metadata.resolve();
+        await waitFor(
+          () => {
+            assert.equal(observedSessions.length, 2);
+            return true;
+          },
+          { attempts: 40, interval: 10 },
+        );
+        assert.deepEqual(observedSessions[1], {
+          usageData: scenario.finalSharing,
+          revision: scenario.finalRevision,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(
+          f.nativeAnalytics.filter((item) => item.event === 'server_connection_verified').length,
+          0,
+        );
+      } finally {
+        metadata.resolve();
+        await f.close();
+      }
+    });
   }
 });
 
@@ -4929,7 +5655,7 @@ test('native preferences reject unsupported fields and invalid values before per
   assert.equal((await f.store.get()).preferences.locale, 'en-GB');
 });
 
-function updateReleaseFixture(sourceUrl, arch = 'arm64') {
+function updateReleaseFixture(sourceUrl, arch = 'arm64', redirectAssets = false) {
   const platform = `darwin-${arch}`;
   const name = (kind) => (arch === 'arm64' ? `${kind}.json` : `${kind}-darwin-x64.json`);
   const archive = {
@@ -4955,7 +5681,7 @@ function updateReleaseFixture(sourceUrl, arch = 'arm64') {
     id: 12,
     tag_name: 'nod-v0.2.0',
     draft: false,
-    prerelease: true,
+    prerelease: Boolean(sourceUrl),
     assets: [
       item(101, name('release'), 300),
       item(103, `nod-${arch}.zip`, 1000),
@@ -4977,33 +5703,35 @@ function updateReleaseFixture(sourceUrl, arch = 'arm64') {
     runtime,
     update: { file: `nod-${arch}.zip`, bytes: 1000, sha256: 'e'.repeat(64) },
   };
-  const base = sourceUrl || 'https://api.github.com/repos/n8n-io/nod';
+  const base = sourceUrl || 'https://github.com/n8n-io/nod/releases';
+  const direct = (tag, file) => `https://github.com/n8n-io/nod/releases/download/${tag}/${file}`;
+  const alias = `https://github.com/n8n-io/nod/releases/latest/download/${name('release')}`;
+  const redirects = new Map([[alias, direct(release.tag_name, name('release'))]]);
+  const feed = { url: direct(release.tag_name, `nod-${arch}.zip`), name: 'Nod 0.2.0' };
   const assetPath = (owner, entry) =>
-    sourceUrl
-      ? `${base}/releases/${owner.id}/assets/${entry.id}/${entry.name}`
-      : `${base}/releases/assets/${entry.id}`;
-  const values = new Map([
-    [
-      `${base}/releases${sourceUrl ? '' : '?per_page=100'}`,
-      [
-        { ...release, id: 11, tag_name: 'nod-v0.1.0' },
-        { ...release, id: 13, tag_name: 'nod-v9.0.0', draft: true },
-        { ...release, id: 14, tag_name: 'runtime-darwin-arm64-irrelevant' },
-        release,
-      ],
-    ],
-    [`${base}/releases/12`, release],
-    [`${base}/${sourceUrl ? 'tags' : 'releases/tags'}/${pack.tag_name}`, pack],
-    [assetPath(release, release.assets[0]), manifest],
-    [assetPath(release, release.assets[2]), runtime],
-    [
-      assetPath(release, release.assets[3]),
-      {
-        url: `https://github.com/n8n-io/nod/releases/download/nod-v0.2.0/nod-${arch}.zip`,
-        name: 'nod 0.2.0',
-      },
-    ],
-  ]);
+    `${base}/releases/${owner.id}/assets/${entry.id}/${entry.name}`;
+  const values = sourceUrl
+    ? new Map([
+        [
+          `${base}/releases`,
+          [
+            { ...release, id: 11, tag_name: 'nod-v0.1.0' },
+            { ...release, id: 13, tag_name: 'nod-v9.0.0', draft: true },
+            { ...release, id: 14, tag_name: 'runtime-darwin-arm64-irrelevant' },
+            release,
+          ],
+        ],
+        [`${base}/releases/12`, release],
+        [`${base}/tags/${pack.tag_name}`, pack],
+        [assetPath(release, release.assets[0]), manifest],
+        [assetPath(release, release.assets[2]), runtime],
+        [assetPath(release, release.assets[3]), feed],
+      ])
+    : new Map([
+        [direct(release.tag_name, name('release')), manifest],
+        [direct(release.tag_name, name('runtime-release')), runtime],
+        [direct(release.tag_name, name('update')), feed],
+      ]);
   const calls = [];
   const source = createUpdateSource({
     sourceUrl,
@@ -5011,12 +5739,31 @@ function updateReleaseFixture(sourceUrl, arch = 'arm64') {
     arch,
     fetch: async (url, options) => {
       calls.push(url);
-      assert.equal(options.headers.authorization, undefined);
+      assert.equal(options.headers?.authorization, undefined);
+      if (!sourceUrl) {
+        assert.equal(url.startsWith('https://api.github.com/'), false);
+        if (url === alias)
+          return new Response(null, {
+            status: 302,
+            headers: { location: redirects.get(alias) },
+          });
+      }
+      const cdn = 'https://release-assets.githubusercontent.com/fixture/';
+      if (redirectAssets && !sourceUrl && values.has(url))
+        return new Response(null, {
+          status: 302,
+          headers: { location: `${cdn}${encodeURIComponent(url)}` },
+        });
+      if (redirectAssets && !sourceUrl && url.startsWith(cdn)) {
+        const original = decodeURIComponent(url.slice(cdn.length));
+        assert.ok(values.has(original), `Unexpected release request ${url}`);
+        return Response.json(values.get(original));
+      }
       assert.ok(values.has(url), `Unexpected release request ${url}`);
       return Response.json(values.get(url));
     },
   });
-  return { source, calls, values, release, pack, runtime, manifest, base };
+  return { source, calls, values, release, pack, runtime, manifest, base, alias, redirects, feed };
 }
 
 test('desktop updates bind newer published releases and both source adapters to exact app and runtime assets', async () => {
@@ -5033,7 +5780,7 @@ test('desktop updates bind newer published releases and both source adapters to 
       candidate.downloadUrl,
       sourceUrl
         ? `${sourceUrl}/releases/18/assets/201/${f.runtime.archive.file}`
-        : 'https://api.github.com/repos/n8n-io/nod/releases/assets/201',
+        : `https://github.com/n8n-io/nod/releases/download/nod-v0.1.9/${f.runtime.archive.file}`,
     );
     assert.equal(
       candidate.feedUrl,
@@ -5045,27 +5792,141 @@ test('desktop updates bind newer published releases and both source adapters to 
     f.manifest.runtime = { ...f.runtime, id: 'f'.repeat(64) };
     await assert.rejects(f.source.latest('0.1.0'));
     f.manifest.runtime = f.runtime;
-    f.pack.assets[0].size++;
-    await assert.rejects(f.source.latest('0.1.0'));
-    f.pack.assets[0].size--;
-    f.release.assets[1].digest = `sha256:${'0'.repeat(64)}`;
-    await assert.rejects(f.source.latest('0.1.0'));
-    f.release.assets[1].digest = `sha256:${f.manifest.update.sha256}`;
-    f.release.assets.push({ ...f.release.assets[0], id: 999 });
-    await assert.rejects(f.source.latest('0.1.0'));
+    if (sourceUrl) {
+      f.pack.assets[0].size++;
+      await assert.rejects(f.source.latest('0.1.0'));
+      f.pack.assets[0].size--;
+      f.release.assets[1].digest = `sha256:${'0'.repeat(64)}`;
+      await assert.rejects(f.source.latest('0.1.0'));
+      f.release.assets[1].digest = `sha256:${f.manifest.update.sha256}`;
+      f.release.assets.push({ ...f.release.assets[0], id: 999 });
+      await assert.rejects(f.source.latest('0.1.0'));
+    } else {
+      f.manifest.runtime = { ...f.runtime, archive: { ...f.runtime.archive, bytes: 181 } };
+      await assert.rejects(f.source.latest('0.1.0'), /runtime does not match/);
+      f.manifest.runtime = f.runtime;
+      f.feed.name = 'Other 0.2.0';
+      await assert.rejects(f.source.latest('0.1.0'), /feed does not match/);
+    }
   }
 });
 
 test('an incomplete newest release falls back to the next newer complete release', async () => {
-  for (const sourceUrl of [undefined, 'https://updates.example.invalid/nod-desktop']) {
-    const f = updateReleaseFixture(sourceUrl);
-    const broken = { ...f.release, id: 15, tag_name: 'nod-v0.3.0', assets: [] };
-    f.values.get(`${f.base}/releases${sourceUrl ? '' : '?per_page=100'}`).push(broken);
-    f.values.set(`${f.base}/releases/15`, broken);
-    assert.equal((await f.source.latest('0.1.0')).version, '0.2.0');
-    f.release.assets = [];
-    await assert.rejects(f.source.latest('0.1.0'), /incomplete/);
+  const f = updateReleaseFixture('https://updates.example.invalid/nod-desktop');
+  const broken = { ...f.release, id: 15, tag_name: 'nod-v0.3.0', assets: [] };
+  f.values.get(`${f.base}/releases`).push(broken);
+  f.values.set(`${f.base}/releases/15`, broken);
+  assert.equal((await f.source.latest('0.1.0')).version, '0.2.0');
+  f.release.assets = [];
+  await assert.rejects(f.source.latest('0.1.0'), /incomplete/);
+
+  const publicRelease = updateReleaseFixture(undefined);
+  publicRelease.manifest.update.bytes = 0;
+  await assert.rejects(publicRelease.source.latest('0.1.0'), /incompatible/);
+});
+
+test('public GitHub metadata redirects resolve to verified Mac runtime and Windows installer downloads', async () => {
+  const mac = updateReleaseFixture(undefined, 'arm64', true);
+  const macUpdate = await mac.source.latest('0.1.0');
+  assert(mac.calls.includes(mac.alias));
+  assert(
+    mac.calls.includes('https://github.com/n8n-io/nod/releases/download/nod-v0.2.0/release.json'),
+  );
+  assert(
+    mac.calls.some((url) =>
+      url.startsWith('https://release-assets.githubusercontent.com/fixture/'),
+    ),
+  );
+  assert.equal(
+    macUpdate.downloadUrl,
+    `https://github.com/n8n-io/nod/releases/download/nod-v0.1.9/${mac.runtime.archive.file}`,
+  );
+  assert.equal(macUpdate.runtime.archive.bytes, mac.runtime.archive.bytes);
+  assert.equal(macUpdate.runtime.archive.sha256, mac.runtime.archive.sha256);
+  const native = new EventEmitter();
+  native.setFeedURL = () => {};
+  native.checkForUpdates = () =>
+    queueMicrotask(() => native.emit('update-downloaded', {}, '', 'Nod 0.2.0'));
+  const updater = createDesktopUpdater({
+    source: { latest: async () => macUpdate },
+    currentVersion: '0.1.0',
+    native,
+    prepareRuntime: async () => {},
+    restart: async () => {},
+  });
+  assert.equal((await updater.check()).version, '0.2.0');
+  updater.dispose();
+  mac.feed.name = 'nod 0.2.0';
+  assert.equal((await mac.source.latest('0.1.0')).version, '0.2.0');
+  for (const redirect of [
+    'https://attacker.invalid/n8n-io/nod/releases/download/nod-v0.2.0/release.json',
+    'https://github.com/other/nod/releases/download/nod-v0.2.0/release.json',
+    'https://github.com/n8n-io/nod/releases/download/other-v0.2.0/release.json',
+    'https://github.com/n8n-io/nod/releases/download/nod-v0.2.0/update.json',
+  ]) {
+    mac.redirects.set(mac.alias, redirect);
+    await assert.rejects(mac.source.latest('0.1.0'), /latest desktop release is invalid/);
   }
+  const intel = updateReleaseFixture(undefined, 'x64', true);
+  assert.equal((await intel.source.latest('0.1.0')).runtime.platform, 'darwin-x64');
+  assert(intel.calls.includes(intel.alias));
+  assert(intel.alias.endsWith('/release-darwin-x64.json'));
+
+  const base = 'https://github.com/n8n-io/nod/releases';
+  const tag = 'nod-v0.5.2';
+  const sha = 'e'.repeat(64);
+  const alias = `${base}/latest/download/release-win32-x64.json`;
+  const manifestUrl = `${base}/download/${tag}/release-win32-x64.json`;
+  const cdn = 'https://release-assets.githubusercontent.com/fixture/windows';
+  const manifest = {
+    version: '0.5.2',
+    platform: 'win32-x64',
+    source: 'a'.repeat(40),
+    installer: { file: 'nod-Setup-x64.exe', bytes: 600, sha256: sha },
+    runtime: { file: 'nod-Runtime-win32-x64.tar.gz', bytes: 700, sha256: sha },
+  };
+  const calls = [];
+  let redirect = manifestUrl;
+  const windows = createUpdateSource({
+    os: 'win32',
+    fetch: async (url, options) => {
+      calls.push([url, options.headers?.accept]);
+      assert.equal(url.startsWith('https://api.github.com/'), false);
+      if (url === alias)
+        return new Response(null, { status: 302, headers: { location: redirect } });
+      if (url === manifestUrl)
+        return new Response(null, {
+          status: 302,
+          headers: { location: cdn },
+        });
+      if (url === cdn) return Response.json(manifest);
+      assert.fail(`Unexpected release request ${url}`);
+    },
+  });
+  const update = await windows.latest('0.5.0');
+  assert(calls.some(([url]) => url === alias));
+  assert(
+    calls.some(([url, accept]) => url === manifestUrl && accept === 'application/octet-stream'),
+  );
+  assert(calls.some(([url]) => url === cdn));
+  assert.equal(update.installer.url, `${base}/download/${tag}/nod-Setup-x64.exe`);
+  assert.equal(update.runtime.url, `${base}/download/${tag}/nod-Runtime-win32-x64.tar.gz`);
+  assert.equal(update.installer.sha256, sha);
+  assert.equal(update.installer.bytes, 600);
+  assert.equal(update.runtime.sha256, sha);
+  assert.equal(update.runtime.bytes, 700);
+  assert.equal(
+    await windows.runtimeDownloadUrl({ releaseTag: tag, guest: { sha256: sha, bytes: 700 } }),
+    update.runtime.url,
+  );
+  manifest.installer.sha256 = 'invalid';
+  await assert.rejects(windows.latest('0.5.0'), /files do not match/);
+  manifest.installer.sha256 = sha;
+  manifest.runtime.bytes = 0;
+  await assert.rejects(windows.latest('0.5.0'), /files do not match/);
+  manifest.runtime.bytes = 700;
+  redirect = 'https://github.com/n8n-io/other/releases/download/nod-v0.5.2/release-win32-x64.json';
+  await assert.rejects(windows.latest('0.5.0'), /latest desktop release is invalid/);
 });
 
 test(
@@ -5251,6 +6112,7 @@ test('background update readiness respects notification permission and quiet tim
     );
     const confirmationCount = Number(scenario.enabled && scenario.supported);
     assert.equal(f.notifications.length, confirmationCount);
+    window.minimize();
     await f.checkUpdates(updater, false);
     await f.checkUpdates(updater, false);
     assert.equal(prompts.length, 0);
@@ -5353,6 +6215,7 @@ test('update notification clicks during refresh wait for the latest verified rel
       { sender: window.webContents, senderFrame: window.webContents.mainFrame },
       { notifications: true },
     );
+    window.minimize();
     await f.checkUpdates(updater, false);
     const notification = f.notifications.at(-1);
     version = '0.4.1';
@@ -5444,6 +6307,7 @@ test('update notification requests survive refresh failures and stop safely duri
       { sender: window.webContents, senderFrame: window.webContents.mainFrame },
       { notifications: true },
     );
+    window.minimize();
     await f.checkUpdates(updater, false);
     const notification = f.notifications.at(-1);
     version = '0.4.1';
@@ -5553,7 +6417,7 @@ test('first installation resolves its exact published runtime without a newer ap
       await f.source.runtimeDownloadUrl(f.runtime),
       sourceUrl
         ? `${sourceUrl}/releases/18/assets/201/${f.runtime.archive.file}`
-        : 'https://api.github.com/repos/n8n-io/nod/releases/assets/201',
+        : `https://github.com/n8n-io/nod/releases/download/nod-v0.1.9/${f.runtime.archive.file}`,
     );
     for (const change of [
       (runtime) => (runtime.fingerprint = '../other'),
@@ -5570,20 +6434,22 @@ test('first installation resolves its exact published runtime without a newer ap
       await assert.rejects(f.source.runtimeDownloadUrl(runtime));
       assert.deepEqual(f.calls, []);
     }
-    for (const change of [
-      (pack) => (pack.draft = true),
-      (pack) => (pack.tag_name = `runtime-darwin-arm64-${'f'.repeat(64)}`),
-      (pack) => (pack.id = 0),
-      (pack) => (pack.assets[0].id = 0),
-      (pack) => (pack.assets[0].name = 'another-runtime.tar.gz'),
-      (pack) => pack.assets.push({ ...pack.assets[0], id: 202 }),
-      (pack) => (pack.assets[0].state = 'new'),
-      (pack) => pack.assets[0].size++,
-      (pack) => (pack.assets[0].digest = `sha256:${'f'.repeat(64)}`),
-    ]) {
-      const changed = updateReleaseFixture(sourceUrl);
-      change(changed.pack);
-      await assert.rejects(changed.source.runtimeDownloadUrl(changed.runtime));
+    if (sourceUrl) {
+      for (const change of [
+        (pack) => (pack.draft = true),
+        (pack) => (pack.tag_name = `runtime-darwin-arm64-${'f'.repeat(64)}`),
+        (pack) => (pack.id = 0),
+        (pack) => (pack.assets[0].id = 0),
+        (pack) => (pack.assets[0].name = 'another-runtime.tar.gz'),
+        (pack) => pack.assets.push({ ...pack.assets[0], id: 202 }),
+        (pack) => (pack.assets[0].state = 'new'),
+        (pack) => pack.assets[0].size++,
+        (pack) => (pack.assets[0].digest = `sha256:${'f'.repeat(64)}`),
+      ]) {
+        const changed = updateReleaseFixture(sourceUrl);
+        change(changed.pack);
+        await assert.rejects(changed.source.runtimeDownloadUrl(changed.runtime));
+      }
     }
   }
 });
@@ -6495,4 +7361,146 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
     await files.dispose();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('ready desktop updates share Later across engine windows and reopen for a new version', async (t) => {
+  let version = '0.5.2';
+  const restarts = [];
+  const updater = {
+    ready: undefined,
+    async check() {
+      this.ready = { version };
+      return this.ready;
+    },
+    async restart() {
+      restarts.push(this.ready.version);
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    notificationsSupported: true,
+  });
+  f.showEngine();
+  await new Promise(setImmediate);
+  const window = f.windows.at(-1);
+  assert.equal(window.isFocused(), true);
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const status = f.handlers.get('nod:updates:status');
+  const dismiss = f.handlers.get('nod:updates:dismiss');
+  const restart = f.handlers.get('nod:updates:restart');
+  assert.equal(status(event).readyVersion, undefined);
+  assert.equal((await f.handlers.get('nod:settings:get')(event)).notifications, false);
+
+  await f.checkUpdates(updater, false);
+  assert.equal(f.notifications.length, 0);
+  assert.equal(status(event).readyVersion, version);
+  assert.equal(status(event).checking, false);
+  assert.ok(
+    window.sent.some(
+      ([channel, value]) => channel === 'nod:updates:status' && value.readyVersion === version,
+    ),
+  );
+
+  const child = new window.constructor({ show: false });
+  window.webContents.emit('did-create-window', child);
+  await child.loadURL('http://127.0.0.1:4310/');
+  const childEvent = { sender: child.webContents, senderFrame: child.webContents.mainFrame };
+  assert.equal(status(childEvent).readyVersion, version);
+  const subframe = { ...event, senderFrame: { ...event.senderFrame } };
+  assert.throws(() => status(subframe), /unavailable/);
+  assert.throws(() => dismiss(subframe, version), /unavailable/);
+  await assert.rejects(restart(subframe), /unavailable/);
+  const outside = { sender: {}, senderFrame: event.senderFrame };
+  assert.throws(() => status(outside), /unavailable/);
+  assert.throws(() => dismiss(outside, version), /unavailable/);
+  await assert.rejects(restart(outside), /unavailable/);
+  dismiss(event, '0.5.1');
+  assert.equal(status(event).dismissedVersion, undefined);
+  dismiss(event, version);
+  assert.equal(status(event).dismissedVersion, version);
+  assert.equal(status(childEvent).dismissedVersion, version);
+  for (const receiver of [window, child])
+    assert.ok(
+      receiver.sent.some(
+        ([channel, value]) =>
+          channel === 'nod:updates:status' && value.dismissedVersion === version,
+      ),
+    );
+
+  child.destroy();
+  window.destroy();
+  f.showEngine();
+  await new Promise(setImmediate);
+  const reopened = f.windows.at(-1);
+  const reopenedEvent = {
+    sender: reopened.webContents,
+    senderFrame: reopened.webContents.mainFrame,
+  };
+  assert.equal(status(reopenedEvent).readyVersion, version);
+  assert.equal(status(reopenedEvent).dismissedVersion, version);
+
+  await f.handlers.get('nod:settings:save')(reopenedEvent, { notifications: true });
+  const priorNotifications = f.notifications.length;
+  version = '0.5.3';
+  await f.checkUpdates(updater, false);
+  assert.equal(f.notifications.length, priorNotifications);
+  assert.equal(status(reopenedEvent).readyVersion, version);
+  assert.notEqual(status(reopenedEvent).readyVersion, status(reopenedEvent).dismissedVersion);
+  dismiss(reopenedEvent, '0.5.2');
+  assert.equal(status(reopenedEvent).dismissedVersion, '0.5.2');
+  assert.deepEqual(restarts, []);
+});
+
+test('in-app update restart keeps Later safe and shares one confirmation', async (t) => {
+  const choice = deferred();
+  const shown = deferred();
+  const prompts = [];
+  const restarts = [];
+  const updater = {
+    ready: undefined,
+    async check() {
+      this.ready = { version: '0.5.2' };
+      return this.ready;
+    },
+    async restart() {
+      restarts.push(this.ready.version);
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    prompt: (options) => {
+      prompts.push(options);
+      if (prompts.length === 1) {
+        shown.resolve();
+        return choice.promise;
+      }
+      return { response: 0 };
+    },
+  });
+  f.showEngine();
+  await new Promise(setImmediate);
+  const window = f.windows.at(-1);
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const status = f.handlers.get('nod:updates:status');
+  const restart = f.handlers.get('nod:updates:restart');
+  await assert.rejects(restart(event), /No desktop update is ready/);
+  await f.checkUpdates(updater, false);
+
+  const first = restart(event);
+  await shown.promise;
+  const second = restart(event);
+  assert.equal(prompts.length, 1);
+  assert.equal(status(event).checking, true);
+  assert.equal(f.updateMenu.enabled, false);
+  assert.match(prompts[0].message, /Nod 0\.5\.2 is ready/);
+  assert.deepEqual([...prompts[0].buttons], ['Restart', 'Later']);
+  assert.equal(prompts[0].defaultId, 1);
+  assert.equal(prompts[0].cancelId, 1);
+  choice.resolve({ response: 1 });
+  await Promise.all([first, second]);
+  assert.deepEqual(restarts, []);
+  assert.equal(status(event).readyVersion, '0.5.2');
+  assert.equal(status(event).checking, false);
+
+  await restart(event);
+  assert.equal(prompts.length, 2);
+  assert.deepEqual(restarts, ['0.5.2']);
 });

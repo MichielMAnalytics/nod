@@ -18,7 +18,7 @@ const serviceFailureReason = z.enum([
 ]);
 const connectionProperties = z.object({
   app: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
-  connection_method: z.enum(['managed_app', 'browser', 'http', 'mcp', 'cli']),
+  connection_method: z.enum(['managed_app', 'browser', 'http', 'mcp', 'cli', 'local']),
 });
 const duration = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const taskType = z.enum([
@@ -44,6 +44,7 @@ export const analyticsTool = z.enum([
   'browser_session',
   'create_audio',
   'delegate',
+  'files',
   'manage_apps',
   'manage_personal_context',
   'pay',
@@ -90,6 +91,29 @@ export const analyticsEvent = z.discriminatedUnion('event', [
     .object({
       event: z.literal('onboarding_completed'),
       properties: z.object({ provider: analyticsModelProvider }).strict().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('model_setup_completed'),
+      properties: z.object({ provider: analyticsModelProvider, model: analyticsModel }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('owner_message_accepted'),
+      properties: z.object({ channel: z.enum(['web', 'telegram', 'whatsapp', 'other']) }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('channel_connection_observed'),
+      properties: z
+        .object({
+          channel: z.enum(['telegram', 'whatsapp']),
+          state: z.enum(['disabled', 'setup_pending', 'connected', 'configured_unverified']),
+        })
+        .strict(),
     })
     .strict(),
   z
@@ -325,6 +349,22 @@ export const analyticsEvent = z.discriminatedUnion('event', [
     .object({
       event: z.literal('connection_observed'),
       properties: connectionProperties.strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('connection_inventory_observed'),
+      properties: z
+        .object({
+          connected_app_types: z.array(connectionProperties.shape.app).max(1000),
+          connected_app_type_count: z.number().int().nonnegative().max(1000),
+        })
+        .strict()
+        .refine(
+          ({ connected_app_types, connected_app_type_count }) =>
+            connected_app_type_count === connected_app_types.length &&
+            new Set(connected_app_types).size === connected_app_types.length,
+        ),
     })
     .strict(),
   z

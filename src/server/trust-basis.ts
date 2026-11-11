@@ -101,6 +101,7 @@ export function trustBasis(
   const settings = [
     'NOD_schedule_create',
     'NOD_schedule_update',
+    'NOD_schedule_pause',
     'NOD_schedule_cancel',
     'NOD_limits_update',
     'NOD_notification_preferences_update',
@@ -111,7 +112,13 @@ export function trustBasis(
   const command = action?.arguments?.command;
   const requiresQuote =
     settings ||
-    ['NOD_sign_in', 'NOD_browser_session', 'NOD_vault_allow'].includes(action?.name ?? '') ||
+    [
+      'NOD_sign_in',
+      'NOD_browser_session',
+      'NOD_vault_allow',
+      'LOCAL_FILES_READ',
+      'LOCAL_FILES_IMPORT',
+    ].includes(action?.name ?? '') ||
     (action?.name === 'NOD_browser' &&
       (action.arguments?.step === 'upload' ||
         (command &&

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
@@ -9,16 +9,20 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { promisify } from 'node:util';
+import { parse } from 'yaml';
 import type { WorkspaceSession } from '../src/ports/computer.ts';
 import { threadIdentity } from '../src/ports/thread-identity.ts';
 import { isPublicAddress, publicUrl } from '../src/providers/agent-browser/network.ts';
@@ -37,6 +41,193 @@ import {
 } from '../src/providers/docker/index.ts';
 import { runProcess, serviceEnvironment } from '../src/providers/process.ts';
 import { prepareLocalDirectories } from '../scripts/local-database.ts';
+import { createLocalFiles, localFileRules } from '../src/server/local-files.ts';
+import type { Pool } from 'pg';
+
+if (process.env.NOD_TEST_WORKSPACE_IMAGE)
+  test(
+    'workspace egress blocks private and metadata sockets in both Compose deployments',
+    { timeout: 120_000 },
+    async (t) => {
+      const image = process.env.NOD_TEST_WORKSPACE_IMAGE!;
+      const root = await mkdtemp(join(tmpdir(), 'nod-workspace-network-'));
+      const name = `nod-egress-${randomUUID()}`;
+      const docker = async (...args: string[]) =>
+        (await promisify(execFile)('docker', args, { timeout: 30_000 })).stdout.trim();
+      const networks = ['private', 'metadata', 'public'].map((kind) => `${name}-${kind}`);
+      const fixture = `${name}-fixture`;
+      const segment = Math.floor(Math.random() * 200) + 20;
+      const privateAddress = `10.71.${segment}.2`;
+      const ipv6Address = `fd71:${segment}::2`;
+      const publicIpv6Address = `2606:4700:71:${segment}::2`;
+      const publicAddress = '93.184.216.34';
+      const metadataAddress = '169.254.169.254';
+      const config = join(root, 'compose.json');
+      const compose = (...args: string[]) => docker('compose', '-p', name, '-f', config, ...args);
+      t.after(async () => {
+        await compose('down', '--volumes', '--remove-orphans').catch(() => {});
+        await docker('rm', '-f', fixture).catch(() => {});
+        for (const network of networks) await docker('network', 'rm', network).catch(() => {});
+        await rm(root, { recursive: true, force: true });
+      });
+      await docker(
+        'network',
+        'create',
+        '--internal',
+        '--subnet',
+        `10.71.${segment}.0/24`,
+        '--ipv6',
+        '--subnet',
+        `fd71:${segment}::/64`,
+        networks[0]!,
+      );
+      await docker('network', 'create', '--internal', '--subnet', '169.254.0.0/16', networks[1]!);
+      await docker(
+        'network',
+        'create',
+        '--internal',
+        '--subnet',
+        '93.184.216.0/24',
+        '--ipv6',
+        '--subnet',
+        `2606:4700:71:${segment}::/64`,
+        networks[2]!,
+      );
+      await docker(
+        'run',
+        '-d',
+        '--name',
+        fixture,
+        '--network',
+        networks[0]!,
+        '--ip',
+        privateAddress,
+        '--ip6',
+        ipv6Address,
+        '--network-alias',
+        'private-fixture',
+        '--cap-drop',
+        'ALL',
+        '--entrypoint',
+        'python3',
+        image,
+        '-u',
+        '-c',
+        `
+import socket
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class Server(HTTPServer):
+    address_family = socket.AF_INET6
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302 if self.path == '/redirect' else 200)
+        if self.path == '/redirect':
+            self.send_header('Location', 'http://${metadataAddress}:8080/')
+        self.end_headers()
+        self.wfile.write(b'synthetic network fixture')
+Server(('::', 8080), Handler).serve_forever()
+`,
+      );
+      await docker('network', 'connect', '--ip', metadataAddress, networks[1]!, fixture);
+      await docker(
+        'network',
+        'connect',
+        '--ip',
+        publicAddress,
+        '--ip6',
+        publicIpv6Address,
+        '--alias',
+        'public-fixture',
+        networks[2]!,
+        fixture,
+      );
+      const read = (address: string, path = '/') =>
+        `const response=await fetch('http://${address}:8080${path}',{signal:AbortSignal.timeout(1500)});if(response.status!==200)throw new Error('Fixture failed');console.log(await response.text());`;
+      for (const [network, address] of [
+        [networks[0]!, privateAddress],
+        [networks[0]!, `[${ipv6Address}]`],
+        [networks[1]!, metadataAddress],
+        [networks[2]!, publicAddress],
+        [networks[2]!, `[${publicIpv6Address}]`],
+      ])
+        assert.equal(
+          await docker(
+            'run',
+            '--rm',
+            '--network',
+            network,
+            '--entrypoint',
+            'node',
+            image,
+            '-e',
+            read(address),
+          ),
+          'synthetic network fixture',
+        );
+      for (const file of ['../compose.yaml', '../deployment/self-host/compose.yaml']) {
+        const source = parse(await readFile(new URL(file, import.meta.url), 'utf8'));
+        const workspace = {
+          ...source.services.workspace,
+          image,
+          container_name: `${name}-workspace`,
+          volumes: [],
+        };
+        delete workspace.build;
+        const guard = {
+          ...source.services['workspace-network'],
+          image,
+          container_name: `${name}-network`,
+          networks: ['private', 'metadata', 'public'],
+        };
+        const deployment = {
+          services: { workspace, 'workspace-network': guard },
+          networks: Object.fromEntries(
+            ['private', 'metadata', 'public'].map((kind, index) => [
+              kind,
+              { external: true, name: networks[index] },
+            ]),
+          ),
+        };
+        await writeFile(config, JSON.stringify(deployment));
+        await compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '15');
+        const request = (address: string, path = '/') =>
+          compose('exec', '-T', 'workspace', 'node', '-e', read(address, path));
+        assert.equal(await request(publicAddress), 'synthetic network fixture');
+        assert.equal(await request('public-fixture'), 'synthetic network fixture');
+        await compose(
+          'exec',
+          '-T',
+          'workspace',
+          'node',
+          '-e',
+          `const {createServer}=await import('node:http');const server=createServer((_,response)=>response.end('synthetic loopback'));await new Promise(resolve=>server.listen(8080,'127.0.0.1',resolve));try{if(await(await fetch('http://127.0.0.1:8080')).text()!=='synthetic loopback')throw new Error('Loopback failed')}finally{server.closeAllConnections();server.close()}`,
+        );
+        for (const address of [
+          privateAddress,
+          metadataAddress,
+          'private-fixture',
+          `[${ipv6Address}]`,
+          `[${publicIpv6Address}]`,
+        ])
+          await assert.rejects(request(address), /fetch failed|TimeoutError/);
+        await assert.rejects(request(publicAddress, '/redirect'), /fetch failed|TimeoutError/);
+        await assert.rejects(
+          compose('exec', '-T', '--user', 'root', 'workspace', 'iptables', '-F', 'OUTPUT'),
+          /Permission denied|Operation not permitted/,
+        );
+        await compose('restart', 'workspace-network');
+        assert.equal(await request(publicAddress), 'synthetic network fixture');
+        await assert.rejects(request(metadataAddress), /fetch failed|TimeoutError/);
+        await compose('down');
+        guard.entrypoint = ['sh', '-c', 'exit 1'];
+        guard.restart = 'no';
+        await writeFile(config, JSON.stringify(deployment));
+        await assert.rejects(compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '5'));
+        assert.equal(await compose('ps', '--status', 'running', '--quiet', 'workspace'), '');
+        await compose('down');
+      }
+    },
+  );
 
 test('local startup protects data through its private root and preserves workspace mount traversal', async () => {
   const parent = await mkdtemp(join(tmpdir(), 'nod-local-directories-'));
@@ -555,5 +746,406 @@ test('self-hosted runtime limits Docker access to unprivileged execution in its 
       new Promise<void>((resolve) => engine.close(() => resolve())),
     ]);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('local file rules match each platform', () => {
+  const windows = localFileRules(
+    'win32',
+    'C:\\Users\\Ada',
+    'C:\\Users\\Ada\\AppData\\Roaming\\nod',
+    'C:',
+  );
+  for (const path of [
+    'C:\\',
+    'C:\\Windows\\System32',
+    'C:\\Program Files',
+    'C:\\Users',
+    'C:\\Users\\Ada\\AppData\\Local\\Temp',
+    'c:\\users\\ada\\appdata',
+    'C:\\Users\\Ada\\Projects\\.secrets',
+    'C:\\Users\\Ada\\NTUSER.DAT',
+    'C:\\Users\\Ada\\Documents\\putty.ppk',
+    'D:\\Backup\\Users\\Ada\\AppData\\Roaming',
+    'D:\\Photos\\Thumbs.db',
+    '\\\\server\\share\\docs',
+  ])
+    assert.equal(windows.privatePath(path), true, path);
+  for (const path of [
+    'C:\\Users\\Ada',
+    'C:\\Users\\Ada\\Downloads',
+    'c:\\USERS\\ada\\Documents\\Tax',
+    'E:\\Photos',
+    'D:\\',
+  ])
+    assert.equal(windows.privatePath(path), false, path);
+  assert.equal(windows.root('D:\\'), true);
+  assert.equal(windows.root('c:\\users\\ada'), true);
+  assert.equal(windows.root('C:\\Users\\Ada\\Downloads'), false);
+  assert.equal(windows.executable('C:\\Users\\Ada\\Downloads\\setup.EXE', 0o644), true);
+  assert.equal(windows.executable('C:\\Users\\Ada\\Downloads\\notes.txt', 0o777), false);
+  const mac = localFileRules('darwin', '/Users/ada', '/Users/ada/Library/Application Support/nod');
+  for (const path of [
+    '/',
+    '/Users',
+    '/Users/ada/Library',
+    '/users/ada/library/Keychains',
+    '/etc',
+    '/Volumes',
+    '/Users/ada/Projects/.git',
+    '/Users/ada/Projects/app/prod.env',
+    '/Users/ada/Downloads/server.pem',
+    '/Users/ada/Downloads/id_ed25519',
+    '/Users/ada/Downloads/1Password Export.1pux',
+    '/Users/ada/Downloads/bitwarden_export_2026.json',
+    '/Volumes/Backup/Users/ada/Library/Keychains',
+    '/Volumes/Backup/Backups.backupdb',
+    '/Volumes/Stick/.Spotlight-V100',
+  ])
+    assert.equal(mac.privatePath(path), true, path);
+  for (const path of [
+    '/Users/ada',
+    '/Users/ada/Downloads',
+    '/Users/ada/Downloads/Setup.pkg',
+    '/Volumes/Stick',
+    '/Volumes/Stick/Photos',
+  ])
+    assert.equal(mac.privatePath(path), false, path);
+  assert.equal(mac.root('/Volumes/Stick'), true);
+  assert.equal(mac.root('/Users/ada'), true);
+  assert.equal(mac.holdsData('/Users/ada'), true);
+  assert.equal(mac.holdsData('/Users/ada/Downloads'), false);
+  const linux = localFileRules('linux', '/home/ada', '/home/ada/nod/.local');
+  assert.equal(linux.privatePath('/home/ada/Downloads'), false);
+  assert.equal(linux.privatePath('/media/ada/Stick'), true);
+  assert.equal(linux.privatePath('/home/ada/nod/.local/keys'), true);
+  assert.equal(linux.holdsData('/home/ada/nod'), true);
+});
+
+test('local files stay in home, skip secrets and kept-out folders, and never overwrite', async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'nod-local-files-')));
+  const home = join(base, 'home');
+  const shared = join(home, 'Downloads');
+  const outside = join(base, 'outside');
+  const trash = join(base, 'trash');
+  await mkdir(join(shared, 'sorted'), { recursive: true });
+  await mkdir(outside);
+  await writeFile(join(shared, 'a.txt'), 'a');
+  await writeFile(join(shared, 'sorted', 'a.txt'), 'kept');
+  await writeFile(join(outside, 'secret.txt'), 'secret');
+  await symlink(outside, join(shared, 'escape'));
+  const data = join(base, 'data');
+  await mkdir(join(data, 'keys'), { recursive: true });
+  const keep: string[] = [];
+  const pool = {
+    query: async (sql: string, values: string[]) => {
+      if (sql.startsWith('WITH RECURSIVE'))
+        return { rows: [{ id: values[0], source: 'user', message_id: 'm', proactive: false }] };
+      if (sql.startsWith('INSERT') && !keep.includes(values[1]!)) keep.push(values[1]!);
+      return { rows: [{ local_keep_out: [...keep] }] };
+    },
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    dataRoot: data,
+    home,
+    trash: {
+      ready: async () => true,
+      put: async (path) => {
+        if (basename(path) === 'stuck.txt') throw new Error('Synthetic Trash failure');
+        await mkdir(trash, { recursive: true });
+        await rename(path, join(trash, basename(path)));
+        if (basename(path) === 'late.txt') throw new Error('The Trash did not answer.');
+      },
+    },
+  });
+  const turn = { turnId: 'turn', threadId: 'thread' };
+  try {
+    assert.ok(
+      ((await files.execute('LOCAL_FILES_LIST', { path: home })) as { entries: unknown[] }).entries
+        .length,
+    );
+    for (const path of [base, data, join(data, 'keys'), '/etc'])
+      await assert.rejects(files.execute('LOCAL_FILES_LIST', { path }), /outside your home/);
+    await assert.rejects(files.prepare('LOCAL_FILES_TRASH', { paths: [home] }), /root of a drive/);
+    await assert.rejects(
+      files.prepare('LOCAL_FILES_TRASH', {
+        paths: [join(shared, 'a.txt'), join(outside, 'secret.txt')],
+      }),
+      /outside your home/,
+    );
+    assert.deepEqual(
+      await files.prepare('LOCAL_FILES_READ', { path: `${shared}/sorted/../a.txt` }),
+      { path: join(shared, 'a.txt') },
+    );
+    for (const path of [outside, join(shared, '..', '..', 'outside'), join(shared, 'escape')])
+      await assert.rejects(files.execute('LOCAL_FILES_LIST', { path }), /outside your home/);
+    await assert.rejects(
+      files.execute('LOCAL_FILES_READ', { path: join(shared, 'escape', 'secret.txt') }),
+      /outside your home/,
+    );
+    const moved = await files.execute('LOCAL_FILES_MOVE', {
+      moves: [
+        { from: join(shared, 'a.txt'), to: join(shared, 'sorted', 'a.txt') },
+        { from: join(shared, 'a.txt'), to: join(shared, 'escape', 'a.txt') },
+        { from: join(outside, 'secret.txt'), to: join(shared, 'secret.txt') },
+        { from: shared, to: join(shared, 'sorted', 'inner') },
+      ],
+    });
+    assert.deepEqual((moved as { moved: unknown[] }).moved, []);
+    assert.equal((moved as { failed: unknown[] }).failed.length, 4);
+    assert.equal(await readFile(join(shared, 'sorted', 'a.txt'), 'utf8'), 'kept');
+    assert.equal(await readFile(join(outside, 'secret.txt'), 'utf8'), 'secret');
+    const trashed = await files.execute('LOCAL_FILES_TRASH', {
+      paths: [join(shared, 'escape'), join(outside, 'secret.txt')],
+    });
+    assert.equal((trashed as { failed: unknown[] }).failed.length, 1);
+    assert.ok(existsSync(join(outside, 'secret.txt')));
+    assert.ok(!existsSync(join(shared, 'escape')));
+    await symlink(join(outside, 'secret.txt'), join(shared, 'link.txt'));
+    for (const path of [join(shared, 'link.txt'), join(shared, '..', 'outside', 'new.txt')])
+      await assert.rejects(
+        files.execute('LOCAL_FILES_WRITE', { path, text: 'x', overwrite: true }),
+      );
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', {
+        path: join(shared, 'link.txt'),
+        edits: [{ oldText: 'secret', newText: 'x' }],
+      }),
+    );
+    assert.equal(await readFile(join(outside, 'secret.txt'), 'utf8'), 'secret');
+    const note = join(shared, 'note.txt');
+    await files.execute('LOCAL_FILES_WRITE', { path: note, text: 'one two two' });
+    await assert.rejects(
+      files.execute('LOCAL_FILES_WRITE', { path: note, text: 'lost' }),
+      /exists/,
+    );
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', { path: note, edits: [{ oldText: 'two', newText: '2' }] }),
+      /exactly once/,
+    );
+    await files.execute('LOCAL_FILES_EDIT', {
+      path: note,
+      edits: [{ oldText: 'one', newText: '1' }],
+    });
+    assert.equal(await readFile(note, 'utf8'), '1 two two');
+    assert.equal(await readFile(join(trash, 'note.txt'), 'utf8'), 'one two two');
+    const latin = join(shared, 'latin.txt');
+    await writeFile(latin, Buffer.from([0x63, 0x61, 0x66, 0xe9]));
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', { path: latin, edits: [{ oldText: 'caf', newText: 'x' }] }),
+      /UTF-8/,
+    );
+    assert.deepEqual([...(await readFile(latin))], [0x63, 0x61, 0x66, 0xe9]);
+    await mkdir(join(shared, 'app', '.git', 'hooks'), { recursive: true });
+    await writeFile(join(shared, '.env'), 'TOKEN=x');
+    const hook = join(shared, 'app', '.git', 'hooks', 'pre-commit');
+    await assert.rejects(
+      files.execute('LOCAL_FILES_READ', { path: join(shared, '.env') }),
+      /hidden/,
+    );
+    await assert.rejects(files.execute('LOCAL_FILES_WRITE', { path: hook, text: 'x' }), /hidden/);
+    const hidden = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: note, to: join(shared, '.note') }],
+    })) as { failed: Array<{ error: string }> };
+    assert.match(hidden.failed[0]!.error, /hidden/);
+    const listed = (await files.execute('LOCAL_FILES_LIST', { path: shared })) as {
+      entries: Array<{ name: string }>;
+    };
+    assert.ok(!listed.entries.some((item) => item.name.startsWith('.')));
+    const script = join(shared, 'deploy.sh');
+    await writeFile(script, 'echo ok', { mode: 0o755 });
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', { path: script, edits: [{ oldText: 'ok', newText: 'x' }] }),
+      /executable/,
+    );
+    assert.equal(await readFile(script, 'utf8'), 'echo ok');
+    await symlink(outside, join(shared, 'away'));
+    await assert.rejects(
+      files.execute('LOCAL_FILES_READ', { path: join(shared, 'away', 'secret.txt') }),
+      (error: Error) => !error.message.includes(outside),
+    );
+    const imported = (await files.execute('LOCAL_FILES_IMPORT', { path: latin })) as {
+      file: { name: string; bytes: Uint8Array };
+    };
+    assert.equal(imported.file.name, 'latin.txt');
+    assert.deepEqual([...imported.file.bytes], [0x63, 0x61, 0x66, 0xe9]);
+    const exported = join(shared, 'report.pdf');
+    const file = { workspaceFile: '/workspace/report.pdf', mimeType: 'application/pdf' };
+    await files.execute(
+      'LOCAL_FILES_EXPORT',
+      { file, path: exported },
+      { read: async () => new Uint8Array([1, 2, 3]) },
+    );
+    assert.deepEqual([...(await readFile(exported))], [1, 2, 3]);
+    await assert.rejects(
+      files.execute(
+        'LOCAL_FILES_EXPORT',
+        { file, path: exported },
+        { read: async () => new Uint8Array([4]) },
+      ),
+      /exists/,
+    );
+    await assert.rejects(
+      files.execute(
+        'LOCAL_FILES_WRITE',
+        { path: join(shared, 'stopped.txt'), text: 'x' },
+        { signal: AbortSignal.abort() },
+      ),
+    );
+    assert.equal(existsSync(join(shared, 'stopped.txt')), false);
+    await assert.rejects(
+      files.execute('LOCAL_FILES_WRITE', {
+        path: join(shared, 'big.txt'),
+        text: 'é'.repeat(600_000),
+      }),
+      /at most 1 MB/,
+    );
+    await writeFile(join(shared, 'taken.txt'), 'taken');
+    await symlink(join(shared, 'a-target.txt'), join(shared, 'pointer'));
+    const linkMove = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: join(shared, 'pointer'), to: join(shared, 'taken.txt') }],
+    })) as { failed: Array<{ error: string }> };
+    assert.match(linkMove.failed[0]!.error, /already exists/);
+    assert.equal(await readFile(join(shared, 'taken.txt'), 'utf8'), 'taken');
+    for (const path of [join(shared, 'run.sh'), join(shared, 'sorted', 'tool.sh')])
+      await assert.rejects(
+        files.execute('LOCAL_FILES_WRITE', { path, text: 'echo hi' }),
+        /program or shortcut/,
+      );
+    const renamed = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: note, to: join(shared, 'note.sh') }],
+    })) as { failed: Array<{ error: string }> };
+    assert.match(renamed.failed[0]!.error, /program or shortcut/);
+    await assert.rejects(
+      files.execute('LOCAL_FILES_LIST', { path: `${shared}/sorted/..` }),
+      /leads somewhere else/,
+    );
+    const stuck = join(shared, 'stuck.txt');
+    await writeFile(stuck, 'old');
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', {
+        path: stuck,
+        edits: [{ oldText: 'old', newText: 'new' }],
+      }),
+      /Trash failure/,
+    );
+    assert.equal(await readFile(stuck, 'utf8'), 'old');
+    assert.deepEqual(
+      (await readdir(shared)).filter((name) => name.startsWith('.nod-')),
+      [],
+    );
+    await assert.rejects(
+      files.execute('LOCAL_FILES_READ', { path: join(outside, 'missing.txt') }),
+      /outside your home/,
+    );
+    const case_ = join(shared, 'Case.txt');
+    await writeFile(join(shared, 'case.txt'), 'c');
+    await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: join(shared, 'case.txt'), to: case_ }],
+    });
+    assert.ok((await readdir(shared)).includes('Case.txt'));
+    await mkdir(join(shared, 'box'));
+    const folderMoves = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [
+        { from: join(shared, 'box'), to: join(shared, 'sorted') },
+        { from: join(shared, 'box'), to: join(shared, 'crate') },
+      ],
+    })) as { moved: unknown[]; failed: Array<{ error: string }> };
+    assert.match(folderMoves.failed[0]!.error, /already exists/);
+    assert.equal(folderMoves.moved.length, 1);
+    assert.ok(existsSync(join(shared, 'sorted', 'a.txt')));
+    const installer = join(shared, 'install.sh');
+    await writeFile(installer, 'echo hi');
+    await mkdir(join(shared, 'Installers'));
+    const kept = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: installer, to: join(shared, 'Installers', 'install.sh') }],
+    })) as { moved: unknown[] };
+    assert.equal(kept.moved.length, 1);
+    for (const name of ['id_rsa', 'server.pem', 'prod.env'])
+      await writeFile(join(shared, name), 'synthetic secret');
+    await mkdir(join(shared, 'Library'));
+    for (const name of ['id_rsa', 'server.pem', 'prod.env', 'Library'])
+      await assert.rejects(
+        files.execute('LOCAL_FILES_READ', { path: join(shared, name) }),
+        /secret/,
+      );
+    const sorted = join(shared, 'sorted');
+    await files.keepOut(turn, `${sorted}/`, pool);
+    assert.deepEqual(keep, [sorted]);
+    const shown = (await files.execute('LOCAL_FILES_LIST', { path: shared })) as {
+      entries: Array<{ name: string }>;
+    };
+    for (const name of ['sorted', 'id_rsa', 'server.pem', 'prod.env', 'Library'])
+      assert.ok(!shown.entries.some((item) => item.name === name), name);
+    const blocked = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [
+        { from: note, to: join(sorted, 'note.txt') },
+        { from: join(sorted, 'a.txt'), to: join(shared, 'out.txt') },
+      ],
+    })) as { failed: Array<{ error: string }> };
+    assert.equal(blocked.failed.length, 2);
+    assert.match(blocked.failed[0]!.error, /keep out/);
+    const beside = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: note, to: join(shared, 'note-moved.txt') }],
+    })) as { moved: unknown[] };
+    assert.equal(beside.moved.length, 1);
+    await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: join(shared, 'note-moved.txt'), to: note }],
+    });
+    for (const [action, args] of [
+      ['LOCAL_FILES_LIST', { path: join(sorted, '..', 'sorted') }],
+      ['LOCAL_FILES_READ', { path: join(sorted, 'a.txt') }],
+      ['LOCAL_FILES_CREATE_FOLDER', { path: join(sorted, 'new') }],
+      ['LOCAL_FILES_EXPORT', { file, path: join(sorted, 'copy.pdf') }],
+      ['LOCAL_FILES_TRASH', { paths: [shared] }],
+    ] as const)
+      await assert.rejects(files.prepare(action, args), /keep out/, action);
+    assert.equal(
+      ((await files.execute('LOCAL_FILES_READ', { path: note })) as { text: string }).text,
+      '1 two two',
+    );
+    await files.keepOut(turn, join(shared, 'Later', 'New'), pool);
+    assert.equal(keep.at(-1), join(shared, 'Later', 'New'));
+    const replaced = (await files.execute('LOCAL_FILES_WRITE', {
+      path: note,
+      text: 'fresh',
+      overwrite: true,
+    })) as { previousVersion?: string };
+    assert.equal(replaced.previousVersion, 'moved to the Trash');
+    assert.equal(await readFile(note, 'utf8'), 'fresh');
+    assert.equal(await readFile(join(trash, 'note.txt'), 'utf8'), '1 two two');
+    const late = join(shared, 'late.txt');
+    await writeFile(late, 'old');
+    await assert.rejects(
+      files.execute('LOCAL_FILES_EDIT', {
+        path: late,
+        edits: [{ oldText: 'old', newText: 'new' }],
+      }),
+      /is unchanged/,
+    );
+    assert.equal(await readFile(late, 'utf8'), 'old');
+    assert.deepEqual(
+      (await readdir(shared)).filter((name) => name.startsWith('.nod-')),
+      [],
+    );
+    await writeFile(join(shared, 'tool.sh'), 'echo hi');
+    const kinds = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [{ from: join(shared, 'tool.sh'), to: join(shared, 'tool.bash') }],
+    })) as { failed: Array<{ error: string }> };
+    assert.match(kinds.failed[0]?.error ?? '', /program or shortcut/);
+    await symlink('a-target.txt', join(shared, 'relative'));
+    const relative = (await files.execute('LOCAL_FILES_MOVE', {
+      moves: [
+        { from: join(shared, 'relative'), to: join(shared, 'Installers', 'relative') },
+        { from: join(shared, 'relative'), to: join(shared, 'renamed') },
+      ],
+    })) as { moved: unknown[]; failed: Array<{ error: string }> };
+    assert.match(relative.failed[0]!.error, /relative link/);
+    assert.equal(relative.moved.length, 1);
+    const off = createLocalFiles(pool, 'owner', { dataRoot: data, home, available: false });
+    await assert.rejects(off.prepare('LOCAL_FILES_LIST', { path: shared }), /desktop app/);
+    await assert.rejects(off.execute('LOCAL_FILES_READ', { path: note }), /desktop app/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });

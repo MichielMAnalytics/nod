@@ -6,7 +6,7 @@ import type { AppDependencies } from './app.ts';
 import { pool } from './db.ts';
 import { ownerId, configuration } from './config.ts';
 import { artifactView, localArtifacts } from './artifacts.ts';
-import { lockThread, submitUserMessage } from './thread.ts';
+import { lockThread, stopSignal, submitUserMessage } from './thread.ts';
 import { transaction } from './transaction.ts';
 import { refresh } from './events.ts';
 import { SpeechSetupError } from './speech.ts';
@@ -14,9 +14,16 @@ import type { SubmitMessageResponse } from '../shared/contracts.ts';
 import { classifyVerificationReply, securityCodeIn } from '../shared/verification-code.ts';
 import { questionAnswerSchema } from '../shared/answer-choices.ts';
 
+const audioMessageOptions = { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } };
+
 export const messageInput = z
   .object({
-    text: z.string().trim().max(100_000).default(''),
+    text: z
+      .string()
+      .max(100_000)
+      .transform((value) => (value.trim() ? value : ''))
+      .default(''),
+    displayText: z.string().max(1_000_000).optional(),
     attachmentIds: z.array(z.uuid()).default([]),
     replyToMessageId: z.uuid().optional(),
     questionAnswer: questionAnswerSchema.optional(),
@@ -62,9 +69,10 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
     suspensions++;
     cancel();
   });
-  app.post('/api/messages/audio', async (request, reply) => {
+  app.post('/api/messages/audio', audioMessageOptions, async (request, reply) => {
     if (suspensions)
       throw privateConflict('Work is stopping. Send the recording again when it finishes.');
+    const arrival = stopSignal();
     const controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
     active.set(controller, undefined);
@@ -84,7 +92,7 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
           files: 1,
           fields: 1,
           parts: 2,
-          fieldSize: 256 * 1024,
+          fieldSize: 8 * 1024 * 1024,
         },
       })) {
         signal.throwIfAborted();
@@ -197,6 +205,7 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
       );
       signal.throwIfAborted();
       const text = [input.text, transcript].filter(Boolean).join('\n\n');
+      const displayText = input.displayText;
       if (text.length > 100_000) throw invalid('Send a shorter voice message.');
       const codeLike =
         classifyVerificationReply(text).kind !== 'ordinary' || Boolean(securityCodeIn(text));
@@ -242,8 +251,10 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
         accepted.attachments,
         {
           ...input,
+          displayText,
           audioCaption: input.text,
           channel: 'web',
+          stopSignal: arrival,
           prepareAttachments: async (client, threadId) => {
             signal.throwIfAborted();
             const clip = await artifacts.storeArtifact(
@@ -258,11 +269,16 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
             return [clip];
           },
           persistSubmission: (client, result) =>
-            persist(client, { ...result, messageText: text, audioCaption: input.text }),
+            persist(client, {
+              ...result,
+              messageText: text,
+              displayText,
+              audioCaption: input.text,
+            }),
         },
       );
       refresh();
-      return { ...submitted, messageText: text, audioCaption: input.text };
+      return { ...submitted, messageText: text, displayText, audioCaption: input.text };
     } catch (error) {
       if (!submitting && !signal.aborted && error instanceof Error && !('retryable' in error))
         Object.assign(error, { retryable: true });

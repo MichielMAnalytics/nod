@@ -2680,6 +2680,7 @@ async function appsFixture(
       | 'removeActivity'
       | 'admission'
       | 'analytics'
+      | 'paused'
     >
   > = {},
 ) {
@@ -2940,6 +2941,28 @@ test('app groups retain service metadata and account identity when catalog data 
   assert.equal(available.service.description, notes.description);
   const [described] = connectionGroups([notes], [{ ...catalog, description: 'Catalog purpose.' }]);
   assert.equal(described.service.description, 'Catalog purpose.');
+  const officialNotion: AppConnection = {
+    slug: 'notion',
+    name: 'Notion',
+    status: 'disconnected',
+    direct: true,
+    triggersEnabled: false,
+  };
+  const legacyNotion: AppConnection = {
+    slug: 'notion_mcp',
+    name: 'Notion MCP',
+    status: 'disconnected',
+    connectionId: 'legacy-notion',
+    reconnectRequired: true,
+    triggersEnabled: false,
+  };
+  const [notionGroup] = connectionGroups(
+    [officialNotion, legacyNotion],
+    [{ slug: 'notion', name: 'Notion', status: 'disconnected', triggersEnabled: false }],
+  );
+  assert.equal(notionGroup.service.slug, 'notion');
+  assert.equal(notionGroup.service.direct, true);
+  assert.deepEqual(notionGroup.accounts, [legacyNotion]);
 });
 
 test(
@@ -5446,7 +5469,8 @@ test(
   async (t) => {
     const admission = createWorkAdmission();
     admission.pause();
-    const f = await appsFixture(t, {}, { admission });
+    let paused = false;
+    const f = await appsFixture(t, {}, { admission, paused: async () => paused });
     const selected = await f.connect('gmail');
     const metadata = {
       subject: 'Question about the upcoming planning review '.repeat(10),
@@ -5541,6 +5565,36 @@ test(
     await send('667788990011');
     await f.service.drain();
     assert.deepEqual([f.wakes.length, f.settles()], [6, settled + 1]);
+    const count = async () =>
+      (await f.pool.query('SELECT count(*)::int AS n FROM integration_events')).rows[0].n;
+    const received = await count();
+    paused = true;
+    f.provider.pollInbox = async () => ({
+      cursor: 'after-pause',
+      hasMore: false,
+      messages: [message('778899001122')],
+    });
+    await f.pool.query('UPDATE app_connections SET inbox_poll_at=NULL WHERE id=$1', [
+      selected.connectionId,
+    ]);
+    await f.service.pollInboxes();
+    assert.equal(await count(), received);
+    await send('889900112233');
+    const quiet = (
+      await f.pool.query('SELECT summary FROM integration_events ORDER BY created_at DESC LIMIT 1')
+    ).rows[0];
+    assert.doesNotMatch(quiet.summary, /planning review|sender@example/);
+    const watched = await f.service.watchState([selected.connectionId!]);
+    assert.ok(watched);
+    assert.equal(await count(), received + 2);
+    assert.equal(await f.service.watchState([selected.connectionId!]), watched);
+    f.provider.pollInbox = async () => ({
+      cursor: 'later',
+      hasMore: false,
+      messages: [message('990011223344')],
+    });
+    assert.notEqual(await f.service.watchState([selected.connectionId!]), watched);
+    assert.equal(await f.service.watchState([randomUUID()]), null);
   },
 );
 
@@ -8080,19 +8134,27 @@ test('Composio paginates managed apps and native DCR MCPs with exact slugs for c
   ];
   assert.equal(owner, 'fixture-owner');
   assert.deepEqual(configuration.connectedAccounts, accounts);
-  assert.ok(configuration.toolkits.includes('granola_mcp'));
-  assert.ok(configuration.toolkits.includes('retired_mcp'));
-  await session.authorize('granola_mcp', 'http://localhost:4310/api/apps/callback');
-  await assert.rejects(session.authorize('private_api', 'http://localhost:4310/api/apps/callback'));
+  assert.deepEqual(configuration.toolkits, ['retired_mcp']);
+  await assert.rejects(session.authorize('granola_mcp', 'http://localhost:4310/api/apps/callback'));
+  await assert.rejects(session.search('Find notes'));
+  const authorization = await provider.createSession('fixture-owner', {});
+  const authorizationConfig = create.mock.calls[1]!.arguments[1] as { toolkits: string[] };
+  assert.ok(authorizationConfig.toolkits.includes('granola_mcp'));
+  await authorization.authorize('granola_mcp', 'http://localhost:4310/api/apps/callback');
   await assert.rejects(
-    session.authorize('custom_oauth', 'http://localhost:4310/api/apps/callback'),
+    authorization.authorize('private_api', 'http://localhost:4310/api/apps/callback'),
   );
   await assert.rejects(
-    session.authorize('unconfigured_app', 'http://localhost:4310/api/apps/callback'),
+    authorization.authorize('custom_oauth', 'http://localhost:4310/api/apps/callback'),
   );
-  await assert.rejects(session.authorize('no_auth', 'http://localhost:4310/api/apps/callback'));
+  await assert.rejects(
+    authorization.authorize('unconfigured_app', 'http://localhost:4310/api/apps/callback'),
+  );
+  await assert.rejects(
+    authorization.authorize('no_auth', 'http://localhost:4310/api/apps/callback'),
+  );
   assert.equal(authorize.mock.callCount(), 1);
-  assert.deepEqual(Object.keys((await session.search('Find notes')).tools as object), [
+  assert.deepEqual(Object.keys((await authorization.search('Find notes')).tools as object), [
     'GRANOLA_MCP_SEARCH_NOTES',
   ]);
   assert.equal(listing.mock.callCount(), 2);
@@ -8100,6 +8162,454 @@ test('Composio paginates managed apps and native DCR MCPs with exact slugs for c
     catalogMode = mode;
     await createComposioProvider({ proxy: composioProxyFixture(client) }).listServices!();
   }
+});
+
+test(
+  'Notion MCP catalog routes new connections to the official server and excludes the broken managed toolkit',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected external request.'));
+    const database = await hostedDatabase();
+    const app = Fastify();
+    t.after(async () => {
+      await app.close();
+      await database.close();
+    });
+    const owner = 'fixture-owner';
+    const endpoint = 'https://mcp.notion.com/mcp';
+    const token = 'synthetic-notion-access-token';
+    const client = new Composio({
+      apiKey: 'fixture-key-never-live',
+      baseURL: 'https://proxy.fixture.invalid',
+      allowTracking: false,
+      disableVersionCheck: true,
+      fileUploadDirs: false,
+    });
+    t.mock.method(client.getClient().toolkits, 'list', async () => ({
+      items: [
+        {
+          slug: 'notion_mcp',
+          name: 'Notion MCP',
+          type: 'native',
+          meta: { description: 'Read Notion pages' },
+          auth_schemes: ['DCR_OAUTH'],
+          composio_managed_auth_schemes: [],
+        },
+      ],
+      next_cursor: null,
+    }));
+    const provider = createComposioProvider({ proxy: composioProxyFixture(client, owner) });
+    const removedManaged = t.mock.method(client.connectedAccounts, 'delete', async (id: string) => {
+      assert.equal(id, 'synthetic-managed-notion');
+    });
+    const mcpCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const request: typeof safeRemoteFetch = async (input, init) => {
+      const value = new Request(input, init);
+      assert.equal(value.url, endpoint);
+      assert.equal(value.headers.get('authorization'), `Bearer ${token}`);
+      if (value.method === 'GET') return new Response(null, { status: 405 });
+      if (value.method === 'DELETE') return new Response(null, { status: 200 });
+      const message = JSON.parse(await value.text());
+      if (message.id === undefined) return new Response(null, { status: 202 });
+      if (message.method === 'tools/call') {
+        mcpCalls.push({ name: message.params.name, input: message.params.arguments });
+      }
+      return Response.json({
+        jsonrpc: '2.0',
+        id: message.id,
+        result:
+          message.method === 'initialize'
+            ? {
+                protocolVersion: message.params.protocolVersion,
+                capabilities: { tools: {} },
+                serverInfo: { name: 'synthetic-notion', version: '1' },
+              }
+            : message.method === 'tools/list'
+              ? {
+                  tools: [
+                    {
+                      name: 'notion-search',
+                      inputSchema: {
+                        type: 'object',
+                        properties: { query: { type: 'string' } },
+                        required: ['query'],
+                      },
+                    },
+                    {
+                      name: 'notion-fetch',
+                      inputSchema: {
+                        type: 'object',
+                        properties: { id: { type: 'string' } },
+                        required: ['id'],
+                      },
+                    },
+                  ],
+                }
+              : { content: [{ type: 'text', text: 'Synthetic Notion page content' }] },
+      });
+    };
+    const discovered = await createDiscoveredConnections(database.pool, {
+      ownerId: owner,
+      baseUrl: 'http://localhost:4310',
+      grantVault: await createAppGrantVault(database.pool, {
+        ownerId: owner,
+        keyStore: installationKeyStore,
+      }),
+      transport: createDiscoveredTransport(request, async (value) => {
+        assert.equal(value, endpoint);
+        return value;
+      }),
+      oauth: {
+        begin: async (value, redirectUri, state) => {
+          assert.equal(value, endpoint);
+          return {
+            url: `https://notion.example.test/authorize?state=${state}`,
+            saved: { redirectUri },
+          };
+        },
+        finish: async (value, saved) => {
+          assert.equal(value, endpoint);
+          return { ...saved, tokens: { access_token: token, token_type: 'Bearer' } };
+        },
+        refresh: async () => assert.fail('A fresh token must not be refreshed.'),
+      },
+    });
+    const integrations = await createIntegrations(database.pool, {
+      ownerId: owner,
+      provider,
+      discovered,
+      baseUrl: 'http://localhost:4310',
+      wake: async () => {},
+    });
+    integrations.registerRoutes(app);
+    const managed = await database.pool.query<{ id: string }>(
+      `INSERT INTO app_connections(owner_id,slug,account_id,provider_id,account_active,configuration_id)
+       VALUES($1,'notion_mcp','synthetic-managed-notion','composio',true,$2) RETURNING id`,
+      [owner, provider.configurationId],
+    );
+    const catalog = (await app.inject({ url: '/api/apps/catalog' })).json<AppConnection[]>();
+    assert.equal(
+      catalog.some((service) => service.slug === 'notion_mcp'),
+      false,
+    );
+    assert.equal(
+      catalog.some((service) => service.slug === 'notion'),
+      true,
+    );
+    const oldAccount = (await integrations.list(owner, { refresh: false })).find(
+      (account) => account.connectionId === managed.rows[0].id,
+    );
+    assert.equal(oldAccount?.status, 'disconnected');
+    assert.equal(oldAccount?.canReconnect, false);
+    assert.equal(
+      (await integrations.connectedApps(owner)).some(
+        (account) => account.connectionId === managed.rows[0].id,
+      ),
+      false,
+    );
+    const staleReconnect = await app.inject({
+      method: 'POST',
+      url: '/api/apps/notion_mcp/connect',
+      payload: { connectionId: managed.rows[0].id },
+    });
+    assert.equal(staleReconnect.statusCode, 409);
+    const mistakenReconnect = await app.inject({
+      method: 'POST',
+      url: '/api/apps/notion/connect',
+      payload: { connectionId: managed.rows[0].id },
+    });
+    assert.equal(mistakenReconnect.statusCode, 404);
+    const started = await app.inject({ method: 'POST', url: '/api/apps/notion_mcp/connect' });
+    assert.equal(started.statusCode, 200, started.body);
+    const authorization = new URL(started.json().url);
+    assert.equal(authorization.origin, 'https://notion.example.test');
+    const callback = await app.inject({
+      url: `/api/apps/callback?state=${authorization.searchParams.get('state')}&code=synthetic-code`,
+    });
+    assert.equal(new URL(callback.headers.location!).searchParams.get('connection'), 'connected');
+    const afterConnect = await integrations.list(owner, { refresh: false });
+    const legacyAfterConnect = afterConnect.find(
+      (account) => account.connectionId === managed.rows[0].id,
+    );
+    assert.equal(legacyAfterConnect?.slug, 'notion_mcp');
+    assert.equal(legacyAfterConnect?.accountId, 'synthetic-managed-notion');
+    assert.equal(legacyAfterConnect?.status, 'disconnected');
+    assert.equal(legacyAfterConnect?.canReconnect, false);
+    const connected = afterConnect.find(
+      (account) => account.slug === 'notion' && account.status === 'connected',
+    );
+    assert.ok(connected?.connectionId);
+    const search = (await integrations.execute(owner, 'SEARCH_TOOLS', {
+      connectionId: connected.connectionId,
+      query: 'Notion page',
+    })) as {
+      discovered: Array<{
+        connectionId: string;
+        paths: Array<{ id: string; tools?: Array<{ name: string }> }>;
+      }>;
+    };
+    const path = search.discovered.find(
+      (account) => account.connectionId === connected.connectionId,
+    )?.paths[0];
+    assert.ok(path?.id);
+    assert.deepEqual(
+      path.tools?.map((tool) => tool.name),
+      ['notion-search', 'notion-fetch'],
+    );
+    const read = await integrations.execute(owner, 'CONNECTED_MCP_CALL', {
+      connectionId: connected.connectionId,
+      pathId: path.id,
+      tool: 'notion-fetch',
+      input: { id: 'synthetic-page-id' },
+    });
+    assert.deepEqual(read, { content: [{ type: 'text', text: 'Synthetic Notion page content' }] });
+    assert.deepEqual(mcpCalls, [{ name: 'notion-fetch', input: { id: 'synthetic-page-id' } }]);
+    const removal = await app.inject({
+      method: 'POST',
+      url: `/api/apps/notion_mcp/accounts/${managed.rows[0].id}/disconnect`,
+    });
+    assert.equal(removal.statusCode, 200, removal.body);
+    assert.equal(removedManaged.mock.callCount(), 1);
+    const afterRemoval = await integrations.list(owner, { refresh: false });
+    assert.equal(
+      afterRemoval.some((account) => account.connectionId === managed.rows[0].id),
+      false,
+    );
+    assert.equal(
+      afterRemoval.some(
+        (account) =>
+          account.connectionId === connected.connectionId && account.status === 'connected',
+      ),
+      true,
+    );
+  },
+);
+
+test('account-bound Composio sessions search only owned toolkits without waiting for the catalog', async (t) => {
+  const client = new Composio({
+    apiKey: 'fixture-key-never-live',
+    baseURL: 'https://proxy.fixture.invalid',
+    allowTracking: false,
+    disableVersionCheck: true,
+    fileUploadDirs: false,
+  });
+  const gate = deferred();
+  t.after(() => gate.resolve());
+  const listing = t.mock.method(client.getClient().toolkits, 'list', async () => {
+    await gate.promise;
+    return { items: [], next_cursor: null };
+  });
+  const search = t.mock.fn(async (_input: unknown) => ({
+    success: true,
+    error: null,
+    toolSchemas: {
+      GMAIL_FETCH_EMAILS: {
+        toolSlug: 'GMAIL_FETCH_EMAILS',
+        toolkit: 'gmail',
+        inputSchema: { type: 'object' },
+      },
+    },
+    results: [],
+  }));
+  const create = t.mock.method(client.sessions, 'create', async () => ({
+    sessionId: 'fixture-session',
+    search,
+  }));
+  const provider = createComposioProvider({ proxy: composioProxyFixture(client) });
+  const session = await provider.createSession(
+    'fixture-owner',
+    { gmail: ['owned-gmail-account'] },
+    AbortSignal.timeout(1000),
+  );
+  assert.equal(listing.mock.callCount(), 0);
+  assert.deepEqual(create.mock.calls[0]!.arguments[1], {
+    toolkits: ['gmail'],
+    connectedAccounts: { gmail: ['owned-gmail-account'] },
+    multiAccount: {
+      enable: true,
+      maxAccountsPerToolkit: 10,
+      requireExplicitSelection: true,
+    },
+    manageConnections: false,
+    sandbox: { enable: false },
+  });
+  assert.deepEqual(
+    Object.keys((await session.search('Find recent Gmail messages')).tools as object),
+    ['GMAIL_FETCH_EMAILS'],
+  );
+  assert.deepEqual(search.mock.calls[0]!.arguments[0], {
+    query: 'Find recent Gmail messages',
+    toolkits: ['gmail'],
+  });
+});
+
+test('large Gmail searches hydrate visible schemas and exact names without loading the rest', async (t) => {
+  const client = new Composio({
+    apiKey: 'fixture-key-never-live',
+    baseURL: 'https://proxy.fixture.invalid',
+    allowTracking: false,
+    disableVersionCheck: true,
+    fileUploadDirs: false,
+  });
+  t.mock.method(client.getClient().toolkits, 'list', async () => ({
+    items: [],
+    next_cursor: null,
+  }));
+  const slugs = Array.from({ length: 25 }, (_, index) => `GMAIL_SYNTHETIC_${index}`);
+  const incomplete = (slug: string) => ({
+    toolSlug: slug,
+    toolkit: 'gmail',
+    hasFullSchema: false,
+    schemaRef: {
+      tool: 'COMPOSIO_GET_TOOL_SCHEMAS',
+      args: { toolSlugs: [slug] },
+    },
+  });
+  let advertised: Record<string, ReturnType<typeof incomplete>> = Object.fromEntries(
+    slugs.map((slug) => [slug, incomplete(slug)]),
+  );
+  t.mock.method(client.sessions, 'create', async () => ({
+    sessionId: 'fixture-session',
+    search: async () => ({ success: true, error: null, toolSchemas: advertised, results: [] }),
+  }));
+  const requests: string[][] = [];
+  t.mock.method(
+    client.getClient().toolRouter.session,
+    'executeMeta',
+    async (_id: string, input: { arguments: { tool_slugs: string[] } }) => {
+      const batch = input.arguments.tool_slugs;
+      requests.push(batch);
+      return {
+        error: null,
+        data: {
+          success: true,
+          tool_schemas: Object.fromEntries(
+            batch.map((slug) => [
+              slug,
+              { tool_slug: slug, toolkit: 'gmail', input_schema: { type: 'object' } },
+            ]),
+          ),
+        },
+      };
+    },
+  );
+  const provider = createComposioProvider({ proxy: composioProxyFixture(client) });
+  const session = await provider.createSession('fixture-owner', { gmail: ['owned-gmail-account'] });
+  const broad = (await session.search('Find recent messages')).tools as Record<
+    string,
+    { hasFullSchema?: boolean }
+  >;
+  assert.deepEqual(requests, [slugs.slice(0, 3)]);
+  assert.ok(slugs.slice(0, 3).every((slug) => broad[slug]?.hasFullSchema === true));
+  assert.ok(slugs.slice(3).every((slug) => broad[slug]?.hasFullSchema === false));
+
+  requests.length = 0;
+  const exact = (await session.search(slugs[18]!)).tools as Record<
+    string,
+    { hasFullSchema?: boolean }
+  >;
+  assert.deepEqual(requests, [[slugs[18]]]);
+  assert.equal(exact[slugs[18]!]!.hasFullSchema, true);
+  assert.ok(
+    slugs.filter((slug) => slug !== slugs[18]).every((slug) => !exact[slug]?.hasFullSchema),
+  );
+
+  requests.length = 0;
+  const mixedQuery = (await session.search(`${slugs[18]}, CONNECTED_HTTP`)).tools as Record<
+    string,
+    { hasFullSchema?: boolean }
+  >;
+  assert.deepEqual(requests, [slugs.slice(0, 3)]);
+  assert.equal(mixedQuery[slugs[18]!]!.hasFullSchema, false);
+
+  requests.length = 0;
+  advertised = Object.fromEntries(slugs.slice(0, 5).map((slug) => [slug, incomplete(slug)]));
+  await session.search('Find Gmail messages');
+  assert.deepEqual(requests, [slugs.slice(0, 5)]);
+
+  requests.length = 0;
+  advertised = Object.fromEntries(slugs.map((slug) => [slug, incomplete(slug)]));
+  advertised[slugs[24]!]!.schemaRef.args.toolSlugs = ['GMAIL_UNADVERTISED'];
+  await assert.rejects(session.search('Find recent messages'), /schemas could not be loaded/);
+  assert.deepEqual(requests, []);
+});
+
+test('mixed built-in app searches hydrate visible schemas and dynamic apps keep full hydration', async (t) => {
+  const client = new Composio({
+    apiKey: 'fixture-key-never-live',
+    baseURL: 'https://proxy.fixture.invalid',
+    allowTracking: false,
+    disableVersionCheck: true,
+    fileUploadDirs: false,
+  });
+  const entries = Array.from({ length: 8 }, (_, index) => {
+    const toolkit = index % 2 ? 'slack' : 'gmail';
+    const slug = `${toolkit.toUpperCase()}_SYNTHETIC_${index}`;
+    return [slug, toolkit] as const;
+  });
+  const slugs = entries.map(([slug]) => slug);
+  const toolSchemas = Object.fromEntries(
+    entries.map(([slug, toolkit]) => [
+      slug,
+      {
+        toolSlug: slug,
+        toolkit,
+        hasFullSchema: false,
+        schemaRef: { tool: 'COMPOSIO_GET_TOOL_SCHEMAS', args: { toolSlugs: [slug] } },
+      },
+    ]),
+  );
+  t.mock.method(client.sessions, 'create', async () => ({
+    sessionId: 'fixture-session',
+    search: async () => ({ success: true, error: null, toolSchemas, results: [] }),
+  }));
+  const requests: string[][] = [];
+  t.mock.method(
+    client.getClient().toolRouter.session,
+    'executeMeta',
+    async (_id: string, input: { arguments: { tool_slugs: string[] } }) => {
+      const batch = input.arguments.tool_slugs;
+      requests.push(batch);
+      return {
+        error: null,
+        data: {
+          success: true,
+          tool_schemas: Object.fromEntries(
+            batch.map((slug) => [
+              slug,
+              {
+                tool_slug: slug,
+                toolkit: entries.find(([name]) => name === slug)![1],
+                input_schema: { type: 'object' },
+              },
+            ]),
+          ),
+        },
+      };
+    },
+  );
+  const provider = createComposioProvider({ proxy: composioProxyFixture(client) });
+  const accounts = { gmail: ['owned-gmail-account'], slack: ['owned-slack-account'] };
+  const session = await provider.createSession('fixture-owner', accounts);
+  const broad = (await session.search('Find a message')).tools as Record<
+    string,
+    { hasFullSchema?: boolean }
+  >;
+  assert.deepEqual(requests, [slugs.slice(0, 3)]);
+  assert.ok(slugs.slice(0, 3).every((slug) => broad[slug]?.hasFullSchema === true));
+  assert.ok(slugs.slice(3).every((slug) => broad[slug]?.hasFullSchema === false));
+
+  requests.length = 0;
+  await session.search(slugs[7]!);
+  assert.deepEqual(requests, [[slugs[7]]]);
+
+  requests.length = 0;
+  const dynamic = await provider.createSession('fixture-owner', {
+    ...accounts,
+    native_mcp: ['owned-native-account'],
+  });
+  await dynamic.search('Find a message');
+  assert.deepEqual(requests, [slugs]);
 });
 
 test('Composio catalog failures preserve owned accounts', async (t) => {
@@ -8137,9 +8647,11 @@ test('Composio catalog failures preserve owned accounts', async (t) => {
   });
   const session = await provider.createSession('fixture-owner', { retired_mcp: ['owned-account'] });
   const configuration = create.mock.calls[0]!.arguments[1] as unknown as { toolkits: string[] };
-  assert.ok(configuration.toolkits.includes('retired_mcp'));
+  assert.deepEqual(configuration.toolkits, ['retired_mcp']);
   const callback = 'http://localhost:4310/api/apps/callback';
-  await session.authorize('outlook', callback);
+  await assert.rejects(session.authorize('outlook', callback));
+  const authorization = await provider.createSession('fixture-owner', {});
+  await authorization.authorize('outlook', callback);
   assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback]);
   assert.equal(listing.mock.callCount(), 1);
   await session.execute('RETIRED_MCP_LIST', {}, 'owned-account');
@@ -8167,7 +8679,8 @@ test('Composio failure envelopes reject with the provider error', async (t) => {
   const session = await createComposioProvider({
     proxy: composioProxyFixture(client, 'local-development'),
   }).createSession('local-development', {
-    slackbot: 'fixture-slackbot-account',
+    gmail: 'fixture-account',
+    slack: 'fixture-account',
   });
   for (const failure of [
     { data: {}, error: 'Fixture rate limit', logId: 'log-fixture', resultType: 'failed' },
@@ -8455,9 +8968,10 @@ test(
           message_id uuid,prompt text NOT NULL,channel text NOT NULL DEFAULT 'web',status text NOT NULL DEFAULT 'succeeded',
           error text,created_at timestamptz NOT NULL DEFAULT now(),thread_id uuid,session_id uuid);
         CREATE TABLE turn_events(id uuid DEFAULT gen_random_uuid(),turn_id uuid,type text,summary text DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
-        CREATE TABLE messages(id uuid,owner_id text,role text,text text,turn_id uuid,thread_id uuid,created_at timestamptz DEFAULT now());
+        CREATE TABLE messages(id uuid,owner_id text,role text,text text,turn_id uuid,thread_id uuid,created_at timestamptz DEFAULT now(),hidden_at timestamptz);
         CREATE TABLE preferences(owner_id text PRIMARY KEY,time_zone text,locale text,hour_cycle text);
         CREATE TABLE schedules(id uuid,owner_id text,title text);
+        CREATE TABLE tasks(id uuid,owner_id text,session_id uuid,title text,activity_key text);
         CREATE TABLE app_actions(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),owner_id text NOT NULL,
           turn_id uuid NOT NULL REFERENCES turns(id) ON DELETE CASCADE,action text NOT NULL,
           created_at timestamptz NOT NULL DEFAULT now())`);
@@ -8599,6 +9113,16 @@ test(
       const chatEntry = (entries: TrustEntry[]) =>
         entries.find((entry) => entry.title === 'Tell Sam we take the quote')!;
       assert.ok(view.entries.every((entry: TrustEntry) => entry.messageId === null));
+      const hiddenConfirmation = randomUUID();
+      await pool.query(
+        "INSERT INTO messages(id,owner_id,role,text,turn_id,thread_id,hidden_at) VALUES($1,'owner','assistant','Retired confirmation',$2,$3,now())",
+        [hiddenConfirmation, scheduled, conversation],
+      );
+      const scheduledEntry = (await app.inject('/api/trust'))
+        .json()
+        .entries.find((entry: TrustEntry) => entry.id === scheduled) as TrustEntry;
+      assert.equal(scheduledEntry.messageId, null);
+      assert.equal(scheduledEntry.costUsd, 0.1);
       assert.deepEqual(chatEntry(view.entries).actions, [
         { label: 'Gmail: fetch emails' },
         { label: 'Gmail: send email', because: { kind: 'approved' } },
@@ -8638,6 +9162,8 @@ test(
         ],
       );
       assert.equal(await linkedMessage(), latestResult);
+      await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [latestResult]);
+      assert.equal(await linkedMessage(), firstResult);
       await pool.query('DELETE FROM messages WHERE id=$1', [latestResult]);
       assert.equal(await linkedMessage(), firstResult);
       await pool.query('DELETE FROM messages WHERE id=$1', [firstResult]);
@@ -8700,10 +9226,24 @@ test(
         "INSERT INTO model_usage(id,owner_id,turn_id,cost_usd) VALUES('extra','owner',NULL,0.5)",
       );
       assert.equal(await ledger.limitReached(), true);
-      assert.deepEqual((await app.inject('/api/trust')).json().limit, {
-        monthlyUsd: 1,
-        reached: true,
-      });
+      const limited = (await app.inject('/api/trust')).json();
+      assert.deepEqual(limited.limit, { monthlyUsd: 1, reached: true });
+      assert.equal(Math.round(limited.month.backgroundUsd * 100) / 100, 0.6);
+      const reply = randomUUID();
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,source,prompt,thread_id,session_id) VALUES($1,'owner','user','Owner reply',$2,$3)",
+        [reply, conversation, scheduled],
+      );
+      await pool.query(
+        "INSERT INTO model_usage(id,owner_id,turn_id,cost_usd) VALUES('reply','owner',$1,0.2)",
+        [reply],
+      );
+      assert.equal(
+        Math.round((await app.inject('/api/trust')).json().month.backgroundUsd * 100) / 100,
+        0.6,
+      );
+      await pool.query("DELETE FROM model_usage WHERE id='reply'");
+      assert.deepEqual(limited.month.outside, [{ kind: 'other', costUsd: 0.5 }]);
       assert.equal(await limit(null), null);
       assert.equal(await ledger.limitReached(), false);
       await limit(1.16);
@@ -8730,7 +9270,7 @@ test(
       assert.equal(modelRequests, 1);
       await pool.query('DROP TRIGGER refuse_usage ON model_usage');
       assert.equal(await ledger.limitReached(), true);
-      await assert.rejects(curator.curate(request), /spending limit was reached/);
+      await assert.rejects(curator.curate(request), /spending limit is reached/);
       assert.equal(modelRequests, 1);
       const recoveredUsage = await pool.query(
         "SELECT created_at FROM model_usage WHERE owner_id='owner' AND turn_id IS NULL AND cost_usd=0.05",
@@ -8740,6 +9280,10 @@ test(
         Math.round((await app.inject('/api/trust')).json().month.spentUsd * 100) / 100,
         1.2,
       );
+      await ledger.withTurn(reply, () => curator.curate(request), true);
+      assert.equal(modelRequests, 2);
+      await assert.rejects(curator.curate(request), /spending limit is reached/);
+      await pool.query('DELETE FROM model_usage WHERE turn_id=$1', [reply]);
       const decimalLedger = createLedger({ pool, ownerId: 'decimal-owner' });
       await pool.query("INSERT INTO spending_limits VALUES('decimal-owner',1)");
       await pool.query(
@@ -9060,12 +9604,13 @@ test(
       assert.equal(transcriptionRequests, 1);
       speechReady = true;
       await service.transcribe(audio);
-      await assert.rejects(service.transcribe(audio), /spending limit was reached/);
-      assert.equal(transcriptionRequests, 2);
+      assert.equal(await speechLedger.limitReached(), true);
+      await service.transcribe(audio);
+      assert.equal(transcriptionRequests, 3);
       const billedSpeech = await pool.query(
-        "SELECT count(*)::int AS n,sum(cost_usd)::float8 AS spent FROM model_usage WHERE owner_id='speech-owner'",
+        "SELECT count(*)::int AS n,sum(cost_usd::numeric)::float8 AS spent FROM model_usage WHERE owner_id='speech-owner'",
       );
-      assert.deepEqual(billedSpeech.rows[0], { n: 2, spent: 1.2 });
+      assert.deepEqual(billedSpeech.rows[0], { n: 3, spent: 1.8 });
       assert.equal(
         (
           await pool.query(
@@ -9325,7 +9870,7 @@ test('Composio inbox polling rejects cancellation and invalid metadata after par
     return deadline.signal;
   });
   let external = new AbortController();
-  let failure: 'cancel' | 'invalid' | 'identity' | 'none' = 'cancel';
+  let failure: 'cancel' | 'invalid' | 'identity' | 'unlabeled' | 'none' = 'cancel';
   const poll = inboxPollFixture(t, (input, signal) => {
     if (input.endpoint.endsWith('/history'))
       return {
@@ -9347,7 +9892,7 @@ test('Composio inbox polling rejects cancellation and invalid metadata after par
         id: id === 'm1' && failure === 'identity' ? 'other-message' : id,
         threadId: `thread-${id}`,
         internalDate: id === 'm1' && failure === 'invalid' ? 'invalid' : '1790769600000',
-        labelIds: ['INBOX'],
+        ...(id === 'm1' && failure === 'unlabeled' ? {} : { labelIds: ['INBOX'] }),
         payload: { headers: [] },
       },
     };
@@ -9367,6 +9912,14 @@ test('Composio inbox polling rejects cancellation and invalid metadata after par
   );
   assert.equal(recovered.hasMore, false);
   assert.equal(JSON.parse(recovered.cursor).historyId, '200');
+  failure = 'unlabeled';
+  const unlabeled = await poll('inbox-account', cursor, external.signal);
+  assert.deepEqual(
+    unlabeled.messages.map(({ id }) => id),
+    ['m0'],
+  );
+  assert.equal(unlabeled.hasMore, false);
+  assert.equal(JSON.parse(unlabeled.cursor).historyId, '200');
 });
 
 test('Composio inbox failure diagnostics keep private provider detail out of logs', async (t) => {

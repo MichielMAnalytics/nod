@@ -21,6 +21,7 @@ import {
   Switch,
 } from './ui';
 import { DataSharing } from './data-sharing';
+import { LocalFilesKeepOut } from './local-files-keep-out';
 import { ModelSettings } from './models';
 import { VoiceSettings } from './voice-settings';
 import { Memory, type MemoryNavigationState } from '../pages/memory';
@@ -487,7 +488,8 @@ export function AccountSettings({
                         />
                       </div>
                       <p className="field-hint">
-                        Share how you use Nod, without your messages or screen recordings.
+                        Share how you use Nod, including your onboarding answers and your email if
+                        you gave it, without your messages or screen recordings.
                       </p>
                     </section>
                     {account.traces !== undefined && (
@@ -512,6 +514,7 @@ export function AccountSettings({
                         </p>
                       </section>
                     )}
+                    <LocalFilesKeepOut />
                     {desktopRuntimeAvailable() && (
                       <section className="account-region">
                         <div className="account-preference-row">

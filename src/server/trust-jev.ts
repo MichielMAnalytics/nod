@@ -32,6 +32,7 @@ const decisionSchema = resultSchema.extend({
 const settings = new Set([
   'NOD_schedule_create',
   'NOD_schedule_update',
+  'NOD_schedule_pause',
   'NOD_schedule_cancel',
   'NOD_limits_update',
   'NOD_notification_preferences_update',
@@ -239,15 +240,16 @@ export async function checkJevTrust(
   const action = input.action;
   const ownSettings = settings.has(action?.name ?? '');
   const signIn = signIns.has(action?.name ?? '');
-  const upload =
-    action?.name === 'NOD_browser' &&
-    (action.arguments?.step === 'upload' || action.arguments?.command?.action === 'upload');
+  const opensContent =
+    (action?.name === 'NOD_browser' &&
+      (action.arguments?.step === 'upload' || action.arguments?.command?.action === 'upload')) ||
+    ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'].includes(action?.name ?? '');
   const effect = first.additional.effect?.choice;
   if (typeof effect !== 'string' || !(effect in jevPolicy.effect.choices))
     throw new Error('The trust effects are incomplete.');
   let kind = ownSettings ? 'settings' : signIn ? 'sign_in' : effect;
   if (action?.name === 'NOD_browser' && scores.unclear_read_step >= 0.5) kind = 'unknown';
-  if (upload) kind = 'update';
+  if (opensContent) kind = 'update';
   let read = false;
   const distribution = first.additional.effect.probabilities;
   const uncertainPrivate =
@@ -256,7 +258,7 @@ export async function checkJevTrust(
   const readCandidate =
     !ownSettings &&
     !signIn &&
-    !upload &&
+    !opensContent &&
     (effect === 'read' ||
       effect === 'prepare' ||
       uncertainPrivate ||

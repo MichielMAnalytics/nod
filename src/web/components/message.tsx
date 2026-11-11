@@ -290,6 +290,7 @@ export function MessageBubble({
   connectedAppIds,
   grouped = false,
   streaming = false,
+  arriving = false,
   onReply,
   onAnswer,
   answersDisabled,
@@ -303,6 +304,7 @@ export function MessageBubble({
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
   streaming?: boolean;
+  arriving?: boolean;
   onReply?(quote?: string): void;
   onAnswer?: AnswerChoicesProps['onAnswer'];
   answersDisabled?: boolean;
@@ -312,7 +314,10 @@ export function MessageBubble({
   handoffPaused?: boolean;
 }) {
   const dateFormat = useDateFormat();
-  const visibleText = message.audioCaption ?? message.text;
+  const visibleText =
+    (message.role === 'user' ? message.displayText : undefined) ??
+    message.audioCaption ??
+    message.text;
   const card =
     message.role !== 'assistant' || streaming
       ? null
@@ -636,7 +641,7 @@ export function MessageBubble({
   return (
     <article
       ref={articleElement}
-      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${panel ? ' message-panel-open' : ''}`}
+      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${arriving ? ' message-arriving' : ''}${panel ? ' message-panel-open' : ''}`}
       aria-label={streaming ? 'Nod is responding' : message.role === 'user' ? 'You' : 'Nod'}
       data-message-id={streaming ? undefined : message.id}
       onMouseUp={selectQuote}

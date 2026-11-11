@@ -47,7 +47,7 @@ Only the server holds keys and decides what runs. The model, the workspace and a
 ### Secrets
 
 - No tool returns a saved password, code or card to the model.
-- Nod is told never to ask for a password, code, card or API key in chat; it opens private entry instead. While a verification code is pending in the conversation that asked for it, a message that ends with its only 4–8 digit number (digits 0–9) is taken as the code, whatever the wording around it, and a message with a code-length number anywhere else is refused. While a card's security code is pending, only a code sent by itself or labeled CVV, CVC or security code, as in "my CVC is 123", is taken, and any other message with a 3- or 4-digit number is refused. A code sent as a reply to a closed request, or by itself until 10 minutes after Nod starts on a newer message, is refused too. None of these reach the model. Digits in other scripts and any other secret you type into chat reach the model.
+- Nod is told never to ask for a password, code, card or API key in chat; it opens private entry instead. While a verification code is pending in the conversation that asked for it, only a message that is the code by itself, 4–8 digits (0–9), is taken as the code. Any other message with a number of three or more digits is refused, whatever its wording or language, unless the number follows letters without a space and doesn't end the message, as in "SKU1042 arrived". Nod asks you to send the code by itself. While a card's security code is pending, only a code sent by itself or labeled CVV, CVC or security code, as in "my CVC is 123", is taken, and any other message with a 3- or 4-digit number is refused. A code sent as a reply to a closed request, or by itself or at the end of a message until 10 minutes after Nod starts on a newer message, is refused too. None of these reach the model. Digits in other scripts and any other secret you type into chat reach the model.
 - Known secret values are removed from tool output and masked in screenshots.
 - Provider keys never enter the workspace, the browser or a prompt.
 
@@ -67,6 +67,7 @@ Only the server holds keys and decides what runs. The model, the workspace and a
 
 - The workspace runs as an unprivileged user with no host home folder, Docker socket, provider keys, access key or browser profiles.
 - A connected command-line tool's token reaches only a sealed install of its declared source, run as its own user with a clean environment, apart from other tools.
+- [Local files](/connect/local-files/) run in the server process, only in the desktop app, and only in work whose chain of turns starts with an owner message or a schedule the owner set up; work Nod starts on its own reaches no file. Paths are checked after links are followed and must stay in the home folder or on an external drive, never in hidden files, Library or AppData, files named like secrets, Nod's own data or a folder on the owner's keep-out list. Nod can add to that list; only the owner removes entries. Listing is a read, and opening a file needs the owner's words in the trust check. Nod never changes executable files, files reach the workspace only when Nod copies them there, and nothing is deleted outright.
 - Every query and route is scoped to one owner.
 - File previews never run a file in Nod's own page. HTML runs in a sandboxed frame inside a second sandboxed frame. The outer frame blocks navigation requests from the inner frame before they leave. Its content policy also blocks external resources. It runs Nod's handlers even when scripts in the file are disabled. Interactive HTML can run local scripts, but forms and pop-ups are blocked. When file scripts are disabled, links you select can open a new window outside the preview. The preview closes after a blocked navigation. Other formats are read as data. Files that can run code get no local preview before they upload.
 
@@ -96,7 +97,7 @@ Only the server holds keys and decides what runs. The model, the workspace and a
 - Nod writes [learned skills](/how-it-works/memory/#learned-skills) from what it did and read, so a page or an email can shape one, and a skill can steer later tasks. A skill never grants permission, and the trust check never sees it.
 - A standing instruction runs for any new email or update that matches it, including one that only claims to come from the sender you named. Your rules apply in every kind of work, so background work started by such an email can do what a rule to go ahead covers.
 - The checker quotes your words, or says "read", to run an action. The server verifies that the words exist, not that they really ask for the action; that judgment is still the checker's.
-- Reads, drafts and links Nod opens or fetches aren't checked. In a source install the workspace has no outbound firewall; the desktop app blocks private and reserved addresses.
+- Browser snapshots and typing without submitting do not need an action check. Source installs and self-hosted servers block private and reserved workspace addresses. The desktop runtime does too. Public internet access can still send data outside Nod.
 - A saved card can't make the issuer enforce the amount, and card support isn't a PCI DSS compliance claim.
 - HTML that you download and open outside Nod does not have Nod's preview protections.
 - Tests cover known failure cases. They don't prove that every injection or browser exploit is blocked.
@@ -117,6 +118,7 @@ The team aims to acknowledge your report within 3 business days and to share a f
 | Vault and one use           | [`vault-access.ts`](https://github.com/n8n-io/nod/blob/main/src/server/vault-access.ts), [`vault-use.ts`](https://github.com/n8n-io/nod/blob/main/src/server/vault-use.ts)                                |
 | Browser entry and proxy     | [`agent-browser`](https://github.com/n8n-io/nod/tree/main/src/providers/agent-browser)                                                                                                                    |
 | Client access               | [`access.ts`](https://github.com/n8n-io/nod/blob/main/src/server/access.ts), [`network.ts`](https://github.com/n8n-io/nod/blob/main/src/server/network.ts)                                                |
+| Local files                 | [`local-files.ts`](https://github.com/n8n-io/nod/blob/main/src/server/local-files.ts)                                                                                                                     |
 | File previews               | [`attachment-frame.tsx`](https://github.com/n8n-io/nod/blob/main/src/web/components/attachment-frame.tsx), [`attachment-kind.ts`](https://github.com/n8n-io/nod/blob/main/src/web/lib/attachment-kind.ts) |
 
 ## Related resources

@@ -1,12 +1,12 @@
 {
   "name": "nod-desktop",
   "productName": "Nod",
-  "version": "0.5.2",
+  "version": "0.6.2",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "main": "main/main.mjs",
-  "description": "Nod local desktop experiment",
+  "description": "Nod, the open source personal agent from n8n",
   "scripts": {
     "postinstall": "node scripts/patch-osx-sign.mjs",
     "start": "electron .",

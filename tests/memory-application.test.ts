@@ -18,13 +18,14 @@ import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { createMemoryService, importMemoryFile } from '../src/server/memory.ts';
 import { createHistorySearch } from '../src/server/history.ts';
 import { createMemoryRecall } from '../src/server/memory-recall.ts';
-import type { MemoryBrief, MemoryReplyVisual } from '../src/ports/memory-recall.ts';
-import { presentationText, type Presentation } from '../src/shared/presentation.ts';
-import { untrustedBlock } from '../src/shared/untrusted.ts';
 import { createWritingStyleLearning } from '../src/server/writing-style.ts';
 import { createLearnedSkills } from '../src/server/learned-skills.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
+import Fastify from 'fastify';
+import { createOnboardingProfile } from '../src/server/onboarding-profile.ts';
+import type { OnboardingEmailProfile } from '../src/ports/onboarding-email.ts';
+import type { OnboardingProfile } from '../src/shared/onboarding.ts';
 
 type Step = {
   tool: string;
@@ -571,6 +572,15 @@ test(
         model.configured = true;
         assert.equal((await complete()).statusCode, 200);
         assert.equal((await session()).settings.onboardingCompleted, true);
+        assert.equal(
+          (
+            await pool.query(
+              'SELECT 1 FROM spending_limits WHERE owner_id=$1 AND monthly_usd IS NOT NULL',
+              [ownerId],
+            )
+          ).rowCount,
+          1,
+        );
         await waitFor(
           async () =>
             Boolean(
@@ -1170,536 +1180,6 @@ test('memory corrections keep their evidence, type and dates and do not archive 
   }
 });
 
-test('memory review excludes unsafe current-read text while retaining safe evidence and known memory paths', async () => {
-  const pool = {} as pg.Pool;
-  const memory = createMemoryService({ pool, ownerId: 'review-owner', store: memoryObjectStore() });
-  const path = 'preferences/lighting';
-  const retained = [
-    {
-      action: 'usage_get',
-      args: {},
-      result: untrustedBlock(
-        'usage_get',
-        JSON.stringify({ requests: 31, costUsd: 0.16345004999999999 }),
-      ),
-    },
-    { action: 'memory_read', args: { path }, result: { path, text: 'Prefers amber light.' } },
-    {
-      action: 'history_search',
-      args: { query: 'amber' },
-      result: { messages: [{ role: 'user', text: 'I prefer amber light.' }] },
-    },
-  ];
-  const unsafeValues = [
-    '4111111111111111',
-    '4111 1111 1111 1111',
-    '4111-1111-1111-1111',
-    '4111111111111111.0',
-    '4111111111111111.',
-    ['sk', 'synthetic', 'a'.repeat(20)].join('-'),
-  ];
-  const packets: MemoryBrief[] = [];
-  let beforeLoad = async () => {};
-  let beforeCurate = async () => {};
-  const recall = createMemoryRecall({
-    pool,
-    ownerId: 'review-owner',
-    memory: {
-      ...memory,
-      load: async () => {
-        await beforeLoad();
-        return memory.load();
-      },
-    },
-    curator: {
-      id: 'fixture',
-      configured: true,
-      async curate({ input }) {
-        await beforeCurate();
-        packets.push(structuredClone((input as { evidence: MemoryBrief }).evidence));
-        return { supported: false, usedPaths: [path], answer: 'You prefer amber light.' };
-      },
-    },
-  });
-  const unexpectedAction = async () => assert.fail('Memory review performed a runtime action.');
-  const threadId = randomUUID();
-  const context: Parameters<typeof recall.review>[0] = {
-    threadId,
-    sessionId: threadId,
-    turnId: randomUUID(),
-    prompt: 'Which light do I prefer?',
-    history: [],
-    workspacePath: '/fixture/workspace',
-    signal: new AbortController().signal,
-    attachments: [],
-    emit: unexpectedAction,
-    reply: unexpectedAction,
-    delta: () => assert.fail('Memory review streamed a reply.'),
-    publish: unexpectedAction,
-    requestCredential: unexpectedAction,
-    integration: unexpectedAction,
-    manage: unexpectedAction,
-    memoryBrief: {
-      mode: 'recall',
-      facts: [],
-      messages: [],
-      searches: [],
-      reads: [
-        ...retained,
-        ...unsafeValues.map((value) => ({
-          action: 'apps',
-          args: {},
-          result: untrustedBlock('apps', `A bare value: ${value}`),
-        })),
-      ],
-    },
-  };
-  assert.equal(await recall.review(context, 'You prefer blue light.'), 'You prefer amber light.');
-  assert.equal(packets.length, 1);
-  const evidence = packets[0];
-  assert.equal(evidence.readsTruncated, true);
-  assert.deepEqual(evidence.reads, retained);
-  for (const value of unsafeValues) assert.ok(!JSON.stringify(evidence).includes(value));
-
-  const safeRead = {
-    action: 'usage_get',
-    args: {},
-    result: untrustedBlock('usage_get', JSON.stringify({ requests: 32, costUsd: 0.25 })),
-  };
-  const unsafeRead = {
-    action: 'apps',
-    args: {},
-    result: untrustedBlock('apps', unsafeValues[0]),
-  };
-  for (const lateRead of [safeRead, unsafeRead]) {
-    let started!: () => void;
-    let release!: () => void;
-    const loading = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    beforeLoad = async () => {
-      started();
-      await held;
-    };
-    context.memoryBrief!.reads = [...retained];
-    const pending = recall.review(context, 'You prefer blue light.');
-    await loading;
-    context.memoryBrief!.reads.push(lateRead);
-    release();
-    await pending;
-    assert.deepEqual(
-      packets.at(-1)!.reads,
-      lateRead === safeRead ? [...retained, safeRead] : retained,
-    );
-    assert.equal(packets.at(-1)!.readsTruncated, lateRead === unsafeRead ? true : undefined);
-  }
-  beforeLoad = async () => {};
-  let started!: () => void;
-  let release!: () => void;
-  const curating = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  beforeCurate = async () => {
-    started();
-    await held;
-  };
-  context.memoryBrief!.reads = [...retained];
-  const pending = recall.review(context, 'You prefer blue light.');
-  await curating;
-  context.memoryBrief!.reads.push(unsafeRead);
-  context.memoryBrief!.readsTruncated = true;
-  release();
-  await pending;
-  assert.equal(packets.length, 4);
-  assert.deepEqual(packets[3].reads, retained);
-  assert.equal(packets[3].readsTruncated, undefined);
-  beforeCurate = async () => {};
-  await recall.review(context, 'You prefer blue light.');
-  assert.equal(packets.length, 5);
-  assert.deepEqual(packets[4].reads, retained);
-  assert.equal(packets[4].readsTruncated, true);
-  beforeLoad = async () => {
-    context.memoryBrief = undefined;
-  };
-  assert.equal(await recall.review(context, 'You prefer blue light.'), 'You prefer blue light.');
-  assert.equal(packets.length, 5);
-});
-
-test('memory review permits silence only for a redundant recap of complete successful delivery', async () => {
-  const pool = {} as pg.Pool;
-  const memory = createMemoryService({
-    pool,
-    ownerId: 'delivery-owner',
-    store: memoryObjectStore(),
-  });
-  let verdict: unknown = { supported: true, usedPaths: [], answer: '', redundant: true };
-  const packets: Array<{ evidence: MemoryBrief; lastDelivery?: MemoryBrief['lastDelivery'] }> = [];
-  const recall = createMemoryRecall({
-    pool,
-    ownerId: 'delivery-owner',
-    memory,
-    curator: {
-      id: 'fixture',
-      configured: true,
-      async curate({ input }) {
-        packets.push(structuredClone(input) as (typeof packets)[number]);
-        return verdict;
-      },
-    },
-  });
-  const unexpectedAction = async () => assert.fail('Memory review performed a runtime action.');
-  const threadId = randomUUID();
-  const context: Parameters<typeof recall.review>[0] = {
-    threadId,
-    sessionId: threadId,
-    turnId: randomUUID(),
-    prompt: 'Show the synthetic result.',
-    history: [],
-    workspacePath: '/fixture/workspace',
-    signal: new AbortController().signal,
-    attachments: [],
-    emit: unexpectedAction,
-    reply: unexpectedAction,
-    delta: () => assert.fail('Memory review streamed a reply.'),
-    publish: unexpectedAction,
-    requestCredential: unexpectedAction,
-    integration: unexpectedAction,
-    manage: unexpectedAction,
-    memoryBrief: { mode: 'recall', facts: [], messages: [], searches: [] },
-  };
-  const draft = 'The synthetic result is already visible.';
-  assert.equal(await recall.review(context, draft), draft);
-  const delivered: NonNullable<MemoryBrief['lastDelivery']> = {
-    text: 'The source confirms amber.',
-    presentation: { type: 'diagram', text: 'Synthetic result\nAmber' },
-  };
-  context.memoryBrief!.lastDelivery = delivered;
-  for (const supported of [false, true]) {
-    verdict = { supported, usedPaths: [], answer: '', redundant: true };
-    assert.equal(await recall.review(context, draft), supported ? '' : draft);
-    assert.deepEqual(packets.at(-1)!.lastDelivery, delivered);
-    assert.equal(packets.at(-1)!.evidence.lastDelivery, undefined);
-  }
-  for (const [supported, redundant] of [
-    [true, false],
-    [true, undefined],
-    [undefined, true],
-    ['true', true],
-    [true, 'true'],
-  ]) {
-    verdict = { supported, usedPaths: [], answer: '', redundant };
-    assert.equal(await recall.review(context, draft), draft);
-  }
-  for (const followup of [
-    'The source was updated today.',
-    'The value is an estimate, not a measurement.',
-    'Which result would you like to use?',
-    'The subsequent download failed.',
-  ]) {
-    verdict = { supported: true, usedPaths: [], answer: followup, redundant: false };
-    assert.equal(await recall.review(context, followup), followup);
-  }
-  for (const [followup, answer] of [
-    [`${draft} The subsequent download failed.`, 'The subsequent download failed.'],
-    [
-      `${draft} The value is a verified measurement. The subsequent download failed.`,
-      'Correction: amber is a recorded preference, not a verified measurement. The subsequent download failed.',
-    ],
-  ] as const) {
-    for (const supported of [true, false]) {
-      verdict = { supported, usedPaths: [], answer, redundant: false };
-      assert.equal(await recall.review(context, followup), supported ? followup : answer);
-      assert.deepEqual(packets.at(-1)!.lastDelivery, delivered);
-      assert.deepEqual(context.memoryBrief!.lastDelivery, delivered);
-    }
-  }
-  verdict = {
-    supported: false,
-    usedPaths: [],
-    answer: 'Correction: amber is a recorded preference, not a verified measurement.',
-    redundant: false,
-  };
-  assert.equal(
-    await recall.review(context, draft),
-    'Correction: amber is a recorded preference, not a verified measurement.',
-  );
-  verdict = { supported: true, usedPaths: ['about/foreign'], answer: '', redundant: true };
-  assert.equal(await recall.review(context, draft), draft);
-  verdict = { supported: true, usedPaths: [], answer: '', redundant: true };
-  context.memoryBrief!.lastDelivery = { ...delivered, truncated: true };
-  assert.equal(await recall.review(context, draft), draft);
-  verdict = {
-    supported: false,
-    usedPaths: [],
-    answer: 'Correction: the source describes a preference rather than a measurement.',
-    redundant: false,
-  };
-  assert.equal(
-    await recall.review(context, draft),
-    'Correction: the source describes a preference rather than a measurement.',
-  );
-  assert.equal(packets.at(-1)!.lastDelivery?.truncated, true);
-  verdict = { supported: true, usedPaths: [], answer: '', redundant: true };
-  context.memoryBrief!.lastDelivery = { text: '' };
-  assert.equal(await recall.review(context, draft), draft);
-  context.memoryBrief!.lastDelivery = { ...delivered, text: '4111 1111 1111 1111' };
-  assert.equal(await recall.review(context, draft), draft);
-  assert.equal(packets.at(-1)!.lastDelivery?.truncated, true);
-  assert.equal(packets.at(-1)!.lastDelivery?.presentation?.type, 'diagram');
-  assert.doesNotMatch(JSON.stringify(packets.at(-1)), /4111/);
-  context.memoryBrief!.lastDelivery = delivered;
-  verdict = {
-    supported: false,
-    usedPaths: [],
-    answer: '',
-    redundant: true,
-    presentationSupported: false,
-  };
-  const visual: MemoryReplyVisual = {
-    text: '',
-    presentation: {
-      version: 1,
-      type: 'diagram',
-      title: 'A new result',
-      sources: [],
-      nodes: [{ id: 'new', label: 'New value' }],
-      edges: [],
-    },
-  };
-  assert.equal(await recall.review(context, draft, visual), draft);
-});
-
-test('memory review separates supported visuals from revised prose without weakening rejected claims', async () => {
-  const pool = {} as pg.Pool;
-  const store = memoryObjectStore();
-  const memory = createMemoryService({ pool, ownerId: 'visual-owner', store });
-  const visual: MemoryReplyVisual = {
-    text: 'An unsupported introduction.',
-    presentation: {
-      version: 1,
-      type: 'diagram',
-      title: 'Lighting preference',
-      sources: [],
-      nodes: [{ id: 'lamp', label: 'Warm amber light' }],
-      edges: [],
-    },
-  };
-  let draft = `${visual.text}\n\n${presentationText(visual.presentation)}`;
-  let verdict: unknown;
-  let expectedVisual: MemoryReplyVisual | undefined = visual;
-  const recall = createMemoryRecall({
-    pool,
-    ownerId: 'visual-owner',
-    memory,
-    curator: {
-      id: 'fixture',
-      configured: true,
-      async curate({ task, input, instructions }) {
-        assert.equal(task, 'memory_check');
-        const templates = [...instructions.matchAll(/Return (\{[^\n]+?\})\./g)];
-        assert.equal(templates.length, 1);
-        assert.deepEqual(
-          [...templates[0][1].matchAll(/"(\w+)":/g)].map((match) => match[1]),
-          expectedVisual
-            ? [
-                'supported',
-                'presentationSupported',
-                'usedPaths',
-                'answer',
-                'correctedVisual',
-                'supported',
-                'text',
-                'presentation',
-              ]
-            : ['supported', 'usedPaths', 'answer'],
-        );
-        const packet = input as {
-          draft: string;
-          visual?: MemoryReplyVisual;
-          savedFacts: unknown[];
-        };
-        assert.equal(packet.draft, draft);
-        assert.deepEqual(packet.visual, expectedVisual);
-        assert.deepEqual(packet.savedFacts, []);
-        return verdict;
-      },
-    },
-  });
-  const unexpectedAction = async () => assert.fail('Memory review performed a runtime action.');
-  const threadId = randomUUID();
-  const context: Parameters<typeof recall.review>[0] = {
-    threadId,
-    sessionId: threadId,
-    turnId: randomUUID(),
-    prompt: 'Show the lighting preference.',
-    history: [],
-    workspacePath: '/fixture/workspace',
-    signal: new AbortController().signal,
-    attachments: [],
-    emit: unexpectedAction,
-    reply: unexpectedAction,
-    delta: () => assert.fail('Memory review streamed a reply.'),
-    publish: unexpectedAction,
-    requestCredential: unexpectedAction,
-    integration: unexpectedAction,
-    manage: unexpectedAction,
-    memoryBrief: { mode: 'recall', facts: [], messages: [], searches: [] },
-  };
-  for (const supported of [false, true])
-    for (const presentationSupported of [true, false, undefined]) {
-      const answer =
-        presentationSupported === true ? 'Corrected introduction.' : 'Warm amber light.';
-      verdict = { supported, usedPaths: [], answer, presentationSupported };
-      assert.deepEqual(
-        await recall.review(context, draft, visual),
-        supported && presentationSupported === true
-          ? draft
-          : { text: answer, presentationSupported: presentationSupported === true },
-      );
-    }
-  verdict = { supported: false, usedPaths: [], answer: '', presentationSupported: true };
-  assert.deepEqual(await recall.review(context, draft, visual), {
-    text: '',
-    presentationSupported: true,
-  });
-  const repaired: MemoryReplyVisual = {
-    text: '',
-    presentation: {
-      ...visual.presentation,
-      title: 'Supported lighting preference',
-    },
-  };
-  const fallback = 'The supported preference is warm amber light.';
-  verdict = {
-    supported: false,
-    presentationSupported: false,
-    usedPaths: [],
-    answer: fallback,
-    correctedVisual: { supported: true, ...repaired },
-  };
-  assert.deepEqual(await recall.review(context, draft, visual), {
-    text: fallback,
-    presentationSupported: false,
-    correctedVisual: repaired,
-  });
-  for (const correctedVisual of [
-    undefined,
-    null,
-    'Use this replacement',
-    { supported: false, ...repaired },
-    repaired,
-    { supported: true, presentation: repaired.presentation },
-    { supported: true, ...repaired, text: '4111 1111 1111 1111' },
-    { supported: true, ...repaired, presentation: { ...repaired.presentation, version: 2 } },
-    {
-      supported: true,
-      ...repaired,
-      presentation: { ...repaired.presentation, title: '4111 1111 1111 1111' },
-    },
-    {
-      supported: true,
-      ...repaired,
-      presentation: {
-        ...repaired.presentation,
-        sources: [{ label: 'Private', url: 'http://127.0.0.1' }],
-      },
-    },
-    {
-      supported: true,
-      ...repaired,
-      presentation: { ...repaired.presentation, edges: [{ from: 'missing', to: 'lamp' }] },
-    },
-    {
-      supported: true,
-      ...repaired,
-      presentation: {
-        version: 1,
-        type: 'image',
-        title: 'Unrelated image',
-        sources: [],
-        artifactId: randomUUID(),
-        alt: 'An unrelated image',
-      },
-    },
-  ]) {
-    verdict = {
-      supported: false,
-      presentationSupported: false,
-      usedPaths: [],
-      answer: fallback,
-      correctedVisual,
-    };
-    assert.deepEqual(await recall.review(context, draft, visual), {
-      text: fallback,
-      presentationSupported: false,
-    });
-  }
-  verdict = { supported: false, usedPaths: ['about/foreign'], answer: 'Unsupported replacement.' };
-  assert.equal(await recall.review(context, draft, visual), draft);
-  verdict = { supported: false, usedPaths: [], answer: '', presentationSupported: false };
-  assert.equal(await recall.review(context, draft, visual), draft);
-  verdict = { supported: false, usedPaths: [], answer: 'Corrected text-only answer.' };
-  expectedVisual = undefined;
-  assert.equal(await recall.review(context, draft), 'Corrected text-only answer.');
-  const flight: Presentation = {
-    version: 1,
-    type: 'flights',
-    title: 'Synthetic itinerary',
-    sources: [],
-    options: [
-      {
-        id: 'trip',
-        status: 'booked',
-        journeys: [
-          {
-            id: 'outbound',
-            label: 'Outbound',
-            segments: [
-              {
-                airline: 'Synthetic Air',
-                aircraft: 'An unsupported aircraft claim',
-                operatedBy: 'An unestablished operating carrier',
-                departure: { airport: 'AAA', time: '10:00' },
-                arrival: { airport: 'BBB', time: '12:00' },
-              },
-            ],
-          },
-        ],
-      },
-    ],
-  };
-  const corrected = structuredClone(flight);
-  delete corrected.options[0].journeys[0].segments[0].aircraft;
-  delete corrected.options[0].journeys[0].segments[0].operatedBy;
-  expectedVisual = { text: '', presentation: flight };
-  draft = presentationText(flight);
-  const flightFallback = 'Booked Synthetic Air flight from AAA at 10:00 to BBB at 12:00.';
-  verdict = {
-    supported: false,
-    presentationSupported: false,
-    usedPaths: [],
-    answer: flightFallback,
-    correctedVisual: { supported: true, text: '', presentation: corrected },
-  };
-  const flightContext = { ...context, prompt: 'Show my itinerary.' };
-  assert.deepEqual(await recall.review(flightContext, draft, expectedVisual), {
-    text: flightFallback,
-    presentationSupported: false,
-    correctedVisual: { text: '', presentation: corrected },
-  });
-  delete corrected.options[0].status;
-  assert.deepEqual(await recall.review(flightContext, draft, expectedVisual), {
-    text: flightFallback,
-    presentationSupported: false,
-  });
-});
-
 test('manual archive preserves facts and evidence, restores the note and stays separate from forgetting', async () => {
   const original = entry({
     slug: 'workshop',
@@ -1770,7 +1250,7 @@ test(
       await admin.end();
     });
     await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text,archived_at timestamptz);
-      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,created_at timestamptz);
+      CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,hidden_at timestamptz,created_at timestamptz);
       CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text,thread_id uuid,prompt text,status text,source text,channel text,created_at timestamptz);
       CREATE TABLE preferences(owner_id text,time_zone text);`);
     const active = randomUUID(),
@@ -1815,15 +1295,16 @@ test(
       text: 'Assistant detail.',
     };
     for (const record of [...records, other, old, assistant]) {
-      await pool.query('INSERT INTO messages VALUES($1,$2,$3,NULL,$4,$5,$6)', [
-        record.id,
-        record.owner,
-        record.thread,
-        record.role,
-        record.text,
-        record.at,
-      ]);
+      await pool.query(
+        'INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,NULL,$4,$5,$6)',
+        [record.id, record.owner, record.thread, record.role, record.text, record.at],
+      );
     }
+    const hiddenId = randomUUID();
+    await pool.query(
+      "INSERT INTO messages(id,owner_id,thread_id,role,text,hidden_at,created_at) VALUES($1,$2,$3,'user','Maple fair cedar elm.',now(),$4)",
+      [hiddenId, 'owner-a', active, new Date(Date.UTC(2026, 0, 1, 0, 19, 30))],
+    );
     const search = createHistorySearch({ pool, ownerId: 'owner-a' });
     for (const order of ['relevance', 'newest']) {
       const found: string[] = [];
@@ -1839,12 +1320,14 @@ test(
         cursor = page.nextCursor;
       }
       assert.equal(found.length, 45);
+      assert.equal(found.includes(hiddenId), false);
       assert.deepEqual(new Set(found), new Set(records.map((record) => record.id)));
     }
     await assert.rejects(search({ query: 'Maple', cursor: other.id }), /cursor/);
     await assert.rejects(search({ query: 'Maple', before: old.id }), /unavailable/);
     await assert.rejects(search({ around: other.id }), /unavailable/);
     await assert.rejects(search({ around: old.id }), /unavailable/);
+    await assert.rejects(search({ around: hiddenId }), /unavailable/);
     const datePage = await search({ from: '2026-01-01', to: '2026-01-01' });
     assert.equal(datePage.totalMatches, 45);
     const scoped = Array.from({ length: 10 }, (_, index) => ({
@@ -1853,14 +1336,10 @@ test(
       at: new Date(Date.UTC(2026, 0, 2, 0, index)),
     }));
     for (const record of scoped)
-      await pool.query('INSERT INTO messages VALUES($1,$2,$3,NULL,$4,$5,$6)', [
-        record.id,
-        'owner-a',
-        active,
-        'user',
-        record.text,
-        record.at,
-      ]);
+      await pool.query(
+        'INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,NULL,$4,$5,$6)',
+        [record.id, 'owner-a', active, 'user', record.text, record.at],
+      );
     for (const before of [undefined, scoped[9].id]) {
       const ranked = await search({
         query: 'quartz cedar elm',
@@ -1932,10 +1411,6 @@ test(
         configured: true,
         async curate({ task, input }) {
           inputs.push(JSON.stringify(input));
-          if (task === 'memory_check') {
-            assert.ok(JSON.stringify(input).includes('A saved fact outside the selected packet.'));
-            return { supported: false, usedPaths: ['about/foreign'], answer: 'Foreign answer.' };
-          }
           return 'mode' in input
             ? {
                 paths: ['about/maple', 'about/amber', 'about/foreign'],
@@ -1969,11 +1444,6 @@ test(
     assert.ok(!inputs.join('\n').includes(privateDetail));
     assert.ok(!inputs.join('\n').includes('Foreign Maple detail.'));
     assert.ok(!inputs.join('\n').includes('Archived Maple detail.'));
-    context.memoryBrief = brief;
-    assert.equal(
-      await recall.review(context, 'I do not have a complete count.'),
-      'I do not have a complete count.',
-    );
     assert.deepEqual(await memory.load(), before);
     await pool.query('UPDATE messages SET text=$1 WHERE id=$2', [
       'The source was changed.',
@@ -1994,3 +1464,384 @@ test(
     );
   },
 );
+
+test('onboarding answers update memory and profile analytics while the updates email requires consent', async () => {
+  const memory = createMemoryService({
+    pool: {
+      query: async (sql: string) => ({
+        rows: sql.startsWith('SELECT to_char(now()') ? [{ now: new Date().toISOString() }] : [],
+      }),
+    } as unknown as pg.Pool,
+    ownerId: 'profile-owner',
+    store: memoryObjectStore(),
+  });
+  const sent: string[] = [];
+  const sentProfiles: (OnboardingEmailProfile | undefined)[] = [];
+  const profiles: OnboardingProfile[] = [];
+  let profileAnalyticsFail = false;
+  let profileAnalyticsReturnFalse = false;
+  let enabled = true;
+  let accepted = true;
+  let disableDuringSubmit = false;
+  let disableProfileDuringSubmit = false;
+  const updatesEmail = {
+    enabled: () => enabled,
+    submit: async (email: string, profile?: OnboardingEmailProfile) => {
+      sent.push(email);
+      sentProfiles.push(profile);
+      if (disableDuringSubmit) enabled = false;
+      return accepted;
+    },
+  };
+  const profileAnalytics = {
+    enabled: () => enabled,
+    version: () => 0,
+    submit: async (profile: OnboardingProfile) => {
+      profiles.push(profile);
+      if (disableProfileDuringSubmit) enabled = false;
+      if (profileAnalyticsFail) throw new Error('Synthetic PostHog failure');
+      if (profileAnalyticsReturnFalse) return false;
+      return true;
+    },
+  };
+  const app = Fastify();
+  createOnboardingProfile({ memory, profileAnalytics, updatesEmail }).registerRoutes(app);
+  const unconfigured = Fastify();
+  createOnboardingProfile({ memory }).registerRoutes(unconfigured);
+  const notes = async () =>
+    (await memory.load()).entries.filter((entry) => entry.slug === 'onboarding');
+
+  const first = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: {
+      scope: 'work',
+      roles: ['agency', 'engineering'],
+      whoFor: 'clients',
+      companySize: '2_10',
+      jobs: ['email', 'meetings'],
+      jobsText: 'Chase unpaid invoices',
+    },
+  });
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.json().shared, true);
+  assert.equal(profiles.length, 1);
+  assert.deepEqual(profiles[0], {
+    scope: 'work',
+    roles: ['agency', 'engineering'],
+    whoFor: 'clients',
+    companySize: '2_10',
+    jobs: ['email', 'meetings'],
+    jobsText: 'Chase unpaid invoices',
+  });
+  assert.deepEqual(
+    (await notes()).map(({ area, origin, text }) => ({ area, origin, text })),
+    [
+      {
+        area: 'about',
+        origin: 'stated',
+        text: 'Where they want Nod’s help: Mostly work. What they do: Agency; Engineering. Who it’s for: For my clients. Company size: 2–10. What they want off their plate first: Stay on top of email and Slack; Prep my meetings and day; Chase unpaid invoices.',
+      },
+    ],
+  );
+
+  await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: {
+      scope: 'personal',
+      roles: [],
+      roleText: 'Retired teacher',
+      jobs: [],
+      jobsText: 'Pay with 4242 4242 4242 4242',
+    },
+  });
+  const current = await notes();
+  assert.equal(current.length, 1);
+  assert.equal(
+    current[0]!.text,
+    'Where they want Nod’s help: Mostly personal life. What they do: Retired teacher.',
+  );
+  await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'both', roles: [], roleText: '4242 4242 4242', jobs: [], jobsText: '4242' },
+  });
+  assert.deepEqual(
+    (await notes()).map((entry) => entry.text),
+    ['Where they want Nod’s help: Both.'],
+  );
+  await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { roles: [], roleText: '4242 4242 4242', jobs: [], jobsText: '4242' },
+  });
+  assert.deepEqual(await notes(), []);
+  assert.equal(profiles.length, 4);
+  for (const payload of [
+    { roles: ['astronaut'], jobs: [] },
+    { scope: 'work', roles: ['student'], jobs: [] },
+    { scope: 'personal', roles: [], companySize: '2_10', jobs: [] },
+    { scope: 'work', roles: [], whoFor: 'clients', jobs: [] },
+    { scope: 'work', roles: ['agency', 'agency'], jobs: [] },
+    { scope: 'work', roles: [], jobs: ['email', 'email'] },
+  ]) {
+    const rejected = await app.inject({ method: 'POST', url: '/api/onboarding/profile', payload });
+    assert.notEqual(rejected.statusCode, 200);
+  }
+  assert.deepEqual(await notes(), []);
+  assert.equal(profiles.length, 4);
+
+  const disabledMemory = Fastify();
+  createOnboardingProfile({
+    memory: { ...memory, enabled: async () => false },
+    profileAnalytics,
+  }).registerRoutes(disabledMemory);
+  const savedWithoutMemory = await disabledMemory.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'personal', roles: ['student'], jobs: ['research'] },
+  });
+  assert.equal(savedWithoutMemory.statusCode, 200);
+  assert.equal(savedWithoutMemory.json().shared, true);
+  assert.equal(profiles.length, 5);
+  assert.deepEqual(await notes(), []);
+
+  const failingMemory = Fastify();
+  createOnboardingProfile({
+    memory: {
+      ...memory,
+      restate: async () => {
+        throw new Error('Synthetic memory failure');
+      },
+    },
+    profileAnalytics,
+  }).registerRoutes(failingMemory);
+  const rejectedMemory = await failingMemory.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: ['agency'], jobs: [] },
+  });
+  assert.equal(rejectedMemory.statusCode, 500);
+  assert.equal(profiles.length, 5);
+
+  profileAnalyticsFail = true;
+  const failedAnalytics = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(failedAnalytics.statusCode, 502);
+  assert.match(failedAnalytics.json().error, /continue without sharing them/);
+  assert.equal(profiles.length, 6);
+  profileAnalyticsFail = false;
+  const retriedAnalytics = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(retriedAnalytics.statusCode, 200);
+  assert.equal(retriedAnalytics.json().shared, true);
+  assert.equal(profiles.length, 7);
+  profileAnalyticsReturnFalse = true;
+  const rejectedAnalytics = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(rejectedAnalytics.statusCode, 502);
+  assert.equal(profiles.length, 8);
+  profileAnalyticsReturnFalse = false;
+
+  enabled = false;
+  const optedOutProfile = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(optedOutProfile.statusCode, 200);
+  assert.equal(optedOutProfile.json().shared, false);
+  assert.equal(profiles.length, 8);
+  enabled = true;
+  profileAnalyticsFail = true;
+  disableProfileDuringSubmit = true;
+  const revokedDuringProfileSubmit = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(revokedDuringProfileSubmit.statusCode, 200);
+  assert.equal(revokedDuringProfileSubmit.json().shared, false);
+  assert.equal(profiles.length, 9);
+  enabled = true;
+  profileAnalyticsFail = false;
+  const acceptedDuringProfileOptOut = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(acceptedDuringProfileOptOut.statusCode, 200);
+  assert.equal(acceptedDuringProfileOptOut.json().shared, false);
+  assert.equal(profiles.length, 10);
+  enabled = true;
+  disableProfileDuringSubmit = false;
+  const unavailableAnalytics = await unconfigured.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(unavailableAnalytics.statusCode, 200);
+  assert.equal(unavailableAnalytics.json().shared, false);
+  assert.equal(profiles.length, 10);
+
+  assert.equal(
+    (
+      await unconfigured.inject({
+        method: 'POST',
+        url: '/api/onboarding/updates-email',
+        payload: { email: 'owner@example.test', consent: true },
+      })
+    ).statusCode,
+    404,
+  );
+  const remembered = JSON.stringify(await memory.load());
+  for (const payload of [
+    { email: 'owner@example.test' },
+    { email: 'owner@example.test', consent: false },
+    { email: 'owner@example.test', consent: true, extra: 'ignored' },
+    { email: 'owner@example.test', consent: true, profile: { roles: [], jobs: [] } },
+  ]) {
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/api/onboarding/updates-email',
+      payload,
+    });
+    assert.notEqual(rejected.statusCode, 200);
+  }
+  assert.deepEqual(sent, []);
+  enabled = false;
+  const optedOut = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/updates-email',
+    payload: { email: 'owner@example.test', consent: true },
+  });
+  assert.equal(optedOut.statusCode, 403);
+  assert.deepEqual(sent, []);
+  enabled = true;
+  const subscribed = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/updates-email',
+    payload: { email: 'owner@example.test', consent: true },
+  });
+  assert.equal(subscribed.statusCode, 200);
+  assert.deepEqual(sent, ['owner@example.test']);
+  assert.equal(sentProfiles[0], undefined);
+  assert.equal(JSON.stringify(await memory.load()), remembered);
+  disableDuringSubmit = true;
+  const revokedDuringSubmit = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/updates-email',
+    payload: { email: 'owner@example.test', consent: true },
+  });
+  assert.equal(revokedDuringSubmit.statusCode, 409);
+  assert.match(revokedDuringSubmit.json().error, /may already have been saved/);
+  assert.deepEqual(sent, ['owner@example.test', 'owner@example.test']);
+  enabled = true;
+  disableDuringSubmit = false;
+  accepted = false;
+  const failed = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/updates-email',
+    payload: { email: 'owner@example.test', consent: true },
+  });
+  assert.equal(failed.statusCode, 502);
+  assert.deepEqual(sent, ['owner@example.test', 'owner@example.test', 'owner@example.test']);
+  assert.notEqual(
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/api/onboarding/updates-email',
+        payload: { email: 'not an address', consent: true },
+      })
+    ).statusCode,
+    200,
+  );
+});
+
+test('updates email keeps fixed answers scoped to each submission across route instances', async (t) => {
+  const sent: (OnboardingEmailProfile | undefined)[] = [];
+  const memory = {
+    enabled: async () => false,
+    edit: async () => {
+      throw new Error('Unexpected memory edit');
+    },
+    restate: async () => {
+      throw new Error('Unexpected memory restate');
+    },
+  } as unknown as Parameters<typeof createOnboardingProfile>[0]['memory'];
+  const createApp = () => {
+    const app = Fastify();
+    t.after(() => app.close());
+    createOnboardingProfile({
+      memory,
+      profileAnalytics: { enabled: () => true, version: () => 0, submit: async () => true },
+      updatesEmail: {
+        enabled: () => true,
+        submit: async (_email, profile) => {
+          sent.push(profile);
+          return true;
+        },
+      },
+    }).registerRoutes(app);
+    return app;
+  };
+  const first = createApp();
+  assert.equal(
+    (
+      await first.inject({
+        method: 'POST',
+        url: '/api/onboarding/profile',
+        payload: { scope: 'personal', roles: ['student'], jobs: ['research'] },
+      })
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await first.inject({
+        method: 'POST',
+        url: '/api/onboarding/updates-email',
+        payload: { email: 'second@example.test', consent: true },
+      })
+    ).statusCode,
+    200,
+  );
+  assert.equal(sent[0], undefined);
+
+  const restarted = createApp();
+  const fixed = {
+    onboarding_profile_completed: true,
+    onboarding_scope: 'work',
+    onboarding_roles: ['engineering', 'other'],
+    onboarding_who_for: 'not_asked',
+    onboarding_company_size: '2_10',
+    onboarding_jobs: ['research', 'other'],
+  };
+  const signup = (profile: unknown) =>
+    restarted.inject({
+      method: 'POST',
+      url: '/api/onboarding/updates-email',
+      payload: { email: 'owner@example.test', consent: true, profile },
+    });
+  assert.equal((await signup(fixed)).statusCode, 200);
+  assert.deepEqual(sent[1], fixed);
+  for (const invalid of [
+    { ...fixed, roleText: 'Private synthetic role' },
+    { ...fixed, onboarding_roles: ['engineering', 'engineering'] },
+    { ...fixed, onboarding_who_for: 'clients' },
+    { ...fixed, onboarding_company_size: 'not_asked' },
+    { ...fixed, onboarding_scope: 'private answer' },
+  ])
+    assert.notEqual((await signup(invalid)).statusCode, 200);
+  assert.equal(sent.length, 2);
+});

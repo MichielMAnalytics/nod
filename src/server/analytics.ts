@@ -7,6 +7,11 @@ import { z } from 'zod';
 import type { ProductAnalytics } from '../ports/analytics.ts';
 import { posthogConfig, type AnalyticsConfiguration } from '../shared/analytics.ts';
 import { apiKeyModelProviders } from '../shared/models.ts';
+import {
+  legacyOnboardingChoiceProperties,
+  onboardingPersonProperties,
+} from '../shared/onboarding-analytics.ts';
+import { updatesEmailConsent, type OnboardingProfile } from '../shared/onboarding.ts';
 
 import {
   analyticsEvent,
@@ -127,6 +132,7 @@ export async function createAnalytics(options: {
     ? await installationId(options.dataRoot, options.installationId).catch(() => null)
     : null;
   const available = Boolean(options.provider && localId);
+  const personProfileAvailable = Boolean(options.provider?.setPersonProperties && localId);
   const states = new Map<
     string,
     { enabled: boolean; version: number; revision?: string; controller: AbortController }
@@ -177,8 +183,9 @@ export async function createAnalytics(options: {
     const config = configuration(owner);
     if (!config.enabled || !config.distinctId) return;
     const current = consent(owner);
-    const run = runs.getStore();
-    const system = systems.getStore();
+    const independent = event.event === 'owner_message_accepted';
+    const run = independent ? undefined : runs.getStore();
+    const system = independent ? undefined : systems.getStore();
     const context = run ?? system;
     if (
       context &&
@@ -188,7 +195,7 @@ export async function createAnalytics(options: {
         context.consent.version !== current.version)
     )
       return;
-    const runId = delivery.runId ?? run?.id;
+    const runId = independent ? undefined : (delivery.runId ?? run?.id);
     if (runId !== undefined && !z.uuid().safeParse(runId).success) return;
     if (run && delivery.runId !== undefined && delivery.runId !== run.id) return;
     if (delivery.consentRevision !== undefined && delivery.consentRevision !== current.revision)
@@ -244,6 +251,65 @@ export async function createAnalytics(options: {
       );
     } catch {}
   }
+  async function setOwnerPersonProperties(
+    owner: string,
+    properties: Record<string, string | number | boolean | string[]>,
+    unset?: readonly string[],
+    expected?: ReturnType<typeof consent>,
+  ) {
+    const current = consent(owner);
+    const distinctId = configuration(owner).distinctId;
+    if (
+      !personProfileAvailable ||
+      !current.enabled ||
+      !distinctId ||
+      (expected &&
+        (expected.signal.aborted ||
+          current.signal !== expected.signal ||
+          current.version !== expected.version ||
+          current.revision !== expected.revision))
+    )
+      return false;
+    try {
+      const sent = await options.provider?.setPersonProperties?.(
+        { distinctId, properties, ...(unset?.length ? { unset } : {}) },
+        current.signal,
+      );
+      return Boolean(sent && !current.signal.aborted && current.version === consent(owner).version);
+    } catch {
+      return false;
+    }
+  }
+  function setOnboardingProfileAnswers(owner: string, profile: OnboardingProfile) {
+    return setOnboardingProfileProperties(owner, onboardingPersonProperties(profile));
+  }
+  function setOnboardingProfileProperties(
+    owner: string,
+    properties: ReturnType<typeof onboardingPersonProperties>,
+    expected?: ReturnType<typeof consent>,
+  ) {
+    return setOwnerPersonProperties(owner, properties, legacyOnboardingChoiceProperties, expected);
+  }
+  function setUpdatesEmail(
+    owner: string,
+    email: string,
+    consentAt = new Date().toISOString(),
+    expected?: ReturnType<typeof consent>,
+  ) {
+    return setOwnerPersonProperties(
+      owner,
+      {
+        email,
+        nod_updates_email_consent: true,
+        nod_updates_email_consent_at: consentAt,
+        nod_updates_email_consent_version: updatesEmailConsent.version,
+        nod_updates_email_consent_text: updatesEmailConsent.text,
+        nod_updates_email_consent_privacy_url: updatesEmailConsent.privacyUrl,
+      },
+      undefined,
+      expected,
+    );
+  }
   function setUsageData(owner: string, enabled: boolean, revision = state(owner).revision) {
     const current = state(owner);
     if (current.enabled === enabled && current.revision === revision) return;
@@ -260,6 +326,10 @@ export async function createAnalytics(options: {
   return {
     configuration,
     consent,
+    personProfileAvailable,
+    setOnboardingProfileAnswers,
+    setOnboardingProfileProperties,
+    setUpdatesEmail,
     withRun<T>(owner: string, operation: () => T): T {
       return runs.run({ owner, id: randomUUID(), consent: consent(owner) }, operation);
     },

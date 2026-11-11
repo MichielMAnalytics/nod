@@ -19,16 +19,9 @@ Follow [Install from source](docs/src/content/docs/get-started/install-from-sour
 pnpm run dev
 ```
 
-Use your own model key and accounts. Before you open a pull request, run:
+Use your own model key and accounts. Run checks that match the files and behavior you change. Documentation and media changes need formatting, link, and visual checks, without application tests or builds. Build the docs site when its pages, configuration, or code change.
 
-```sh
-pnpm run check             # types, import boundaries, formatting
-pnpm test                  # deterministic tests
-pnpm run test:integration  # every test in Linux with a disposable PostgreSQL and Chromium
-pnpm run build             # types and web bundle
-```
-
-Some areas need extra checks, such as `pnpm run desktop:test` or `pnpm --dir docs build`. See [Checks and tests](docs/src/content/docs/contribute/checks-and-tests.md).
+For application changes, start with focused tests. Run broader checks only when needed to verify the affected behavior. See [Checks and tests](docs/src/content/docs/contribute/checks-and-tests.md).
 
 ## Pull requests
 
@@ -38,7 +31,7 @@ Some areas need extra checks, such as `pnpm run desktop:test` or `pnpm --dir doc
 - Keep keys, credentials and private content out of code, tests, logs and screenshots.
 - Update the docs in [`docs/`](docs/README.md) when setup or behaviour changes.
 
-A member of [@n8n-io/n8n-labs](.github/CODEOWNERS) reviews every change. See [Pull requests](docs/src/content/docs/contribute/pull-requests.md) for review, merge and release details.
+A maintainer reviews every change. See [Pull requests](docs/src/content/docs/contribute/pull-requests.md) for review, merge and release details.
 
 ## License
 

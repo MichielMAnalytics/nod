@@ -69,8 +69,9 @@ export function DataSharing({
         <ul>
           {usage !== undefined && (
             <Item icon={ChartColumn} title="Usage data" state={state(usage)}>
-              Which screens and features you use, the kinds of tasks you ask for, and what fails.
-              Never your messages.
+              Which screens and features you use, the kinds of tasks you ask for, what fails, your
+              onboarding and survey answers, and your email (if you provide it). Never your
+              messages.
             </Item>
           )}
           {traces !== undefined && (
@@ -83,7 +84,10 @@ export function DataSharing({
             Saved passwords and cards, your memory, or screen recordings.
           </Item>
         </ul>
-        <p>Stored in the EU. You can turn sharing off anytime.</p>
+        <p>
+          Stored in the EU. Turning a switch off stops new data of that kind; ask us to delete
+          earlier data.
+        </p>
         <div className="data-sharing-actions">
           <a href={detailsUrl} target="_blank" rel="noreferrer">
             Full details <ArrowUpRight size={14} aria-hidden="true" />

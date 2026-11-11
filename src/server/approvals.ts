@@ -4,6 +4,7 @@ import { pool } from './db.ts';
 import { ownerId } from './config.ts';
 import { refresh } from './events.ts';
 import {
+  abortTurns,
   enqueueTurn,
   withTurnLock,
   type SubmitUserMessageResult,
@@ -43,6 +44,7 @@ export interface ApprovalDescription {
 
 export interface ChatConfirmationInput {
   text: string;
+  displayText?: string;
   channel: string;
   threadId: string;
   replyToMessageId?: string;
@@ -76,6 +78,36 @@ const notRun = (error: unknown) =>
 
 function conflict(message = 'This confirmation is expired, already handled, or its turn changed.') {
   return Object.assign(new Error(message), { statusCode: 409 });
+}
+
+function confirmedOutcome(
+  action: string,
+  { status, result, error }: { status: string; result?: unknown; error?: unknown },
+  resumed = false,
+) {
+  if (status === 'completed') {
+    const legacyPause = action === 'NOD_schedule_cancel';
+    const schedule = legacyPause
+      ? (result as {
+          kind?: string;
+          enabled?: boolean;
+          runAt?: string | null;
+          lastRun?: { scheduledFor?: string } | null;
+        })
+      : null;
+    const paused =
+      schedule?.enabled === false &&
+      (schedule.kind === 'recurring' ||
+        (schedule.kind === 'once' && schedule.lastRun?.scheduledFor !== schedule.runAt));
+    return `The exact action confirmed by the user was executed once by the trusted worker. Do not repeat it.${resumed ? ' Continue from its result.' : ''}${paused ? ' The schedule is paused, remains in Scheduled, and can be resumed.' : ''}\n${untrustedBlock(`${legacyPause ? 'NOD_schedule_pause' : action} result`, JSON.stringify(result))}`;
+  }
+  const failure =
+    error === undefined
+      ? ''
+      : `\n${untrustedBlock(`${action} error`, error instanceof Error ? error.message : String(error))}`;
+  return status === 'uncertain' || status === 'executing'
+    ? `The action the user confirmed failed or was interrupted and will not be retried. Its outcome is uncertain, so check the app before trying it again. Do not report it as done.${failure}`
+    : `The action the user confirmed did not run, so nothing was done. Do not report it as done.${failure}`;
 }
 
 async function turnRow(client: PoolClient, turnId: string) {
@@ -454,9 +486,9 @@ export async function createApprovals(
       input.replyToMessageId ??
       (
         await database.query(
-          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND u.channel=$3 AND m.role='assistant'
+          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND u.channel=$3 AND m.role='assistant' AND m.hidden_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
-           AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3
+           AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
              AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',n.created_at)))
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
@@ -469,8 +501,9 @@ export async function createApprovals(
         `SELECT a.*,u.source AS turn_source,u.status AS turn_status,u.background AS turn_background,u.session_id AS turn_session_id,u.prompt AS turn_prompt
        FROM approvals a JOIN turns u ON u.id=a.turn_id
        WHERE a.confirmation_message_id=COALESCE((SELECT m.reply_to_message_id FROM messages m
-         WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL),$1)
+         WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant' AND m.turn_id IS NULL AND m.hidden_at IS NULL),$1)
          AND a.owner_id=$2 AND u.owner_id=$2 AND a.thread_id=$3 AND u.thread_id=$3 AND u.channel=$4
+         AND EXISTS (SELECT 1 FROM messages c WHERE c.id=a.confirmation_message_id AND c.owner_id=a.owner_id AND c.hidden_at IS NULL)
          AND (to_jsonb(u)->>'task_id' IS NULL OR NOT EXISTS (
            SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.session_id=u.session_id AND n.id<>u.id
              AND n.source IN ('user','task') AND n.message_id IS NOT NULL AND n.status IN ('queued','running')))
@@ -497,6 +530,7 @@ export async function createApprovals(
   async function acceptChat(
     client: PoolClient,
     input: ChatConfirmationInput,
+    onInserted?: () => void,
   ): Promise<ChatConfirmationResult> {
     const approval = await confirmationFor(client, input, true);
     if (!approval || !input.answer || approval.status !== 'pending') return undefined;
@@ -548,11 +582,12 @@ export async function createApprovals(
       ownerId,
     ]);
     await client.query(
-      "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id,approval_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7)",
+      "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,reply_to_message_id,approval_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8)",
       [
         messageId,
         ownerId,
         input.text,
+        input.displayText ?? null,
         input.threadId,
         turnId,
         input.replyToMessageId ?? null,
@@ -567,6 +602,7 @@ export async function createApprovals(
     afterCommit(client, () =>
       changed(approved ? 'approved' : 'declined', approval.action, approval.turn_source),
     );
+    onInserted?.();
     return { threadId: input.threadId, turnId, messageId };
   }
 
@@ -637,21 +673,156 @@ export async function createApprovals(
       approval.turn_source,
     );
     signal.throwIfAborted();
-    if (outcome.status === 'completed')
-      return {
-        prompt: `The exact action confirmed by the user was executed once by the trusted worker. Do not repeat it. Continue from its result.\n${untrustedBlock(`${approval.action} result`, JSON.stringify(outcome.result))}`,
-      };
-    const failure = untrustedBlock(
-      `${approval.action} error`,
-      outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
-    );
-    return {
-      prompt:
-        outcome.status === 'expired'
-          ? `The action the user confirmed did not run, so nothing was done. Do not report it as done.\n${failure}`
-          : `The action the user confirmed failed and will not be retried. Its outcome is uncertain, so check the app before trying it again. Do not report it as done.\n${failure}`,
-    };
+    return { prompt: confirmedOutcome(approval.action, outcome, true) };
   }
 
-  return { request, chat: { answer: answerChat, accept: acceptChat }, executeConfirmed };
+  async function stoppedOutcomes(turnId: string) {
+    const { rows } = await pool.query<{ action: string; status: string; result: unknown }>(
+      `WITH t AS (SELECT session_id,created_at,id FROM turns WHERE id=$1 AND owner_id=$2),
+       finished AS (SELECT d.created_at,d.id FROM turns d JOIN t ON d.session_id=t.session_id
+         WHERE d.owner_id=$2 AND d.status IN ('succeeded','waiting') AND (d.created_at,d.id)<(t.created_at,t.id)
+         ORDER BY d.created_at DESC,d.id DESC LIMIT 1)
+       SELECT a.action,a.status,a.result FROM t
+       JOIN turns e ON e.owner_id=$2 AND e.session_id=t.session_id AND e.status IN ('cancelled','failed')
+         AND (e.created_at,e.id)<(t.created_at,t.id)
+         AND NOT EXISTS (SELECT 1 FROM finished f WHERE (f.created_at,f.id)>(e.created_at,e.id))
+       JOIN approvals a ON a.owner_id=$2 AND a.execution_turn_id=e.id AND a.status<>'declined'
+       ORDER BY e.created_at,e.id`,
+      [turnId, ownerId],
+    );
+    return rows.map(({ action, ...outcome }) => confirmedOutcome(action, outcome));
+  }
+
+  async function retireScheduleConfirmationsInTransaction(
+    client: PoolClient,
+    id: string,
+    waitForSend: boolean,
+  ) {
+    const pending = (
+      await client.query<{
+        id: string;
+        action: string;
+        turn_id: string;
+        confirmation_message_id: string | null;
+        source: string;
+      }>(
+        `SELECT a.id,a.action,a.turn_id,a.confirmation_message_id,u.source
+         FROM approvals a JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id
+         WHERE a.owner_id=$1 AND a.action IN ('NOD_schedule_pause','NOD_schedule_cancel','NOD_schedule_update')
+           AND lower(a.args->>'id')=lower($2::text) AND a.status='pending'
+         FOR UPDATE OF a`,
+        [ownerId, id],
+      )
+    ).rows;
+    if (!pending.length) return;
+    const approvalIds = pending.map((row) => row.id);
+    const turnIds = [...new Set(pending.map((row) => row.turn_id))];
+    const messageIds = pending.flatMap((row) =>
+      row.confirmation_message_id ? [row.confirmation_message_id] : [],
+    );
+    if (messageIds.length)
+      try {
+        if (waitForSend) await client.query("SET LOCAL lock_timeout = '30s'");
+        await client.query(
+          `SELECT id FROM messages WHERE owner_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE${waitForSend ? '' : ' NOWAIT'}`,
+          [ownerId, messageIds],
+        );
+      } catch (cause) {
+        if ((cause as { code?: string }).code !== '55P03') throw cause;
+        throw Object.assign(new Error('A schedule confirmation is still being sent.'), {
+          code: '55P03',
+          notRun: true,
+          statusCode: 409,
+        });
+      }
+    await client.query(
+      'SELECT id FROM turns WHERE owner_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR NO KEY UPDATE NOWAIT',
+      [ownerId, turnIds],
+    );
+    await client.query(
+      "UPDATE approvals SET status='expired' WHERE owner_id=$1 AND id=ANY($2::uuid[])",
+      [ownerId, approvalIds],
+    );
+    if (messageIds.length)
+      await client.query(
+        'UPDATE messages SET hidden_at=now() WHERE owner_id=$1 AND id=ANY($2::uuid[])',
+        [ownerId, messageIds],
+      );
+    let tasks: Array<{ id: string; turn_id: string; thread_id: string }>;
+    try {
+      tasks = (
+        await client.query<{ id: string; turn_id: string; thread_id: string }>(
+          `SELECT t.id,t.turn_id,u.thread_id FROM tasks t
+           JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id AND u.task_id=t.id
+           WHERE t.owner_id=$1 AND t.state='open' AND u.id=ANY($2::uuid[])
+           ORDER BY t.id FOR UPDATE OF t NOWAIT`,
+          [ownerId, turnIds],
+        )
+      ).rows;
+    } catch (cause) {
+      if ((cause as { code?: string }).code !== '55P03') throw cause;
+      throw Object.assign(new Error('This task is still being updated. Try again.'), {
+        code: '55P03',
+        notRun: true,
+        statusCode: 409,
+      });
+    }
+    for (const task of tasks) {
+      const messageId = randomUUID();
+      await client.query(
+        `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text)
+         VALUES($1,$2,$3,$4,'assistant',$5)`,
+        [
+          messageId,
+          ownerId,
+          task.thread_id,
+          task.turn_id,
+          'The schedule has changed. This task is still open. Reply here if you want to continue it.',
+        ],
+      );
+      await client.query(
+        'UPDATE tasks SET continuation_message_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2',
+        [task.id, ownerId, messageId],
+      );
+    }
+    await client.query(
+      "UPDATE turns SET status='cancelled',finished_at=now() WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND status IN ('running','waiting')",
+      [ownerId, turnIds],
+    );
+    afterCommit(client, () => {
+      abortTurns(turnIds);
+      for (const row of pending) changed('expired', row.action, row.source);
+    });
+  }
+
+  async function retireScheduleConfirmations(client: PoolClient, id: string, waitForSend: boolean) {
+    try {
+      await retireScheduleConfirmationsInTransaction(client, id, waitForSend);
+    } catch (cause) {
+      const error = cause as { code?: string; statusCode?: number };
+      if (error?.code !== '55P03' || error.statusCode === 409) throw cause;
+      throw Object.assign(new Error('This schedule or task is still being updated. Try again.'), {
+        code: '55P03',
+        notRun: true,
+        statusCode: 409,
+      });
+    }
+  }
+
+  async function isRetirableScheduleConfirmation(messageId: string) {
+    const result = await pool.query(
+      "SELECT 1 FROM approvals WHERE owner_id=$1 AND confirmation_message_id=$2 AND action IN ('NOD_schedule_pause','NOD_schedule_cancel','NOD_schedule_update') LIMIT 1",
+      [ownerId, messageId],
+    );
+    return Boolean(result.rowCount);
+  }
+
+  return {
+    request,
+    chat: { answer: answerChat, accept: acceptChat },
+    executeConfirmed,
+    stoppedOutcomes,
+    retireScheduleConfirmations,
+    isRetirableScheduleConfirmation,
+  };
 }

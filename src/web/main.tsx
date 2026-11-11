@@ -7,6 +7,7 @@ import { initializeFocusVisibility } from './lib/focus';
 import { configureAnalytics } from './lib/analytics-client';
 import { claimAccess, sessionStore } from './lib/session';
 import { recordFeedbackError } from './lib/feedback-errors';
+import './components/dialog.css';
 import './styles.css';
 import './components/tabs.css';
 import './components/message-actions.css';
@@ -37,6 +38,8 @@ import './pages/privacy.css';
 import './pages/onboarding/onboarding.css';
 import './pages/onboarding/steps/welcome.css';
 import './pages/onboarding/steps/brain.css';
+import './pages/onboarding/steps/about.css';
+import './pages/onboarding/steps/join.css';
 import './pages/onboarding/steps/personal-connection.css';
 import './components/app-account-manager.css';
 import './components/whatsapp-setup.css';
@@ -45,6 +48,7 @@ import './components/data-sharing.css';
 import './components/time-picker.css';
 import './components/voice-settings.css';
 import './components/feedback.css';
+import './components/desktop-update-toast.css';
 import './components/survey-card.css';
 import './components/editor-formatting.css';
 import './components/feedback-attachments.css';
@@ -68,9 +72,7 @@ window.addEventListener('unhandledrejection', (event) =>
 );
 sessionStore.subscribe(() => {
   const { session } = sessionStore.getSnapshot();
-  configureAnalytics(
-    session?.user || session?.analytics?.distinctId === null ? session?.analytics : undefined,
-  );
+  configureAnalytics(session?.user ? session.analytics : undefined);
 });
 
 if (window.location.pathname === '/trust')

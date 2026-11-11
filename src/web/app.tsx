@@ -18,6 +18,7 @@ import { SetupProgress } from './components/setup-progress';
 import { ServerAccess } from './components/server-access';
 import { Sidebar } from './components/sidebar';
 import { DesktopToolbar } from './components/desktop-toolbar';
+import { DesktopUpdateToast } from './components/desktop-update-toast';
 import { SidebarToggle } from './components/sidebar-toggle';
 import { FeedbackDialog } from './components/feedback';
 import { createFeedbackCapture } from './lib/feedback-capture';
@@ -558,6 +559,7 @@ function AuthenticatedApp({
           user={session.user!}
           onFeedback={openFeedback}
           usageShared={Boolean(session.analytics?.enabled)}
+          updatesEmail={session.capabilities.updatesEmail}
           traces={account.traces}
           onTraces={account.onTraces}
           onComplete={async () => {
@@ -781,6 +783,7 @@ export function App({ sessionState }: { sessionState: ReturnType<typeof useSessi
           onFeedbackHandled={() => setFeedbackRequest(0)}
         />
       )}
+      {desktopSettingsAvailable() && !updating && <DesktopUpdateToast />}
     </>
   );
 }

@@ -20,13 +20,13 @@ export interface AccountSettings {
 export interface SessionResponse {
   analytics?: AnalyticsConfiguration;
   user: AccountUser | null;
-  settings: AccountSettings | null;
-  capabilities: { developer: boolean; traces: boolean };
+  settings: (AccountSettings & { usageDataRevision?: string }) | null;
+  capabilities: { developer: boolean; traces: boolean; updatesEmail: boolean };
 }
 
 export interface AccountUpdate {
   theme?: AccountTheme;
-  onboardingCompleted?: boolean;
+  onboardingCompleted?: true;
   usageData?: boolean;
   traces?: boolean;
 }

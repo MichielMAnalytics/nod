@@ -23,7 +23,7 @@ import { PgBoss } from 'pg-boss';
 import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
-import { turnChainSql } from './turn-chain.ts';
+import { laterSupersedingTurnSql, turnChainSql } from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -57,7 +57,7 @@ import {
 import { attachmentKind } from '../shared/attachment-kind.ts';
 import { inlineAppResult, noMailCheck, type MailCheck } from './integration-result.ts';
 import { saveIntegrationFiles } from './integration-files.ts';
-import { spendingLimitReached } from './ledger.ts';
+import { spendingLimitReached, spendingLimitText } from './ledger.ts';
 import type { ExecutionEvent } from '../shared/execution.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
@@ -79,6 +79,8 @@ export const boss = new PgBoss({
 const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
 let stopping = false;
+let nextStop = new AbortController();
+export const stopSignal = () => nextStop.signal;
 
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
 export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
@@ -105,6 +107,7 @@ interface SubmitUserMessageOptions {
   sourceId?: string;
   channel?: string;
   client?: PoolClient;
+  displayText?: string;
   replyToMessageId?: string;
   replyQuote?: string;
   seenMessageId?: string;
@@ -116,6 +119,8 @@ interface SubmitUserMessageOptions {
   answer?: ChatConfirmationInput['answer'];
   prepareAttachments?: (client: PoolClient, threadId: string) => Promise<Artifact[]>;
   persistSubmission?: (client: PoolClient, result: SubmitUserMessageResult) => Promise<void>;
+  onInserted?: () => void;
+  stopSignal?: AbortSignal;
 }
 export interface SubmitUserMessageResult {
   threadId: string;
@@ -124,7 +129,11 @@ export interface SubmitUserMessageResult {
 }
 type ConfirmAction = {
   answer(input: ChatConfirmationInput): Promise<ChatConfirmationInput['answer']>;
-  accept(client: PoolClient, input: ChatConfirmationInput): Promise<ChatConfirmationResult>;
+  accept(
+    client: PoolClient,
+    input: ChatConfirmationInput,
+    onInserted?: () => void,
+  ): Promise<ChatConfirmationResult>;
 };
 
 export interface ThreadDependencies {
@@ -153,16 +162,18 @@ export interface ThreadDependencies {
     turnId: string,
     signal: AbortSignal,
   ) => Promise<{ prompt: string } | undefined>;
+  stoppedOutcomes?: (turnId: string) => Promise<string[]>;
   bindVerificationQuestion?: (
     turnId: string,
     messageId: string,
     client: PoolClient,
   ) => Promise<void>;
-  spendingLimitReached?: () => Promise<boolean>;
+  spendingLimit?: () => Promise<{ monthlyUsd: number } | null>;
   checkIn?: (sessionId: string, turnId: string) => Promise<RuntimeContext['checkIn']>;
   skipTurn?: (sourceId: string) => Promise<boolean>;
   accountProfile?: () => Promise<RuntimeContext['account']>;
   connectedApps?: () => Promise<NonNullable<RuntimeContext['connectedApps']>>;
+  localFiles?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
   memoryContext?: () => Promise<RuntimeContext['memory']>;
   recall?: (
@@ -316,10 +327,15 @@ async function insertEvent(
   );
 }
 
-async function assertReplyTarget(client: PoolClient, threadId: string, messageId?: string) {
+async function assertReplyTarget(
+  client: PoolClient,
+  threadId: string,
+  messageId?: string,
+  lock = false,
+) {
   if (!messageId) return;
   const target = await client.query(
-    'SELECT 1 FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3',
+    `SELECT 1 FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND hidden_at IS NULL${lock ? ' FOR SHARE' : ''}`,
     [messageId, ownerId, threadId],
   );
   if (!target.rowCount) throw httpError('The reply is unavailable in this conversation.', 404);
@@ -504,11 +520,22 @@ export async function enqueueTurn(prompt: string, options: EnqueueTurnOptions) {
 }
 
 export function createUserMessageService(
-  options: { confirmAction?: ConfirmAction; taskReply?: TaskReply } = {},
+  options: {
+    confirmAction?: ConfirmAction;
+    taskReply?: TaskReply;
+    accepted?: () => (channel: string) => void;
+  } = {},
 ) {
   return {
     submit: (text: string, attachments: Artifact[] = [], input: SubmitUserMessageOptions = {}) =>
-      submitUserMessage(text, attachments, input, options.confirmAction, options.taskReply),
+      submitUserMessage(
+        text,
+        attachments,
+        input,
+        options.confirmAction,
+        options.taskReply,
+        options.accepted?.(),
+      ),
     answer: (text: string, input: SubmitUserMessageOptions = {}) =>
       readAnswer(text, false, input, options.confirmAction),
   };
@@ -545,11 +572,14 @@ export async function submitUserMessage(
   options: SubmitUserMessageOptions = {},
   confirmAction?: ConfirmAction,
   taskReply?: TaskReply,
+  onAccepted?: (channel: string) => void,
 ): Promise<SubmitUserMessageResult> {
+  const stop = options.stopSignal ?? stopSignal();
   validateSource(options.sourceId, options.channel);
   const channel = options.channel ?? 'web';
   const confirmation = {
     text,
+    displayText: options.displayText,
     channel,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
@@ -572,6 +602,11 @@ export async function submitUserMessage(
       : options.client
         ? options.answer
         : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
+  let inserted = false;
+  const markInserted = () => {
+    inserted = true;
+    options.onInserted?.();
+  };
   const submit = async (client: PoolClient): Promise<SubmitUserMessageResult> => {
     const thread = await lockThread(client);
     if (options.threadId !== undefined && options.threadId !== thread.id)
@@ -579,7 +614,7 @@ export async function submitUserMessage(
     if (options.clientMessageId) {
       const previous = (
         await client.query(
-          'SELECT id,owner_id,role,text,audio_caption,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,question_answer FROM messages WHERE id=$1',
+          'SELECT id,owner_id,role,text,display_text,audio_caption,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,question_answer FROM messages WHERE id=$1',
           [options.clientMessageId],
         )
       ).rows[0];
@@ -589,6 +624,7 @@ export async function submitUserMessage(
           previous.role !== 'user' ||
           previous.thread_id !== thread.id ||
           previous.text !== text ||
+          previous.display_text !== (options.displayText ?? null) ||
           previous.audio_caption !== (options.audioCaption ?? null) ||
           previous.reply_to_message_id !== (options.replyToMessageId ?? null) ||
           previous.reply_quote !== (options.replyQuote ?? null) ||
@@ -651,14 +687,21 @@ export async function submitUserMessage(
       (!options.replyToMessageId || !options.replyQuote.trim() || options.replyQuote.length > 4000)
     )
       throw httpError('Select a passage of 4,000 characters or fewer.');
-    const confirmed = options.questionAnswer
-      ? undefined
-      : await confirmAction?.accept(client, {
-          ...confirmation,
-          threadId: thread.id,
-          answer,
-          ...(options.approvalAnswer ? { clicked: true } : {}),
-        });
+    const live = !stop.aborted;
+    const confirmed =
+      options.questionAnswer || !live
+        ? undefined
+        : await confirmAction?.accept(
+            client,
+            {
+              ...confirmation,
+              threadId: thread.id,
+              answer,
+              ...(options.approvalAnswer ? { clicked: true } : {}),
+            },
+            markInserted,
+          );
+    await assertReplyTarget(client, thread.id, options.replyToMessageId, true);
     if (confirmed && 'turnId' in confirmed) return confirmed;
     if (options.approvalAnswer)
       throw Object.assign(httpError('This approval is no longer waiting for an answer.', 409), {
@@ -671,26 +714,28 @@ export async function submitUserMessage(
     const messageId = options.clientMessageId ?? randomUUID();
     const turnId = randomUUID();
     const taskTarget =
-      options.replyToMessageId && (await taskReply?.(client, thread.id, options.replyToMessageId));
-    const question =
-      taskTarget ||
-      choiceQuestion ||
-      confirmed?.waiting ||
-      (
-        await client.query(
-          `SELECT u.id,u.session_id,u.background FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id
+      live &&
+      options.replyToMessageId &&
+      (await taskReply?.(client, thread.id, options.replyToMessageId));
+    const question = live
+      ? taskTarget ||
+        choiceQuestion ||
+        confirmed?.waiting ||
+        (
+          await client.query(
+            `SELECT u.id,u.session_id,u.background FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id
        WHERE u.owner_id=$1 AND u.thread_id=$2 AND (u.channel=$3 OR $4::uuid IS NOT NULL) AND u.status='waiting' AND u.waiting_reason='question'
          AND m.role='assistant' AND (($4::uuid IS NOT NULL AND m.id=$4) OR ($4::uuid IS NULL AND u.session_id=$2))
          AND m.id=(SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1)
-         AND NOT EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.session_id=u.session_id
-           AND (n.created_at,n.id)>(u.created_at,u.id))
+         AND NOT ${laterSupersedingTurnSql}
        ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-          [ownerId, thread.id, channel, options.replyToMessageId ?? null],
-        )
-      ).rows[0];
+            [ownerId, thread.id, channel, options.replyToMessageId ?? null],
+          )
+        ).rows[0]
+      : undefined;
     await client.query(
-      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id)
-       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at)
+       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END)`,
       [
         turnId,
         ownerId,
@@ -702,16 +747,18 @@ export async function submitUserMessage(
         question?.session_id ?? thread.id,
         question?.background ?? false,
         question?.id ?? null,
+        live ? 'queued' : 'cancelled',
       ],
     );
     if (taskTarget) await taskTarget.record(turnId);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
-      "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10)",
+      "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11)",
       [
         messageId,
         ownerId,
         text,
+        options.displayText ?? null,
         thread.id,
         turnId,
         JSON.stringify([...attachments, ...prepared]),
@@ -721,7 +768,8 @@ export async function submitUserMessage(
         options.questionAnswer ? JSON.stringify(options.questionAnswer) : null,
       ],
     );
-    await sendDrain(client, thread.id);
+    if (live) await sendDrain(client, thread.id);
+    markInserted();
     return { threadId: thread.id, turnId, messageId };
   };
   let result: SubmitUserMessageResult;
@@ -738,6 +786,11 @@ export async function submitUserMessage(
       throw messageIdInUse();
     throw error;
   }
+  if (!options.client && inserted) {
+    try {
+      onAccepted?.(channel);
+    } catch {}
+  }
   if (!options.client) refresh();
   return result;
 }
@@ -750,6 +803,10 @@ export async function cancelTurns(
   actor: 'owner' | 'agent' = 'owner',
 ) {
   const capture = snapshotAnalytics(analytics);
+  if (!scope.sessionId && !scope.background) {
+    nextStop.abort();
+    nextStop = new AbortController();
+  }
   const values = [threadId, ownerId, scope.sessionId ?? null, scope.background ?? false];
   const candidates = await client.query<{ id: string }>(
     "SELECT id FROM turns WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND (NOT $4 OR session_id<>$1) AND status IN ('queued','running','waiting')",
@@ -842,7 +899,7 @@ export async function reactToAssistantMessage(
     const message = (
       await client.query(
         `SELECT m.id,m.text,m.reaction,m.reaction_revision,COALESCE(u.channel,'web') AS channel FROM messages m LEFT JOIN turns u ON u.id=m.turn_id
-         WHERE m.id=$1 AND m.owner_id=$2 AND m.role='assistant' AND m.thread_id=$3 FOR UPDATE OF m`,
+         WHERE m.id=$1 AND m.owner_id=$2 AND m.role='assistant' AND m.thread_id=$3 AND m.hidden_at IS NULL FOR UPDATE OF m`,
         [messageId, ownerId, thread.id],
       )
     ).rows[0];
@@ -931,7 +988,7 @@ export async function retryCredentials(turnId: string) {
 }
 
 export const activeHandoffSql = `u.status='waiting' AND u.waiting_reason='question' AND u.handoff_browser_id IS NOT NULL
-    AND NOT EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.session_id=u.session_id AND (n.created_at,n.id)>(u.created_at,u.id))`;
+    AND NOT ${laterSupersedingTurnSql}`;
 
 export async function resumeAfterHandoff(turnId: string) {
   const resumed = await transaction(async (client) => {
@@ -1006,6 +1063,42 @@ const interrupted = 'Interrupted.';
 
 function failureText(error: unknown) {
   const text = error instanceof Error ? error.message || error.name : String(error);
+  if (error instanceof ModelRequestError) {
+    const code = /\b429\b/.test(text) ? ' (HTTP 429)' : '';
+    if (/\bsubscription_sharing_workplace_individual_usage_limit_exceeded\b/i.test(text))
+      return `The model provider's workspace usage limit was reached${code}. Ask your workspace admin to review the limit, or wait for it to reset.`;
+    if (
+      /\b(?:GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|subscription_sharing_usage_limit_exceeded)\b/i.test(
+        text,
+      ) ||
+      /["']code["']\s*:\s*["']?1308(?!\d)/i.test(text)
+    )
+      return `The model provider's quota was reached${code}. Wait for it to reset, or check the provider account's usage limits and plan.`;
+    const quota =
+      /\b(?:insufficient[_ -]?quota|quota[_ -]?(?:exceeded|exhausted|reached)|exceeded\s+(?:your\s+)?(?:current\s+)?quota)\b/i.test(
+        text,
+      );
+    if (
+      quota ||
+      /\b(?:429|too many requests|resource_exhausted|rate[ _-]?limit(?:ed|ing|[_ -]?(?:error|exceeded))?)\b/i.test(
+        text,
+      )
+    ) {
+      const retry = text.match(
+        /\b(?:please\s+)?retry\s+in\s+(\d{1,3}(?:\.\d{1,9})?)\s*s(?:econds?)?\b/i,
+      );
+      const seconds = retry ? Math.ceil(Number(retry[1])) : 0;
+      const next =
+        seconds > 0 && seconds <= 120
+          ? `Try again in about ${seconds} second${seconds === 1 ? '' : 's'}.`
+          : quota
+            ? 'Try again later.'
+            : 'Try again shortly.';
+      return quota
+        ? `The model provider's quota was reached${code}. ${next} If it keeps happening, check the provider account's usage limits and billing.`
+        : `The model provider is rate limiting requests${code}. ${next}`;
+    }
+  }
   return redactSecretText(text).trim().slice(0, 2_000) || 'Unknown error.';
 }
 
@@ -1013,6 +1106,7 @@ async function failTurn(
   turnId: string,
   present: ThreadDependencies['present'],
   error = interrupted,
+  next?: string,
 ) {
   const turn = await transaction(async (client) => {
     const thread = await lockThread(client);
@@ -1066,7 +1160,7 @@ async function failTurn(
       ? presented
       : error === interrupted
         ? `I was interrupted before I finished${work ? ` “${work}”` : ''}. Check anything I may have started before you ask me to continue.`
-        : `I couldn't finish ${work ? `“${work}”` : 'this'}. ${error}`;
+        : `I couldn't finish ${work ? `“${work}”` : 'this'}. ${error}${next ? ` ${next}` : ''}`;
   await transaction(async (client) => {
     if ((await lockThread(client)).id !== turn.thread_id) return;
     const current = await client.query(
@@ -1074,7 +1168,7 @@ async function failTurn(
        AND status='failed' AND error=$7
        AND ((NOT $6::boolean AND (SELECT id FROM messages WHERE owner_id=$2 AND thread_id=$3 AND role='user'
             ORDER BY created_at DESC,id DESC LIMIT 1) IS NOT DISTINCT FROM $5::uuid)
-         OR ($6::boolean AND NOT EXISTS (SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.session_id=u.session_id AND (n.created_at,n.id)>(u.created_at,u.id))))
+         OR ($6::boolean AND NOT ${laterSupersedingTurnSql}))
        AND NOT EXISTS (SELECT 1 FROM messages WHERE owner_id=$2 AND thread_id=$3 AND stream_id=$4) FOR UPDATE`,
       [
         turnId,
@@ -1096,6 +1190,15 @@ async function failTurn(
       );
   }, pool);
   return true;
+}
+
+function failAtLimit(turnId: string, monthlyUsd?: number) {
+  return failTurn(
+    turnId,
+    undefined,
+    monthlyUsd === undefined ? spendingLimitReached : spendingLimitText(monthlyUsd),
+    'Raise or remove it in [Usage](/usage), or tell me here.',
+  );
 }
 
 export async function startThreadWorkers(dependencies: ThreadDependencies) {
@@ -1231,7 +1334,7 @@ async function loadMessage(messageId: string | null) {
              SELECT 1 FROM messages earlier WHERE earlier.owner_id=s.owner_id AND earlier.thread_id=s.thread_id
                AND earlier.role='user' AND (earlier.created_at,earlier.id)<(s.created_at,s.id)
            ) AS first_conversation_turn
-           FROM messages s LEFT JOIN messages r ON r.id=s.reply_to_message_id AND r.owner_id=s.owner_id AND r.thread_id=s.thread_id
+           FROM messages s LEFT JOIN messages r ON r.id=s.reply_to_message_id AND r.owner_id=s.owner_id AND r.thread_id=s.thread_id AND r.hidden_at IS NULL
            WHERE s.id=$1 AND s.owner_id=$2`,
           [messageId, ownerId],
         )
@@ -1280,6 +1383,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     learnedSkills,
     connectedApps,
     mcpServers,
+    confirmedActions,
   ] = await Promise.all([
     loadMessage(sourceMessageId),
     pool.query(
@@ -1291,7 +1395,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        COALESCE(u.background AND m.created_at > COALESCE(seen.at,'-infinity'),false) AS unseen
        FROM messages m CROSS JOIN seen CROSS JOIN boundary
        LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
-       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id IS DISTINCT FROM $3::uuid
+       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.id IS DISTINCT FROM $3::uuid
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
@@ -1315,6 +1419,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       ? dependencies.connectedApps?.()
       : dependencies.connectedApps?.().catch(() => undefined),
     dependencies.mcpServers?.().catch(() => undefined),
+    dependencies.stoppedOutcomes?.(turn.id),
   ]);
   const preference = preferences.rows[0];
   const related =
@@ -1347,9 +1452,11 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       ...(previous.rows[0]?.status === 'failed' && previous.rows[0].error
         ? { previousFailure: previous.rows[0].error }
         : {}),
+      ...(confirmedActions?.length ? { confirmedActions } : {}),
       ...(related.length ? { relatedConversation: related } : {}),
       ...(learnedSkills?.length ? { learnedSkills } : {}),
       ...(connectedApps ? { connectedApps } : {}),
+      ...(dependencies.localFiles ? { localFiles: true } : {}),
       ...(mcpServers?.length ? { mcpServers } : {}),
     },
   };
@@ -1682,9 +1789,10 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       working();
     };
     const { reactToMessage, connections, browserConnection } = dependencies;
-    if (await dependencies.spendingLimitReached?.()) {
+    const limit = await dependencies.spendingLimit?.();
+    if (limit && turn.source !== 'user') {
       limited = true;
-      await failTurn(turnId, undefined, spendingLimitReached);
+      await failAtLimit(turnId, limit.monthlyUsd);
       return;
     }
     await emit('started', 'Turn started.');
@@ -1707,6 +1815,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       taskContext,
       tasks,
       ...(checkIn ? { checkIn } : {}),
+      ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),
       currentMessageId: loaded.sourceMessageId ?? undefined,
       ...(loaded.audioCaption !== undefined ? { audioCaption: loaded.audioCaption } : {}),
       replyTo: loaded.replyTo && describe(loaded.replyTo),
@@ -1821,7 +1930,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           ? undefined
           : async () => {
               if (signal.aborted) throw turnStopped();
-              if (await dependencies.spendingLimitReached?.()) return [];
+              if (await dependencies.spendingLimit?.()) return [];
               const taken = await takeQueuedMessages(turnId, turn.session_id, turn.channel);
               if (taken.length) {
                 sourceMessageId = taken.at(-1)!.id;
@@ -2026,7 +2135,8 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     }
     if (error instanceof Error && error.message === spendingLimitReached) {
       limited = true;
-      await failTurn(turnId, undefined, spendingLimitReached);
+      const limit = await dependencies.spendingLimit?.().catch(() => null);
+      await failAtLimit(turnId, limit?.monthlyUsd);
     } else {
       failure = error instanceof ModelRequestError ? 'model' : 'unknown';
       if (await failTurn(turnId, dependencies.present, failureText(error)))

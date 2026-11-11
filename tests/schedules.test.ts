@@ -40,11 +40,15 @@ test(
       throw new Error('Schedule worker was not registered.');
     };
     let failAfterTask = false;
+    const watched = new Map<string, string>();
     const personal = createPersonalService({
       pool: db.pool,
       ownerId: 'local-development',
       scheduler: thread.boss,
       now: () => clock,
+      watchable: async (ids) => ids.every((id) => watched.has(id)),
+      watchState: async (ids) =>
+        ids.every((id) => watched.has(id)) ? ids.map((id) => watched.get(id)).join() : null,
       enqueueTurn: async (...args) => {
         assert.ok(args[1]?.client);
         const id = await thread.enqueueTurn(...args);
@@ -693,6 +697,49 @@ test(
         },
       );
       await t.test(
+        'a watch schedule skips a fire only while its accounts are unchanged since a finished run',
+        async () => {
+          const before = clock;
+          const account = randomUUID();
+          const body = {
+            title: 'Fixture watch',
+            prompt: 'Return a synthetic result only.',
+            timeZone: 'Europe/Lisbon',
+            cron: '*/15 * * * *',
+            watch: [account],
+          };
+          assert.equal((await request('POST', '/api/schedules', body)).statusCode, 400);
+          watched.set(account, 'v1');
+          const schedule = await create({ cron: '*/15 * * * *', watch: [account] });
+          const fire = async () => {
+            const job = await jobFor(schedule.id);
+            clock = new Date(job.data.scheduledFor);
+            await deliver([job]);
+            return (await runs(schedule.id)).map((run) => run.turnId);
+          };
+          const finish = async (status = 'succeeded') =>
+            db.pool.query('UPDATE turns SET status=$2 WHERE id=ANY($1::uuid[])', [
+              (await runs(schedule.id)).map((run) => run.turnId),
+              status,
+            ]);
+          const [first] = await fire();
+          await finish();
+          assert.deepEqual(await fire(), [first]);
+          await finish('failed');
+          assert.equal((await fire()).length, 2);
+          await finish();
+          assert.equal((await fire()).length, 2);
+          watched.set(account, 'v2');
+          assert.equal((await fire()).length, 3);
+          await finish();
+          await personal.manage('schedule_update', { id: schedule.id, watch: null });
+          assert.equal((await fire()).length, 4);
+          await finish();
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          clock = before;
+        },
+      );
+      await t.test(
         'a baseline added to an existing watch is what its next run compares with',
         async () => {
           const before = clock;
@@ -781,6 +828,26 @@ test(
             authority_instruction: 'Remind me in a minute.',
             authority_source_message_id: origin.sourceMessageId,
           });
+          const sameThread = await receive('Remind me in a minute again.');
+          const otherThread = await receive('Remind me in a minute.', 'other-thread');
+          for (const [route, timing, reused] of [
+            [provenance, {}, true],
+            [provenance, { prompt: 'Send the reworded synthetic reminder.' }, true],
+            [provenance, { title: 'Reworded synthetic reminder' }, true],
+            [sameThread, {}, true],
+            [otherThread, {}, false],
+            [
+              provenance,
+              { title: 'Another synthetic reminder', prompt: 'Send another synthetic reminder.' },
+              false,
+            ],
+          ] as const) {
+            const created = (await createRouted(route, timing)) as Schedule & {
+              existing?: boolean;
+            };
+            assert.equal(created.id === schedule.id, reused);
+            assert.equal(created.existing === true, reused);
+          }
           for (const sourceOwner of [ownerId, 'foreign-source']) {
             const sourceThread = randomUUID();
             const sourceTurn = randomUUID();
@@ -846,3 +913,364 @@ test(
     }
   },
 );
+
+test('scheduled controls reconcile pause and delete after a client timeout', async (t) => {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://nod.example.test/',
+    pretendToBeVisual: true,
+  });
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    Element: dom.window.Element,
+    Node: dom.window.Node,
+    NodeFilter: dom.window.NodeFilter,
+    Event: dom.window.Event,
+    CustomEvent: dom.window.CustomEvent,
+    MutationObserver: dom.window.MutationObserver,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const originals = new Map(
+    Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  for (const [key, value] of Object.entries(globals))
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (duration: number) => nativeTimeout(duration / 50));
+  const schedule: Schedule = {
+    id: randomUUID(),
+    title: 'Delayed schedule',
+    prompt: 'Synthetic reminder.',
+    kind: 'recurring',
+    cron: '0 9 * * *',
+    runAt: null,
+    timeZone: 'UTC',
+    enabled: true,
+    revision: 1,
+    nextRun: null,
+    lastRun: null,
+    baselineObservation: null,
+    watch: null,
+    monthlyUsd: null,
+  };
+  let current: Schedule | null = schedule;
+  const mutations: string[] = [];
+  const attempts: string[] = [];
+  let mutationDelay = 650;
+  let finishAfterAbort = false;
+  let holdNextMutation = false;
+  const heldMutations: Array<() => void> = [];
+  let reads = 0;
+  t.mock.method(globalThis, 'fetch', async (path: RequestInfo | URL, options?: RequestInit) => {
+    assert.equal(String(path), `/api/schedules${options?.method ? `/${schedule.id}` : ''}`);
+    if (!options?.method) {
+      reads++;
+      return Response.json(current ? [current] : []);
+    }
+    if (options.method === 'PATCH') {
+      const body = JSON.parse(String(options.body));
+      assert.deepEqual(
+        body,
+        'title' in body
+          ? { title: 'My unsaved title', expectedRevision: 1 }
+          : { enabled: false, expectedRevision: 1 },
+      );
+    } else assert.equal(options.method, 'DELETE');
+    attempts.push(options.method);
+    const signal = options.signal;
+    const held = holdNextMutation;
+    holdNextMutation = false;
+    return new Promise<Response>((resolve, reject) => {
+      const commit = () => {
+        if (options.method === 'PATCH') {
+          if (current?.revision !== 1) {
+            resolve(Response.json({ error: 'Schedule changed.' }, { status: 409 }));
+            return;
+          }
+          mutations.push(options.method);
+          current = { ...schedule, enabled: false, revision: 2 };
+          resolve(Response.json(current));
+        } else {
+          if (!current) {
+            resolve(Response.json({ error: 'Schedule not found.' }, { status: 404 }));
+            return;
+          }
+          mutations.push(options.method!);
+          current = null;
+          resolve(Response.json({ ok: true }));
+        }
+      };
+      const timer = held ? undefined : setTimeout(commit, mutationDelay);
+      if (held) heldMutations.push(commit);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          if (!finishAfterAbort && timer) clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+  });
+  const { act, createElement, Fragment } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { pageDataCache } = await import('../src/web/lib/page-data-cache.ts');
+  const { PauseSwitch, PlanToast, ScheduleEditor, useDirectChange } =
+    await import('../src/web/components/plan-controls.tsx');
+  const { DeletePlan } = await import('../src/web/components/delete-plan.tsx');
+  pageDataCache.clear();
+  pageDataCache.update('/api/schedules', () => [schedule]);
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    pageDataCache.clear();
+    dom.window.close();
+    for (const [key, value] of originals)
+      if (value) Object.defineProperty(globalThis, key, value);
+      else Reflect.deleteProperty(globalThis, key);
+  });
+  function Controls() {
+    const change = useDirectChange(schedule.id);
+    return createElement(
+      Fragment,
+      null,
+      createElement(PauseSwitch, { schedule, change }),
+      createElement(ScheduleEditor, { schedule, change }),
+    );
+  }
+  await act(async () =>
+    root.render(
+      createElement(
+        Fragment,
+        null,
+        createElement(PlanToast),
+        createElement(Controls),
+        createElement(DeletePlan, { id: schedule.id, title: schedule.title }),
+      ),
+    ),
+  );
+  const click = async (selector: string) => {
+    const button = dom.window.document.querySelector<HTMLButtonElement>(selector);
+    assert.ok(button);
+    await act(async () => button.click());
+  };
+  const buttonByText = (label: string) =>
+    [...dom.window.document.querySelectorAll<HTMLButtonElement>('button')].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    );
+  const clickButton = async (label: string) => {
+    const button = buttonByText(label);
+    assert.ok(button);
+    await act(async () => button.click());
+  };
+  const release = async () => {
+    const commit = heldMutations.shift();
+    assert.ok(commit);
+    await act(async () => commit());
+  };
+  const waitFor = async (ready: () => boolean, name: string, timeoutMs = 5000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!ready()) {
+      if (Date.now() >= deadline) assert.fail(`Timed out waiting for ${name}`);
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    }
+  };
+  await click('[role="switch"]');
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    true,
+  );
+  await waitFor(
+    () =>
+      mutations.length === 1 &&
+      dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled') === false,
+    'initial pause',
+  );
+  assert.match(
+    dom.window.document.querySelector('.plan-toast')?.textContent ?? '',
+    /Paused Delayed schedule/,
+  );
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    false,
+  );
+  await click('button[aria-label="Delete schedule Delayed schedule"]');
+  await click('.delete-plan-actions button.button-destructive');
+  assert.match(
+    dom.window.document.querySelector('.delete-plan-dialog')?.textContent ?? '',
+    /Deleting/,
+  );
+  await waitFor(
+    () => dom.window.document.querySelector('.delete-plan-dialog') === null,
+    'initial deletion',
+  );
+  assert.equal(dom.window.document.querySelector('.delete-plan-dialog'), null);
+  assert.deepEqual(mutations, ['PATCH', 'DELETE']);
+  current = schedule;
+  mutationDelay = 1200;
+  finishAfterAbort = true;
+  const beforeReads = reads;
+  await click('[role="switch"]');
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    true,
+  );
+  await waitFor(
+    () =>
+      current?.enabled === false &&
+      reads > beforeReads &&
+      dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled') === false,
+    'pause after client timeout',
+  );
+  assert.equal(current.enabled, false);
+  assert.match(
+    dom.window.document.querySelector('.plan-toast')?.textContent ?? '',
+    /Paused Delayed schedule/,
+  );
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    false,
+  );
+  assert.ok(reads > beforeReads);
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH']);
+  await click('button[aria-label="Delete schedule Delayed schedule"]');
+  await click('.delete-plan-actions button.button-destructive');
+  await waitFor(
+    () => current === null && dom.window.document.querySelector('.delete-plan-dialog') === null,
+    'deletion after client timeout',
+  );
+  assert.equal(dom.window.document.querySelector('.delete-plan-dialog'), null);
+  assert.equal(current, null);
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE']);
+  current = schedule;
+  holdNextMutation = true;
+  await click('button[aria-label="Delete schedule Delayed schedule"]');
+  await click('.delete-plan-actions button.button-destructive');
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('.delete-plan-dialog')
+        ?.textContent?.includes('The deletion may still finish.') === true,
+    'unresolved deletion',
+  );
+  assert.match(
+    dom.window.document.querySelector('.delete-plan-dialog')?.textContent ?? '',
+    /deletion may still finish/i,
+  );
+  assert.equal(
+    dom.window.document
+      .querySelector('.delete-plan-actions button.button-destructive')
+      ?.hasAttribute('disabled'),
+    true,
+  );
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE']);
+  assert.equal(current, schedule);
+  await release();
+  await click('.delete-plan-actions button.button-outline');
+  await waitFor(
+    () => dom.window.document.querySelector('.delete-plan-dialog') === null,
+    'confirmed late deletion',
+  );
+  assert.equal(dom.window.document.querySelector('.delete-plan-dialog'), null);
+  assert.equal(current, null);
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE', 'DELETE']);
+  current = schedule;
+  holdNextMutation = true;
+  await click('[role="switch"]');
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('.plan-toast')
+        ?.textContent?.includes('may still finish') === true,
+    'unresolved pause',
+  );
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    true,
+  );
+  assert.equal(buttonByText('Try again'), undefined);
+  assert.equal(current, schedule);
+  assert.equal(attempts.filter((method) => method === 'PATCH').length, 3);
+  await clickButton('Check status');
+  await waitFor(() => Boolean(buttonByText('Try again')), 'qualified pause retry');
+  assert.ok(dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'));
+  mutationDelay = 650;
+  await clickButton('Try again');
+  await waitFor(
+    () =>
+      current?.enabled === false &&
+      dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled') === false,
+    'retried pause',
+  );
+  assert.equal(current.enabled, false);
+  assert.equal(
+    dom.window.document.querySelector('[role="switch"]')?.hasAttribute('disabled'),
+    false,
+  );
+  await release();
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE', 'DELETE', 'PATCH']);
+  assert.equal(attempts.filter((method) => method === 'PATCH').length, 4);
+  current = schedule;
+  holdNextMutation = true;
+  await click('button[aria-label="Delete schedule Delayed schedule"]');
+  await click('.delete-plan-actions button.button-destructive');
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('.delete-plan-dialog')
+        ?.textContent?.includes('The deletion may still finish.') === true,
+    'unresolved deletion before retry',
+  );
+  assert.equal(attempts.filter((method) => method === 'DELETE').length, 4);
+  assert.equal(buttonByText('Try deleting again'), undefined);
+  await clickButton('Check status');
+  await waitFor(() => Boolean(buttonByText('Try deleting again')), 'qualified deletion retry');
+  assert.equal(
+    [...dom.window.document.querySelectorAll<HTMLButtonElement>('.delete-plan-actions button')]
+      .find((button) => button.textContent?.trim() === 'Delete schedule')
+      ?.hasAttribute('disabled'),
+    true,
+  );
+  mutationDelay = 650;
+  await clickButton('Try deleting again');
+  await waitFor(
+    () => current === null && dom.window.document.querySelector('.delete-plan-dialog') === null,
+    'retried deletion',
+  );
+  assert.equal(current, null);
+  assert.equal(dom.window.document.querySelector('.delete-plan-dialog'), null);
+  await release();
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE', 'DELETE', 'PATCH', 'DELETE']);
+  assert.equal(attempts.filter((method) => method === 'DELETE').length, 5);
+  current = { ...schedule, title: 'Changed elsewhere', revision: 2 };
+  mutationDelay = 0;
+  await click('button[aria-label="Edit schedule Delayed schedule"]');
+  const title = dom.window.document.querySelector<HTMLInputElement>('.schedule-editor-form input');
+  assert.ok(title);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(
+      title,
+      'My unsaved title',
+    );
+    title.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  assert.equal(buttonByText('Save changes')?.hasAttribute('disabled'), false);
+  await clickButton('Save changes');
+  assert.equal(attempts.filter((method) => method === 'PATCH').length, 5);
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('.schedule-editor-dialog')
+        ?.textContent?.includes('Schedule changed.') === true,
+    'editor conflict',
+  );
+  assert.equal(title.value, 'My unsaved title');
+  assert.ok(dom.window.document.querySelector('.schedule-editor-dialog'));
+  assert.deepEqual(mutations, ['PATCH', 'DELETE', 'PATCH', 'DELETE', 'DELETE', 'PATCH', 'DELETE']);
+});

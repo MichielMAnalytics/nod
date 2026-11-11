@@ -1,7 +1,21 @@
 import type { CaptureResult, PostHog } from 'posthog-js';
 import { posthogConfig, type AnalyticsConfiguration } from '../../shared/analytics';
 import { modelProviders, type ModelProvider } from '../../shared/models';
-import { desktopSettingsAvailable } from './desktop';
+import {
+  onboardingSteps,
+  profileCompanySizes,
+  profileScopes,
+  profileWhoFor,
+  type OnboardingStep,
+  type ProfileCompanySize,
+  type ProfileScope,
+  type ProfileWhoFor,
+} from '../../shared/onboarding';
+import {
+  desktopAppOpeningAvailable,
+  desktopSettingsAvailable,
+  takeDesktopAppOpening,
+} from './desktop';
 import { analyticsHost, analyticsRoute, sanitizedAnalyticsUrl } from './analytics-privacy';
 import { feedbackActivity } from './feedback-activity';
 import { requestAccountVersion } from './api';
@@ -9,11 +23,39 @@ import type { AttachmentKind } from '../../shared/attachment-kind';
 import type { Presentation } from '../../shared/presentation';
 
 type AnalyticsEvents = {
+  app_opened: {
+    entry: 'native_setup' | 'app_ui';
+    server_connection_telemetry_available?: true;
+  };
   onboarding_step_viewed: {
-    step: 'welcome' | 'email' | 'brain' | 'privacy';
+    step: OnboardingStep;
     direction: 'forward' | 'back';
   };
   onboarding_step_skipped: { step: 'email' };
+  onboarding_profile_answered: {
+    scope: ProfileScope | 'skipped';
+    role_owner: boolean;
+    role_freelance: boolean;
+    role_agency: boolean;
+    role_engineering: boolean;
+    role_product: boolean;
+    role_gtm: boolean;
+    role_manager: boolean;
+    role_student: boolean;
+    role_not_working: boolean;
+    role_other: boolean;
+    who_for: ProfileWhoFor | 'skipped' | 'not_asked';
+    company_size: ProfileCompanySize | 'skipped' | 'not_asked';
+    job_email: boolean;
+    job_calendar: boolean;
+    job_meetings: boolean;
+    job_errands: boolean;
+    job_research: boolean;
+    job_routines: boolean;
+    job_other: boolean;
+  };
+  onboarding_community_opened: { channel: 'discord' | 'forum' };
+  onboarding_updates_email_submitted: undefined;
   local_setting_changed:
     | { setting: 'theme'; value: 'light' | 'dark' | 'system' }
     | { setting: 'launch_at_login' | 'desktop_notifications'; value: 'enabled' | 'disabled' }
@@ -87,6 +129,7 @@ export type AnalyticsProperties<Event extends keyof AnalyticsEvents> = NonNullab
 >;
 
 const roles = ['assistant', 'user'];
+const booleans = [true, false];
 const presentationKinds = [
   'image',
   'map',
@@ -115,11 +158,36 @@ const artifactKinds = [
   'file',
 ];
 const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unknown[]>> = {
+  app_opened: { entry: ['native_setup', 'app_ui'], server_connection_telemetry_available: [true] },
   onboarding_step_viewed: {
-    step: ['welcome', 'email', 'brain', 'privacy'],
+    step: onboardingSteps,
     direction: ['forward', 'back'],
   },
   onboarding_step_skipped: { step: ['email'] },
+  onboarding_profile_answered: {
+    scope: [...profileScopes.map((option) => option.id), 'skipped'],
+    role_owner: booleans,
+    role_freelance: booleans,
+    role_agency: booleans,
+    role_engineering: booleans,
+    role_product: booleans,
+    role_gtm: booleans,
+    role_manager: booleans,
+    role_student: booleans,
+    role_not_working: booleans,
+    role_other: booleans,
+    who_for: [...profileWhoFor.map((option) => option.id), 'skipped', 'not_asked'],
+    company_size: [...profileCompanySizes.map((option) => option.id), 'skipped', 'not_asked'],
+    job_email: booleans,
+    job_calendar: booleans,
+    job_meetings: booleans,
+    job_errands: booleans,
+    job_research: booleans,
+    job_routines: booleans,
+    job_other: booleans,
+  },
+  onboarding_community_opened: { channel: ['discord', 'forum'] },
+  onboarding_updates_email_submitted: {},
   local_setting_changed: {
     setting: ['theme', 'launch_at_login', 'desktop_notifications', 'browser_notifications'],
     value: ['light', 'dark', 'system', 'enabled', 'disabled', 'dismissed'],
@@ -195,7 +263,20 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
   },
 };
 
+const appOpenRoutes = new Set([
+  '/',
+  '/onboarding',
+  '/apps',
+  '/channels',
+  '/tasks',
+  '/prepared',
+  '/usage',
+  '/vault',
+  '/settings',
+]);
+
 let configuration: AnalyticsConfiguration | undefined;
+let configurationAccount: number | undefined;
 let posthog: PostHog | undefined;
 let initialized = false;
 let identity: string | null | undefined;
@@ -205,9 +286,18 @@ let lastPage: string | undefined;
 let generation = 0;
 const eventGenerations = new WeakMap<object, number>();
 const guardedClients = new WeakSet<PostHog>();
+const opened = new Set<string>();
+const openingPending = new Set<string>();
 const viewed = new Set<string>();
 const viewListeners = new Set<() => void>();
 const discoveryConnections = new Map<string, () => void>();
+let nativeOpeningQueue: Promise<unknown> = Promise.resolve();
+
+function requestNativeOpening(consented: boolean, distinctId: string | null) {
+  const request = nativeOpeningQueue.then(() => takeDesktopAppOpening(consented, distinctId));
+  nativeOpeningQueue = request.catch(() => null);
+  return request;
+}
 
 type AnalyticsRequest = Parameters<PostHog['_send_request']>[0];
 
@@ -287,6 +377,7 @@ function suspendAnalytics() {
   viewed.clear();
   discoveryConnections.clear();
   configuration = undefined;
+  configurationAccount = undefined;
   identity = undefined;
   lastPage = undefined;
   if (!posthog || !initialized) return;
@@ -428,6 +519,8 @@ function applyConfiguration(
 ) {
   if (!posthog) return;
   if (!next?.enabled) {
+    if ((next || configuration) && desktopAppOpeningAvailable())
+      void requestNativeOpening(false, null).catch(() => {});
     suspendAnalytics();
     return;
   }
@@ -458,6 +551,7 @@ function applyConfiguration(
     posthog._retryQueue?.resume();
   }
   configuration = next;
+  configurationAccount = requestAccountVersion();
   if (!initialized) {
     posthog.init(posthogConfig.key, {
       api_host: posthogConfig.host,
@@ -504,6 +598,7 @@ function applyConfiguration(
     lastPage = undefined;
   }
   if (next.surveys && (changed || surveysChanged)) posthog.reloadFeatureFlags();
+  captureAppOpened(window.location.pathname);
 }
 
 export function captureAnalytics<Event extends keyof AnalyticsEvents>(
@@ -520,6 +615,73 @@ function captureEvent(
   try {
     feedbackActivity.record(event, properties);
     if (configuration?.enabled) posthog?.capture(event, properties);
+  } catch {}
+}
+
+function captureAppOpened(path: string) {
+  const id = configuration?.distinctId;
+  const route = analyticsRoute(path);
+  if (
+    !configuration?.enabled ||
+    !id ||
+    configurationAccount !== requestAccountVersion() ||
+    window.opener ||
+    !appOpenRoutes.has(route) ||
+    opened.has(id) ||
+    openingPending.has(id)
+  )
+    return;
+  if (surface === 'desktop' && desktopAppOpeningAvailable()) {
+    const current = generation;
+    const account = configurationAccount;
+    openingPending.add(id);
+    void requestNativeOpening(true, id)
+      .then((opening) => {
+        if (
+          current !== generation ||
+          account !== requestAccountVersion() ||
+          configurationAccount !== account ||
+          !configuration?.enabled ||
+          configuration.distinctId !== id ||
+          opened.has(id)
+        )
+          return;
+        opened.add(id);
+        if (
+          !opening ||
+          !Number.isSafeInteger(opening.openedAt) ||
+          opening.openedAt <= 0 ||
+          !surveyId.test(opening.uuid)
+        )
+          return;
+        try {
+          posthog?.capture(
+            'app_opened',
+            {
+              route: opening.entry === 'native_setup' ? '/onboarding' : route,
+              entry: opening.entry,
+              ...(opening.entry === 'native_setup' &&
+              opening.serverConnectionTelemetryAvailable === true
+                ? { server_connection_telemetry_available: true }
+                : {}),
+            },
+            {
+              timestamp: new Date(opening.openedAt),
+              uuid: opening.uuid,
+            },
+          );
+        } catch {}
+      })
+      .catch(() => {})
+      .finally(() => {
+        openingPending.delete(id);
+        if (current !== generation) captureAppOpened(window.location.pathname);
+      });
+    return;
+  }
+  opened.add(id);
+  try {
+    posthog?.capture('app_opened', { route, entry: 'app_ui' });
   } catch {}
 }
 
@@ -700,6 +862,9 @@ export function capturePageview(path: string) {
   feedbackActivity.record('screen', { screen: analyticsRoute(path) });
   if (!configuration?.enabled) return;
   const route = analyticsRoute(path);
+  try {
+    captureAppOpened(route);
+  } catch {}
   if (route === lastPage) return;
   lastPage = route;
   try {

@@ -102,6 +102,204 @@ test('decision selection uses the LLM only when no decision connection is availa
   assert.equal(llm, 1);
 });
 
+test('About records only confirmed shared choices and clears them on failure', async (t) => {
+  const { JSDOM } = await import('jsdom');
+  const { act, createElement } = await import('react');
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://nod.example.test/onboarding',
+  });
+  dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    Element: dom.window.Element,
+    Node: dom.window.Node,
+    Event: dom.window.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const originals = new Map(
+    Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  for (const [key, value] of Object.entries(globals))
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const { createRoot } = await import('react-dom/client');
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    dom.window.close();
+    for (const [key, value] of originals)
+      if (value) Object.defineProperty(globalThis, key, value);
+      else Reflect.deleteProperty(globalThis, key);
+  });
+  const { About } = await import('../src/web/pages/onboarding/steps/about.tsx');
+  const { readStored, writeStored } = await import('../src/web/pages/onboarding/storage.ts');
+  const profile = {
+    scope: 'work',
+    roles: ['engineering'],
+    companySize: '11_100',
+    jobs: ['research'],
+  };
+  writeStored('about', {
+    current: 'done',
+    seen: ['scope', 'roles', 'size', 'jobs'],
+    profile,
+    editing: null,
+  });
+  let status = 200;
+  let shared = true;
+  t.mock.method(globalThis, 'fetch', async (path: RequestInfo | URL) => {
+    assert.equal(String(path), '/api/onboarding/profile');
+    return Response.json(
+      status === 200 ? { ok: true, shared } : { error: 'Could not share your choices.' },
+      { status },
+    );
+  });
+  let completed = 0;
+  await act(async () =>
+    root.render(
+      createElement(About, {
+        arrived: 'back',
+        quiet: true,
+        onNext: () => completed++,
+        onBack() {},
+        usageShared: true,
+      }),
+    ),
+  );
+  const next = dom.window.document.querySelector<HTMLButtonElement>('.ob-next');
+  assert.ok(next);
+  await act(async () => next.click());
+  assert.equal(completed, 1);
+  assert.deepEqual(readStored('about-shared'), {
+    onboarding_profile_completed: true,
+    onboarding_scope: 'work',
+    onboarding_roles: ['engineering'],
+    onboarding_who_for: 'not_asked',
+    onboarding_company_size: '11_100',
+    onboarding_jobs: ['research'],
+  });
+  shared = false;
+  await act(async () => next.click());
+  assert.equal(readStored('about-shared'), null);
+  assert.equal(completed, 2);
+  status = 502;
+  await act(async () => next.click());
+  assert.equal(readStored('about-shared'), null);
+  const continueAnyway = dom.window.document.querySelector<HTMLButtonElement>(
+    '.ob-footer-end button:not(.ob-next)',
+  );
+  assert.ok(continueAnyway);
+  await act(async () => continueAnyway.click());
+  assert.equal(readStored('about-shared'), null);
+  assert.equal(completed, 3);
+});
+
+test('Join sends fixed answers only with a matching confirmed share', async (t) => {
+  const { JSDOM } = await import('jsdom');
+  const { act, createElement } = await import('react');
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://nod.example.test/onboarding',
+  });
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    Element: dom.window.Element,
+    Node: dom.window.Node,
+    Event: dom.window.Event,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const originals = new Map(
+    Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  for (const [key, value] of Object.entries(globals))
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const { createRoot } = await import('react-dom/client');
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    dom.window.close();
+    for (const [key, value] of originals)
+      if (value) Object.defineProperty(globalThis, key, value);
+      else Reflect.deleteProperty(globalThis, key);
+  });
+  const { Join } = await import('../src/web/pages/onboarding/steps/join.tsx');
+  const { writeStored } = await import('../src/web/pages/onboarding/storage.ts');
+  const profile = {
+    scope: 'work',
+    roles: ['engineering'],
+    roleText: 'Private synthetic role',
+    companySize: '11_100',
+    jobs: ['research'],
+    jobsText: 'Private synthetic task',
+  };
+  writeStored('about', { current: 'done', profile });
+  const fixed = {
+    onboarding_profile_completed: true,
+    onboarding_scope: 'work',
+    onboarding_roles: ['engineering', 'other'],
+    onboarding_who_for: 'not_asked',
+    onboarding_company_size: '11_100',
+    onboarding_jobs: ['research', 'other'],
+  };
+  const posted: unknown[] = [];
+  t.mock.method(globalThis, 'fetch', async (path: RequestInfo | URL, options?: RequestInit) => {
+    assert.equal(String(path), '/api/onboarding/updates-email');
+    assert.equal(options?.method, 'POST');
+    posted.push(JSON.parse(String(options?.body)));
+    return Response.json({ ok: true });
+  });
+  let completed = 0;
+  const render = (usageShared: boolean) =>
+    act(async () =>
+      root.render(
+        createElement(Join, {
+          arrived: 'forward',
+          onNext: () => completed++,
+          onBack() {},
+          updatesEmail: true,
+          usageShared,
+        }),
+      ),
+    );
+  await render(false);
+  assert.equal(dom.window.document.querySelector('#ob-join-email'), null);
+  await render(true);
+  const email = dom.window.document.querySelector<HTMLInputElement>('#ob-join-email');
+  const consent = dom.window.document.querySelector<HTMLInputElement>('.ob-join-consent input');
+  const next = dom.window.document.querySelector<HTMLButtonElement>('.ob-next');
+  assert.ok(email);
+  assert.ok(consent);
+  assert.ok(next);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!.call(
+      email,
+      'owner@example.test',
+    );
+    email.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  await act(async () => next.click());
+  assert.deepEqual(posted, []);
+  assert.equal(completed, 0);
+  await act(async () => consent.click());
+  await act(async () => next.click());
+  assert.deepEqual(posted[0], { email: 'owner@example.test', consent: true });
+  writeStored('about-shared', fixed);
+  await act(async () => next.click());
+  assert.deepEqual(posted[1], { email: 'owner@example.test', consent: true, profile: fixed });
+  assert.equal(JSON.stringify(posted).includes('Private synthetic'), false);
+  assert.equal(completed, 2);
+  writeStored('about', { current: 'roles', profile });
+  await act(async () => next.click());
+  assert.deepEqual(posted[2], { email: 'owner@example.test', consent: true });
+  writeStored('about', { current: 'done', profile: { ...profile, jobs: ['email'] } });
+  await act(async () => next.click());
+  assert.deepEqual(posted[3], { email: 'owner@example.test', consent: true });
+  assert.equal(completed, 4);
+});
+
 test('decision catalog filters native text decisions, expires and refuses failed lookups', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: 1_000 });
   let calls = 0;
@@ -666,6 +864,39 @@ test('trust decisions select only owner evidence and keep reply evidence separat
   await assert.rejects(trust.answer('Yes'));
 });
 
+test('retired confirmation replies require high confidence to start a new request', async () => {
+  let output: unknown;
+  const reply = 'Yes, move the reminder to tomorrow.';
+  const expiredConfirmation = 'Cancel the reminder?';
+  const trust = createTrust({
+    pool: {} as never,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input, _signal, question) => {
+      assert.deepEqual(input, { reply, expiredConfirmation });
+      assert.equal(question?.name, 'retiredReply');
+      assert.deepEqual(
+        question?.choices.map(({ value }) => value),
+        ['new', 'stale'],
+      );
+      return output;
+    },
+  });
+  for (const [answer, expected] of [
+    [{ retiredReply: 'new', probability: 0.98 }, 'uncertain'],
+    [{ retiredReply: 'new', probability: '0.995' }, 'uncertain'],
+    [{ retiredReply: 'new', probability: Number.NaN }, 'uncertain'],
+    [{ retiredReply: 'new', probability: 1.1 }, 'uncertain'],
+    [{ retiredReply: 'new' }, 'uncertain'],
+    [{ retiredReply: 'new', probability: 0.995 }, 'new'],
+    [{ retiredReply: 'stale', probability: 0.8 }, 'uncertain'],
+    [{ retiredReply: 'stale' }, 'uncertain'],
+    [{ retiredReply: 'stale', probability: 0.995 }, 'stale'],
+  ] as const) {
+    output = answer;
+    assert.equal(await trust.classifyRetiredReply(reply, expiredConfirmation), expected);
+  }
+});
+
 test('native decision probabilities validate the wire type and retain refusal and cache costs', async (t) => {
   for (const provider of ['openai', 'typesafe', 'openrouter'] as const)
     await t.test(provider, async () => {
@@ -1054,11 +1285,12 @@ describe('account routes', () => {
       usageData: false,
       traces: false,
     };
+    let usageRevision = 0;
     const calls = { writes: 0, started: 0 };
     const activity = { days: 0, reads: 0, wait: undefined as (() => Promise<void>) | undefined };
     const accounts: AccountStore = {
       async readConsent() {
-        return { enabled: record.usageData, revision: '0' };
+        return { enabled: record.usageData, revision: String(usageRevision) };
       },
       async read() {
         return record;
@@ -1071,6 +1303,7 @@ describe('account routes', () => {
       async update(_owner, input) {
         calls.writes++;
         const saved = record;
+        if (input.usageData !== undefined && input.usageData !== saved.usageData) usageRevision++;
         record = {
           theme: input.theme ?? saved.theme,
           onboardingCompleted: input.onboardingCompleted ?? saved.onboardingCompleted,
@@ -1140,6 +1373,14 @@ describe('account routes', () => {
     ready = false;
     assert.equal((await complete()).statusCode, 200);
     assert.equal(checked, checks);
+    const reopened = await f.app.inject({
+      method: 'PATCH',
+      url: '/api/account',
+      headers: { origin },
+      payload: { onboardingCompleted: false },
+    });
+    assert.ok(reopened.statusCode >= 400);
+    assert.equal(f.record().onboardingCompleted, true);
   });
 
   test('usage data stays off until the owner opts in and the environment switch always wins', async (t) => {
@@ -1166,6 +1407,7 @@ describe('account routes', () => {
         });
       const initial = await request();
       assert.equal(initial.json().settings.usageData, false);
+      assert.equal(initial.json().settings.usageDataRevision, '0');
       assert.equal(initial.json().capabilities.traces, false);
       assert.deepEqual(
         [initial.json().analytics.enabled, initial.json().analytics.distinctId],
@@ -1181,6 +1423,7 @@ describe('account routes', () => {
       assert.equal(opted.statusCode, 200);
       assert.equal(opted.json().user.name, 'You');
       assert.equal(opted.json().settings.usageData, true);
+      assert.equal(opted.json().settings.usageDataRevision, '1');
       assert.equal(opted.json().analytics.enabled, available);
       assert.equal(opted.json().analytics.surveys, available ? true : undefined);
       assert.equal(f.activity.reads, available ? 1 : 0);
@@ -1216,6 +1459,7 @@ describe('account routes', () => {
       const reads = f.activity.reads;
       const declined = await request({ usageData: false });
       assert.equal(declined.json().analytics.enabled, false);
+      assert.equal(declined.json().settings.usageDataRevision, '2');
       assert.notEqual(declined.json().analytics.surveys, true);
       assert.equal(f.activity.reads, reads);
       analytics.capture('local-owner', { event: 'chat_stopped' });
@@ -1290,12 +1534,24 @@ describe('account routes', () => {
         installationId: randomUUID(),
       });
       t.after(() => analytics.shutdown());
-      const f = await fixture(analytics, undefined, undefined, undefined, () => ({
+      const model = {
         provider,
         name: 'PRIVATE_MODEL_CANARY',
-        configured: true,
-      }));
+        configured: false,
+      };
+      const f = await fixture(analytics, undefined, undefined, undefined, () => model);
       t.after(() => f.app.close());
+      assert.equal(
+        (
+          await f.app.inject({
+            method: 'POST',
+            url: '/api/account/model-setup',
+            headers: { origin },
+          })
+        ).statusCode,
+        409,
+      );
+      model.configured = true;
       const complete = () =>
         f.app.inject({
           method: 'PATCH',
@@ -1310,8 +1566,70 @@ describe('account routes', () => {
       assert.equal(events[0].properties.provider, expected);
       assert.equal(Object.hasOwn(events[0].properties, 'model_provider'), false);
       assert.equal(Object.hasOwn(events[0].properties, 'model'), false);
+      const setup = captured.filter(({ event }) => event === 'model_setup_completed');
+      assert.equal(setup.length, 1);
+      assert.equal(setup[0].properties.provider, expected);
+      assert.equal(setup[0].properties.model, 'custom');
       assert.doesNotMatch(JSON.stringify(captured), /PRIVATE_/);
     }
+  });
+
+  test('model setup records a usable selected model before onboarding completion with consent', async (t) => {
+    const captured: Parameters<ProductAnalytics['capture']>[0][] = [];
+    const analytics = await createAnalytics({
+      provider: { capture: (event) => captured.push(event), shutdown: async () => {} },
+      environment: 'development',
+      dataRoot: '.',
+      installationId: randomUUID(),
+    });
+    t.after(() => analytics.shutdown());
+    const selected = {
+      provider: 'openai',
+      name: 'openai/gpt-6-luna-decisions',
+      configured: false,
+    };
+    const f = await fixture(analytics, undefined, undefined, undefined, () => selected);
+    t.after(() => f.app.close());
+    const completeModelSetup = () =>
+      f.app.inject({ method: 'POST', url: '/api/account/model-setup', headers: { origin } });
+    const update = (payload: object) =>
+      f.app.inject({ method: 'PATCH', url: '/api/account', headers: { origin }, payload });
+
+    assert.equal((await completeModelSetup()).statusCode, 409);
+    selected.configured = true;
+    assert.equal((await completeModelSetup()).statusCode, 200);
+    assert.equal(captured.filter(({ event }) => event === 'model_setup_completed').length, 0);
+
+    assert.equal((await update({ usageData: true })).statusCode, 200);
+    assert.equal((await completeModelSetup()).statusCode, 200);
+    let setup = captured.filter(({ event }) => event === 'model_setup_completed');
+    assert.equal(setup.length, 1);
+    assert.equal(setup[0].properties.provider, 'openai');
+    assert.equal(setup[0].properties.model, 'openai/gpt-6-luna-decisions');
+    assert.equal(
+      captured.some(({ event }) => event === 'onboarding_completed'),
+      false,
+    );
+
+    selected.provider = 'compatible';
+    selected.name = 'https://private-model.example.test/account';
+    assert.equal((await completeModelSetup()).statusCode, 200);
+    setup = captured.filter(({ event }) => event === 'model_setup_completed');
+    assert.equal(setup.length, 2);
+    assert.equal(setup[1].properties.provider, 'compatible');
+    assert.equal(setup[1].properties.model, 'custom');
+    assert.doesNotMatch(JSON.stringify(captured), /private-model/);
+
+    assert.equal((await update({ onboardingCompleted: true })).statusCode, 200);
+    assert.equal((await completeModelSetup()).statusCode, 409);
+    setup = captured.filter(({ event }) => event === 'model_setup_completed');
+    assert.equal(setup.length, 3);
+    assert.equal(setup[2].properties.provider, 'compatible');
+    assert.equal(setup[2].properties.model, 'custom');
+    assert.deepEqual(
+      captured.slice(-2).map(({ event }) => event),
+      ['model_setup_completed', 'onboarding_completed'],
+    );
   });
 
   test('conversation traces stay off until the owner opts in, stop at once and leave without personal data', async (t) => {
@@ -3344,6 +3662,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       'fixture-owner',
       async () => [],
       () => owner.analyticsConnections(),
+      false,
     );
     assert.deepEqual(
       captured.map(({ event, properties }) => {
@@ -5646,12 +5965,28 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     assert.equal(f.changes().length, 3);
   });
 
+  test('finishing setup gives a new owner a monthly limit once and never restores a removed one', async (t) => {
+    const { createAccountStore } = await import('../src/server/account-store.ts');
+    const f = await fixture(t);
+    const ledger = createLedger({ pool: f.database, ownerId: f.owner });
+    await ledger.initialize();
+    const accounts = createAccountStore(f.database, { onboard: ledger.onboard });
+    await accounts.initialize();
+    assert.equal((await ledger.limits()).limit, null);
+    await accounts.update(f.owner, { onboardingCompleted: true });
+    assert.equal((await ledger.limits()).limit?.reached, false);
+    await ledger.setLimits({ monthlyUsd: null });
+    await accounts.update(f.owner, { onboardingCompleted: true });
+    assert.equal((await ledger.limits()).limit, null);
+  });
+
   test('account changes follow saved values and do not cross queued opt-out or failed writes', async (t) => {
     const { createAccountStore } = await import('../src/server/account-store.ts');
     const f = await fixture(t);
     const accounts = createAccountStore(f.database);
     await accounts.initialize();
     await accounts.update(f.owner, { usageData: false });
+    const initialConsent = await accounts.readConsent(f.owner);
     const origin = 'http://localhost:4399';
     const app = Fastify();
     t.after(() => app.close());
@@ -5674,8 +6009,12 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     const update = (payload: object) =>
       app.inject({ method: 'PATCH', url: '/api/account', headers: { origin }, payload });
     assert.equal((await update({ usageData: true })).statusCode, 200);
+    const enabledConsent = await accounts.readConsent(f.owner);
+    assert.equal(enabledConsent.enabled, true);
+    assert.equal(BigInt(enabledConsent.revision), BigInt(initialConsent.revision) + 1n);
     assert.deepEqual(f.changes(), [{ setting: 'usage_data', actor: 'owner', state: 'on' }]);
     await update({ theme: 'dark', traces: true });
+    assert.equal((await accounts.readConsent(f.owner)).revision, enabledConsent.revision);
     assert.deepEqual(f.changes().slice(1), [
       { setting: 'theme', actor: 'owner', state: 'dark' },
       { setting: 'conversation_traces', actor: 'owner', state: 'on' },
@@ -5715,11 +6054,17 @@ describe('persisted setting analytics privacy', { skip: !process.env.TEST_DATABA
     await new Promise((resolve) => setTimeout(resolve, 5));
     release.resolve();
     await Promise.all([theme, off, on]);
+    const restoredConsent = await accounts.readConsent(f.owner);
+    assert.equal(restoredConsent.enabled, true);
+    assert.equal(BigInt(restoredConsent.revision), BigInt(enabledConsent.revision) + 2n);
     assert.equal((await accounts.read(f.owner)).theme, 'system');
     assert.deepEqual(f.changes().slice(3), [
       { setting: 'usage_data', actor: 'owner', state: 'on' },
     ]);
     await update({ usageData: false, traces: false });
+    const disabledConsent = await accounts.readConsent(f.owner);
+    assert.equal(disabledConsent.enabled, false);
+    assert.equal(BigInt(disabledConsent.revision), BigInt(restoredConsent.revision) + 1n);
     assert.equal(f.changes().length, 4);
     assert.equal(f.analytics.consent(f.owner).enabled, false);
     holdAll = true;

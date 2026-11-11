@@ -29,6 +29,14 @@ export type DesktopStatus = {
   };
 };
 
+export type DesktopUpdateStatus = {
+  phase: 'idle' | 'checking' | 'preparing' | 'downloading' | 'ready';
+  checking: boolean;
+  progress?: number;
+  readyVersion?: string;
+  dismissedVersion?: string;
+};
+
 export type DesktopSettingsChange = { onboardingCompleted?: true } & Partial<
   Pick<DesktopSettings, 'theme' | 'notifications' | 'launchAtLogin' | 'onboardingPreferenceStep'>
 >;
@@ -44,6 +52,13 @@ type DesktopFeedbackContext = {
   platform: string | null;
 };
 
+type DesktopAppOpening = {
+  openedAt: number;
+  uuid: string;
+  entry: 'native_setup' | 'app_ui';
+  serverConnectionTelemetryAvailable?: true;
+};
+
 type DesktopWindow = Window & {
   nodDesktop?: {
     remote?: boolean;
@@ -51,6 +66,10 @@ type DesktopWindow = Window & {
     getSettings(): Promise<DesktopSettings>;
     status?(): Promise<DesktopStatus>;
     onStatus?(listener: (status: DesktopStatus) => void): () => void;
+    updateStatus?(): Promise<DesktopUpdateStatus>;
+    onUpdateStatus?(listener: (status: DesktopUpdateStatus) => void): () => void;
+    dismissUpdate?(version: string): Promise<void>;
+    restartUpdate?(): Promise<void>;
     prepare?(options?: { retry: boolean }): Promise<DesktopStatus>;
     saveSettings(input: DesktopSettingsChange): Promise<DesktopSettings>;
     removeAllData(): Promise<void>;
@@ -58,6 +77,10 @@ type DesktopWindow = Window & {
     onNavigate?(listener: (path: string) => void): () => void;
     openExternal(url: string): Promise<void>;
     getPreferences(): Promise<DesktopPreferences>;
+    takeAppOpening?(
+      consented: boolean,
+      distinctId: string | null,
+    ): Promise<DesktopAppOpening | null>;
     getFeedbackContext?(): Promise<DesktopFeedbackContext>;
     captureFeedbackScreenshot?(): Promise<Uint8Array | null>;
     onFeedbackRequested?(listener: () => void): () => void;
@@ -153,6 +176,14 @@ export function desktopLinksAvailable() {
   return typeof (window as DesktopWindow).nodDesktop?.openExternal === 'function';
 }
 
+export function desktopAppOpeningAvailable() {
+  return typeof (window as DesktopWindow).nodDesktop?.takeAppOpening === 'function';
+}
+
+export function takeDesktopAppOpening(consented: boolean, distinctId: string | null) {
+  return (window as DesktopWindow).nodDesktop?.takeAppOpening?.(consented, distinctId);
+}
+
 export async function openConnection(url: string) {
   if (desktopLinksAvailable()) await (window as DesktopWindow).nodDesktop!.openExternal(url);
   else window.location.assign(url);
@@ -180,6 +211,26 @@ export function desktopStatus() {
 
 export function subscribeDesktopStatus(listener: (status: DesktopStatus) => void) {
   return (window as DesktopWindow).nodDesktop?.onStatus?.(listener) ?? (() => {});
+}
+
+export function desktopUpdateStatus() {
+  return (window as DesktopWindow).nodDesktop?.updateStatus?.();
+}
+
+export function subscribeDesktopUpdateStatus(listener: (status: DesktopUpdateStatus) => void) {
+  return (window as DesktopWindow).nodDesktop?.onUpdateStatus?.(listener) ?? (() => {});
+}
+
+export function dismissDesktopUpdate(version: string) {
+  const dismiss = (window as DesktopWindow).nodDesktop?.dismissUpdate;
+  if (!dismiss) return Promise.reject(new Error('Desktop updates are unavailable.'));
+  return dismiss(version);
+}
+
+export function restartDesktopUpdate() {
+  const restart = (window as DesktopWindow).nodDesktop?.restartUpdate;
+  if (!restart) return Promise.reject(new Error('Desktop updates are unavailable.'));
+  return restart();
 }
 
 export async function retryDesktopRuntime() {

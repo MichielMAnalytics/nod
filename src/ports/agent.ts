@@ -110,7 +110,7 @@ export interface RuntimeContext {
       owner: Record<string, unknown>,
       signal: AbortSignal,
       canContinue?: () => boolean,
-    ): Promise<boolean>;
+    ): Promise<boolean | unknown[]>;
   };
   threadId: string;
   turnId: string;
@@ -128,6 +128,7 @@ export interface RuntimeContext {
   quietHours?: boolean;
   account?: RuntimeAccount;
   connectedApps?: ConnectedApp[];
+  localFiles?: boolean;
   mcpServers?: ConnectedMcpServer[];
   currentMessageId?: string;
   speech?: { mode: SpeechReplyMode; available: boolean };
@@ -160,7 +161,9 @@ export interface RuntimeContext {
   memoryBrief?: MemoryBrief;
   learnedSkills?: Array<{ name: string; description: string }>;
   checkIn?: { budgetUsd: number; spentUsd: number; planUsd?: number };
+  spendingLimitReached?: { monthlyUsd: number };
   previousFailure?: string;
+  confirmedActions?: string[];
   taskContext?: {
     id: string;
     title: string;
@@ -299,8 +302,13 @@ export type AgentEvent =
   | { type: 'provider_usage'; usage: ProviderUsageEvent }
   | { type: 'turn_start' }
   | { type: 'message_start' }
-  | { type: 'message_end'; status?: 'succeeded' | 'failed' | 'cancelled' | 'incomplete' }
+  | {
+      type: 'message_end';
+      status?: 'succeeded' | 'failed' | 'cancelled' | 'incomplete';
+      contextExhausted?: boolean;
+    }
   | { type: 'text_delta'; text: string }
+  | { type: 'thinking'; title: string }
   | { type: 'final'; text: string }
   | ModelUsageObservation
   | { type: 'error'; message: string };
@@ -339,7 +347,12 @@ export interface AgentSession {
   readsImages?: boolean;
   readsAudio?: boolean;
   contextWindow?: number;
-  prompt(text: string, images: AgentImage[], audio?: AgentAudioInput): Promise<void>;
+  prompt(
+    text: string,
+    images: AgentImage[],
+    audio?: AgentAudioInput,
+    stablePrefixes?: string[],
+  ): Promise<void>;
   abort(): void | Promise<void>;
   dispose(): void | Promise<void>;
 }

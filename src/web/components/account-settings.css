@@ -158,6 +158,16 @@
   padding-bottom: 0;
   border-bottom: 0;
 }
+.account-settings-body .account-links .field-hint a {
+  display: inline;
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.account-settings-body .account-links .field-hint a:hover {
+  color: var(--link-hover);
+  background: none;
+}
 .account-region h2,
 .account-region h3 {
   margin: 0 0 12px;
@@ -943,4 +953,8 @@
   margin: 0;
   color: var(--muted-foreground);
   font-size: var(--text-control);
+}
+.local-files-keep-out {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

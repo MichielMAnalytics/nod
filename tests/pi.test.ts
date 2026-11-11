@@ -20,6 +20,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from '@earen
 import { fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
 import {
   appConfirmation,
+  type AgentEvent,
   type AgentSessionOptions,
   type RuntimeContext,
 } from '../src/ports/agent.ts';
@@ -920,6 +921,127 @@ test('a proactive check starts fresh once its cache is cold or its context outgr
   } finally {
     await runtime.dispose();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a restarted proactive check within the hour reads its stable context from a one-hour cache, and a warm one keeps the rolling cache', async (t) => {
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const backend = createPiModelBackend({
+    fetch: async () => {
+      throw new Error('No live catalog request is allowed.');
+    },
+  });
+  const definition = (await backend.catalog('anthropic', 'api_key')).find(
+    ({ choice }) => choice.id === 'claude-opus-5-5',
+  )!;
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-observer-cache-'));
+  const bodies: Array<Record<string, any>> = [];
+  const stream = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'msg_fixture',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-5-5',
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
+    },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Checked.' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join('');
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (!url.includes('/v1/messages')) throw new Error(`Unexpected request to ${url}`);
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const runtime = createAgentRuntime({
+    agent: createPiAgent({
+      provider: 'anthropic',
+      resolve: async () => ({
+        provider: 'anthropic',
+        method: 'api_key',
+        definition,
+        effort: 'low',
+        read: async () => ({ type: 'api_key', key: 'fixture-key' }),
+      }),
+      sessionRoot: join(directory, 'sessions'),
+    }),
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  const observer = randomUUID();
+  const check = (prompt: string) =>
+    runtime.runTurn({
+      ...({} as RuntimeContext),
+      threadId: 'test-' + observer,
+      turnId: randomUUID(),
+      sessionId: observer,
+      background: true,
+      resumed: false,
+      prompt,
+      memory: 'about/name: The owner is Alex.',
+      history: [
+        { role: 'user', text: 'Earlier owner message', createdAt: new Date().toISOString() },
+      ],
+      workspacePath: directory,
+      signal: new AbortController().signal,
+      attachments: [],
+      emit: async () => {},
+      reply: async () => {},
+      delta: () => {},
+      proactivity: {
+        instructions: 'Fixture observer.',
+        issues: [],
+        sources: [],
+        read: async () => ({}),
+        update: async () => ({}),
+      },
+    });
+  try {
+    await check('FIRST-BATCH');
+    await check('SECOND-BATCH');
+    await check('THIRD-BATCH');
+    const now = Date.now();
+    t.mock.method(Date, 'now', () => now + 13 * 60_000);
+    await check('FOURTH-BATCH');
+  } finally {
+    await runtime.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+  assert.equal(bodies.length, 4);
+  assert.equal(JSON.stringify(bodies[0]).includes('"1h"'), false);
+  const restarted = bodies[3];
+  const tail = restarted.messages.flatMap((message: { content: unknown }) =>
+    Array.isArray(message.content) ? message.content : [],
+  );
+  assert.ok(JSON.stringify(restarted).split('"cache_control"').length - 1 <= 4);
+  assert.equal('cache_control' in restarted.system[0], false);
+  assert.deepEqual(
+    tail
+      .filter((block: any) => block.cache_control?.ttl === '1h')
+      .map((block: any) => block.text.slice(0, 20)),
+    ['Owner context. It re', 'Respond to currentIn', '"recentConversation"'],
+  );
+  assert.deepEqual(tail.at(-1).cache_control, { type: 'ephemeral' });
+  for (const [index, body] of bodies.slice(1, 3).entries()) {
+    const blocks = body.messages.flatMap((message: { content: unknown }) =>
+      Array.isArray(message.content) ? message.content : [],
+    );
+    assert.equal(JSON.stringify(body).includes('"1h"'), false);
+    assert.match(blocks.at(-1).text, index ? /THIRD-BATCH/ : /SECOND-BATCH/);
+    assert.deepEqual(blocks.at(-1).cache_control, { type: 'ephemeral' });
+    assert.ok(
+      blocks.some((block: any) => /FIRST-BATCH/.test(block.text) && !('cache_control' in block)),
+    );
   }
 });
 
@@ -3490,6 +3612,405 @@ test('a turn that crosses the compaction line answers first, then compacts at th
   );
   assert.equal(compactions.length, 1);
   assert.ok(answered >= 0 && answered < compactions[0]);
+});
+
+test('Pi repairs assistant blocks before post-turn compaction', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-complete-blocks-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const access = smallContextAccess('compatible', 'fixture-compact', 65_536);
+  let replies = 0;
+  let summaries = 0;
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: directory,
+    resolve: async () => access,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.agent.streamFunction = (model, context) => {
+        const summary = JSON.stringify(context.messages).includes('<conversation>');
+        if (summary) summaries++;
+        const reply = summary ? 0 : ++replies;
+        const malformed = reply === 3;
+        const text = summary
+          ? 'Synthetic summary.'
+          : reply === 3
+            ? 'First answer.'
+            : reply === 4
+              ? 'Next answer.'
+              : `Earlier answer ${reply}.`;
+        const message = {
+          ...fauxAssistantMessage(text),
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: {
+            ...fauxAssistantMessage('').usage,
+            input: malformed ? 50_000 : 100,
+            output: 2,
+            totalTokens: malformed ? 50_002 : 102,
+          },
+          content: malformed
+            ? ([
+                { type: 'text', text },
+                { type: 'text' },
+                { type: 'thinking', thinkingSignature: 'synthetic-signature' },
+              ] as AssistantMessage['content'])
+            : [{ type: 'text' as const, text }],
+        };
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message });
+        return stream;
+      };
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const threadId = randomUUID();
+  const observed: AgentEvent[] = [];
+  const open = () =>
+    agent.open({
+      ...fakeExecution(threadId),
+      restricted: true,
+      systemPrompt: 'Synthetic instructions',
+      workspace: recordingWorkspace().workspace,
+      runTool: async (_name, _params, run) => run(),
+      tools: [],
+      shouldStop: () => false,
+      onEvent: (event) => observed.push(event),
+    });
+  for (const request of [
+    `Older synthetic history: ${'filler words '.repeat(7_000)}`,
+    `Recent synthetic history: ${'filler words '.repeat(7_000)}`,
+    'First request.',
+  ]) {
+    const session = await open();
+    await session.prompt(request, []);
+    await session.dispose();
+  }
+  assert.equal(replies, 3);
+  assert.ok(summaries >= 1);
+  const answered = observed.findIndex(
+    (event) => event.type === 'final' && event.text.includes('First answer.'),
+  );
+  const compacted = observed.findIndex(
+    (event) =>
+      event.type === 'provider_usage' &&
+      event.usage.operation === 'compaction' &&
+      event.usage.status === 'succeeded',
+  );
+  assert.ok(answered >= 0 && compacted > answered);
+  const saved = await readPiSessionEntries({ threadId, sessionRoot: directory });
+  assert.ok(saved.some((entry) => entry.type === 'compaction'));
+  const assistant = saved.findLast(
+    (entry) => entry.type === 'message' && entry.message.role === 'assistant',
+  );
+  assert.ok(assistant?.type === 'message' && assistant.message.role === 'assistant');
+  assert.deepEqual(assistant.message.content, [
+    { type: 'text', text: 'First answer.' },
+    { type: 'text', text: '' },
+  ]);
+  const next = await open();
+  await next.prompt('Continue.', []);
+  await next.dispose();
+  assert.equal(replies, 4);
+  assert.ok(observed.some((event) => event.type === 'final' && event.text === 'Next answer.'));
+});
+
+test('Anthropic continues a rebased Pi session with incomplete assistant blocks', async (t) => {
+  const { createServer } = await import('node:http');
+  const bodies: Array<{ messages: unknown[] }> = [];
+  const paths: string[] = [];
+  const events = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'synthetic-recovery',
+        type: 'message',
+        role: 'assistant',
+        model: 'fixture-anthropic',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Recovered.' } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: 2 },
+    },
+    { type: 'message_stop' },
+  ];
+  const server = createServer((request, response) => {
+    const parts: Buffer[] = [];
+    request.on('data', (part) => parts.push(part));
+    request.on('end', () => {
+      paths.push(request.url ?? '');
+      bodies.push(JSON.parse(Buffer.concat(parts).toString()));
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(
+        events
+          .map((event) => 'event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n')
+          .join(''),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port;
+  const access = smallContextAccess('compatible', 'fixture-anthropic', 200_000);
+  access.provider = 'anthropic';
+  access.read = async () => ({ type: 'api_key', key: 'synthetic-key' });
+  access.definition.spec = {
+    ...access.definition.spec,
+    provider: 'anthropic',
+    api: 'anthropic-messages',
+    baseUrl: url,
+  };
+  const directory = await mkdtemp(join(tmpdir(), 'nod-anthropic-recovery-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const execution = fakeExecution(randomUUID());
+  const saved = join(directory, execution.sessionId);
+  await mkdir(saved, { recursive: true });
+  const manager = SessionManager.create(saved, saved);
+  manager.appendMessage({ role: 'user', content: 'Earlier owner request.', timestamp: 1 });
+  manager.appendMessage({
+    ...fauxAssistantMessage(''),
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    model: 'fixture-anthropic',
+    content: 'invalid assistant content' as unknown as AssistantMessage['content'],
+  });
+  manager.appendMessage({ role: 'user', content: 'Another owner request.', timestamp: 2 });
+  manager.appendMessage({
+    ...fauxAssistantMessage([{ type: 'text', text: 'Earlier answer.' }]),
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    model: 'fixture-anthropic',
+    content: [
+      { type: 'text', text: 'Earlier answer.' },
+      { type: 'text' },
+      { type: 'thinking', thinkingSignature: 'synthetic-signature' },
+      { type: 'thinking', thinking: '', thinkingSignature: 'valid-empty-signature' },
+      { type: 'thinking', redacted: true, thinkingSignature: 'opaque-redacted-payload' },
+      null,
+    ] as AssistantMessage['content'],
+  });
+  manager.appendCustomEntry('synthetic-padding', { value: 'x'.repeat(8 * 1024 * 1024) });
+  const agent = createPiAgent({
+    provider: 'anthropic',
+    sessionRoot: directory,
+    resolve: async () => access,
+  });
+  t.after(() => agent.dispose());
+  const observed: AgentEvent[] = [];
+  const session = await agent.open({
+    ...execution,
+    restricted: true,
+    systemPrompt: 'Synthetic instructions',
+    workspace: recordingWorkspace().workspace,
+    runTool: async (_name, _params, run) => run(),
+    tools: [],
+    shouldStop: () => false,
+    onEvent: (event) => observed.push(event),
+  });
+  await session.prompt('Continue.', []);
+  await session.dispose();
+  assert.ok(bodies.length > 0);
+  assert.equal(new URL(paths[0], url).pathname, '/v1/messages');
+  assert.ok(observed.some((event) => event.type === 'final' && event.text === 'Recovered.'));
+  const sent = JSON.stringify(bodies[0]);
+  assert.ok(sent.includes('Earlier answer.'));
+  assert.ok(!sent.includes('invalid assistant content'));
+  assert.ok(!sent.includes('synthetic-signature'));
+  assert.ok(sent.includes('valid-empty-signature'));
+  assert.ok(sent.includes('opaque-redacted-payload'));
+  assert.ok(sent.includes('redacted_thinking'));
+});
+
+test('full 32k Pi sessions distinguish context exhaustion from output truncation on continue', async (t) => {
+  const { createServer } = await import('node:http');
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const chunk = (value: object) => `data: ${JSON.stringify(value)}\n\n`;
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-context-exhaustion-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bodies: Array<{
+    messages: Array<{ role: string; content: unknown }>;
+    tools?: unknown[];
+    max_tokens: number;
+  }> = [];
+  let fullContext = false;
+  let requestedTool = false;
+  const server = createServer((request, response) => {
+    const parts: Buffer[] = [];
+    request.on('data', (part) => parts.push(part));
+    request.on('end', () => {
+      if (request.url === '/v1/models') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        return response.end(
+          JSON.stringify({ data: [{ id: 'fixture-qwen', context_length: 32_768 }] }),
+        );
+      }
+      if (request.url !== '/v1/chat/completions') {
+        response.writeHead(404, { 'content-type': 'application/json' });
+        return response.end('{}');
+      }
+      const body: (typeof bodies)[number] = JSON.parse(Buffer.concat(parts).toString());
+      bodies.push(body);
+      const summarizing = !body.tools?.length;
+      const tool = fullContext && !summarizing && !requestedTool;
+      if (tool) requestedTool = true;
+      const promptTokens = fullContext && !tool && !summarizing ? 32_750 : 1000;
+      const outputTokens = fullContext || summarizing ? 17 : body.max_tokens;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(
+        chunk({
+          id: `fixture-cutoff-${bodies.length}`,
+          choices: [
+            {
+              index: 0,
+              delta: tool
+                ? {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'fixture-calendar-read',
+                        type: 'function',
+                        function: {
+                          name: 'bash',
+                          arguments: JSON.stringify({ command: 'fixture-list-calendars' }),
+                        },
+                      },
+                    ],
+                  }
+                : {
+                    role: 'assistant',
+                    content: summarizing
+                      ? 'The owner wants the remaining synthetic calendars included in the answer. The calendar read already finished.'
+                      : 'The remaining synthetic calendars are',
+                  },
+            },
+          ],
+        }) +
+          chunk({
+            id: `fixture-cutoff-${bodies.length}`,
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: tool ? 'tool_calls' : summarizing ? 'stop' : 'length',
+              },
+            ],
+            usage: {
+              prompt_tokens: promptTokens,
+              completion_tokens: outputTokens,
+              total_tokens: promptTokens + outputTokens,
+            },
+          }) +
+          'data: [DONE]\n\n',
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const { port } = server.address() as import('node:net').AddressInfo;
+  const credential = { type: 'endpoint' as const, url: `http://127.0.0.1:${port}/v1` };
+  const [definition] = await createPiModelBackend().catalog('compatible', 'api_key', credential);
+  assert.equal(definition.choice.contextWindow, 32_768);
+  const agent = createPiAgent({
+    provider: 'compatible',
+    sessionRoot: join(directory, 'sessions'),
+    resolve: async () => ({
+      provider: 'compatible',
+      method: 'api_key',
+      definition,
+      effort: 'off',
+      read: async () => credential,
+    }),
+  });
+  const events: AgentEvent[] = [];
+  const { workspace, scripts } = recordingWorkspace();
+  const runtime = createAgentRuntime({
+    agent: {
+      ...agent,
+      open: (input) =>
+        agent.open({
+          ...input,
+          onEvent: (event) => {
+            events.push(event);
+            input.onEvent(event);
+          },
+        }),
+    },
+    computer: fakeComputer(),
+    workspace: fakeWorkspace({ open: () => workspace }),
+  });
+  t.after(() => runtime.dispose());
+  const turn = async (sessionId: string, prompt: string) => {
+    events.length = 0;
+    let result: Awaited<ReturnType<typeof runtime.runTurn>> | undefined;
+    let failure: { name: string; message: string } | undefined;
+    try {
+      result = await runtime.runTurn({
+        ...context(directory),
+        sessionId,
+        turnId: randomUUID(),
+        prompt,
+        history:
+          prompt === 'yes'
+            ? [
+                { role: 'user', text: 'Summarize the events across my synthetic calendars.' },
+                {
+                  role: 'assistant',
+                  text: 'Should I include the remaining synthetic calendars in the answer?',
+                },
+              ]
+            : [],
+      });
+    } catch (error) {
+      assert.ok(error instanceof Error);
+      failure = { name: error.name, message: error.message };
+    }
+    return {
+      outcome: { result, failure },
+      ending: events.findLast((event) => event.type === 'message_end'),
+      usage: events.filter((event) => event.type === 'model_usage'),
+    };
+  };
+  const outputLimit = await turn('fixture-output-limit', 'List the synthetic calendars.');
+  assert.ok(outputLimit.outcome.failure);
+  assert.deepEqual(outputLimit.ending, { type: 'message_end', status: 'incomplete' });
+  assert.equal(bodies.length, 1);
+  assert.equal(outputLimit.usage[0].outputTokens, bodies[0].max_tokens);
+  assert.ok(outputLimit.usage[0].totalTokens < 32_768);
+
+  fullContext = true;
+  const exhausted = [];
+  for (const prompt of ['yes', 'continue', 'continue'])
+    exhausted.push(await turn('fixture-full-context', prompt));
+  assert.equal(scripts.length, 1);
+  assert.ok(scripts[0].includes('fixture-list-calendars'));
+  for (const attempt of exhausted)
+    assert.ok(
+      attempt.usage.some((usage) => usage.inputTokens === 32_750 && usage.outputTokens === 17),
+    );
+  for (const attempt of exhausted) {
+    assert.ok(attempt.outcome.failure);
+    assert.notDeepEqual(
+      attempt.outcome,
+      outputLimit.outcome,
+      'A full context must not offer the same unchanged-context retry as an output-limit cutoff.',
+    );
+    assert.deepEqual(attempt.ending, {
+      type: 'message_end',
+      status: 'incomplete',
+      contextExhausted: true,
+    });
+  }
 });
 
 test('OpenAI cache boundaries cover shared instructions and keep task paths outside them', async () => {

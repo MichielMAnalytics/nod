@@ -45,12 +45,15 @@ const bundle = join(output, name);
 await mkdir(output, { recursive: true, mode: 0o700 });
 await mkdir(bundle, { mode: 0o700 });
 const compose = parse(await readFile(join(directory, 'compose.yaml'), 'utf8'));
+compose.services.server.environment.NOD_APP_VERSION = revision;
 for (const image of images) {
   delete compose.services[image.service].build;
   compose.services[image.service].image = image.reference;
   compose.services[image.service].pull_policy = 'never';
   await run('docker', ['tag', image.id, image.reference]);
 }
+compose.services['workspace-network'].image = compose.services.workspace.image;
+compose.services['workspace-network'].pull_policy = 'never';
 await writeFile(join(bundle, 'compose.yaml'), stringify(compose));
 const files = [
   '.env.example',

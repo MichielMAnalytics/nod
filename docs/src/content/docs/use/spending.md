@@ -14,7 +14,7 @@ Nod itself doesn't charge you. Your model provider bills you for the requests No
 Open **Usage** in the sidebar (⌘5 in the Mac app, Ctrl+5 in the Windows or Linux app).
 
 - **The sentence at the top.** With an API model selected, this month's API spending and your monthly limit. Select the total to inspect spending or the limit to change it. With a ChatGPT plan selected, it says your usage comes from that plan.
-- **The list.** Model requests, connected app actions, sign-ins and card uses, grouped by day. Each line shows where it came from, such as **Schedule**, **Activity check** or **Approved action**, and what Nod did. Model requests show the models recorded for that run, including helpers and checks. Changing your selected model doesn't change these records. If an older request didn't record its model, the row says so. Under an action your words allowed, it shows those words, such as _You said "Send Lena the report"_.
+- **The list.** Model requests, connected app actions, sign-ins and card uses, grouped by day. Each line shows where it came from, such as **Schedule**, **Activity check** or **Task Nod started**, and what Nod did. A source check that found nothing to prepare says so, and a task's planned check reads **Checked on** with the task's name. Model requests show the models recorded for that run, including helpers and checks. Changing your selected model doesn't change these records. If an older request didn't record its model, the row says so. Under an action your words allowed, it shows those words, such as _You said "Send Lena the report"_.
 
 With a ChatGPT plan selected, Usage hides cost amounts, forecasts and monthly limit controls, including amounts on older API requests. Those requests still identify their recorded models and API connection. With an API model selected, recorded API costs are visible again; plan usage stays labeled separately and its API-price estimate is never shown as a charge. A run that used both shows its recorded API cost and identifies the models that used the plan.
 
@@ -24,9 +24,9 @@ Select an activity with an available chat message to open that message in the co
 
 To review or change [standing instructions](/trust/approvals/#standing-instructions), [rules](/trust/approvals/#your-rules) or task check-ins, ask Nod in chat.
 
-Chat messages don't include cost or action receipts. Review spending and app actions in **Usage**. On **Scheduled**, open a schedule’s details to see its runs and their recorded costs. Plan usage and unpriced runs have no cost amount.
+Chat messages don't include cost or action receipts. Review spending and app actions in **Usage**. On **Scheduled**, an enabled recurring schedule shows its projected monthly cost once there's priced usage to base it on, and its details show its runs and their recorded costs. A new schedule's projection uses your other schedules' recent runs, your recent requests, or the request that set it up, until it has finished runs of its own. When Nod creates a recurring schedule or changes its timing, its reply states the projection. Plan usage and unpriced runs have no cost amount.
 
-With an API model selected, select this month's total to see a chart and a forecast, such as "On track for $12.40". Point to or select a day on the chart to see that day’s spend and the total so far. You can also focus the chart and use the arrow keys. Every app action is recorded, reads included.
+With an API model selected, select this month's total to see a chart and a forecast, such as "On track for $12.40". It also says how much was background work: source checks, schedules and tasks Nod started, plus work that runs outside any of them, such as email checks, memory upkeep and writing style. Point to or select a day on the chart to see that day’s spend and the total so far. You can also focus the chart and use the arrow keys. Every app action is recorded, reads included.
 
 ## How each model is priced
 
@@ -42,6 +42,10 @@ Costs are Nod's estimates from each model's API price. Your provider's bill is t
 
 ## Set a monthly limit
 
+Nod sets a $200 monthly limit when you finish setup. If you set up Nod before it did this, you have no limit until you set one.
+
+To change it:
+
 1. Select an API model and open **Usage**.
 2. In the sentence at the top, select **no monthly limit**, or your current limit.
 3. Enter an amount in US dollars, from $1 up, and select **Save**.
@@ -54,21 +58,24 @@ To remove the limit, select it, then **Remove**. You can also tell Nod, for exam
 flowchart LR
   req[New request<br/>chat or background]:::accent --> check{{Spent less than<br/>the limit this month?}}
   check -- yes --> run[Nod works]:::go
-  check -- no --> stop[Stops before<br/>using the model]:::stop
+  check -- no --> stop[Schedules, tasks and<br/>background work stop]:::stop
+  check -- no --> ask[Nod answers your messages<br/>only to change the limit]:::muted
   stop -.-> lift[Next month, or you<br/>raise or remove the limit]:::muted
+  ask -.-> lift
 ```
 
 When the month's spending reaches your limit:
 
-- New chat messages, schedules and background work stop before Nod calls the model. Work you started gets one message saying it's paused, in Nod and in the chat app you used.
+- Schedules, tasks and background work stop before Nod calls the model. Work you started gets one message that names the limit and asks whether to raise or remove it, in Nod and in the chat app you used.
+- Your messages still reach Nod, in Nod, Telegram and WhatsApp, voice messages included. Nod tells you the limit is reached and asks whether to raise or remove it. Reply with what you want, for example "Raise it to $300" or "Remove the limit", and Nod changes it. Until then, it only replies, reads usage and changes limits. These replies use your model and are counted like any other request.
 - Work that's already running can finish.
 - An action you already approved still runs once.
 
-The pause lifts at the start of next month, or as soon as you raise or remove the limit.
+The pause lifts at the start of next month, or as soon as you raise or remove the limit, in **Usage** or by telling Nod. Then send your request again.
 
 Only paid usage with a known price counts toward the limit. See [How each model is priced](#how-each-model-is-priced).
 
-Switching to a ChatGPT plan doesn't remove an existing monthly limit or its recorded API spending. If that limit is already reached, new requests stay paused. Select an API model to review the limit.
+Switching to a ChatGPT plan doesn't remove an existing monthly limit or its recorded API spending. If that limit is already reached, schedules, tasks and background work stay paused, and Nod answers your messages only to change the limit. Tell Nod to raise or remove it, or select an API model to review it in **Usage**.
 
 ## Task check-ins
 

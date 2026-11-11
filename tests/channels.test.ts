@@ -39,7 +39,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Artifact } from '../src/shared/contracts.ts';
 import type { InboundMessage } from '../src/ports/messaging.ts';
-import { spendingLimitReached } from '../src/server/ledger.ts';
 import { ChannelMediaFailure } from '../src/server/channel-media.ts';
 import { loadAudioWaveform } from '../src/web/lib/audio-waveform.ts';
 import { contactCards } from '../src/shared/channel-content.ts';
@@ -2695,9 +2694,9 @@ test(
     let reads = 0;
     let message: InboundMessage;
     const submissions: { text: string; attachments: Artifact[] }[] = [];
+    const acceptedChannels: string[] = [];
     const privateCodes: string[] = [];
     const presentations: { kind: string; reason?: string }[] = [];
-    let voiceFailure: Error | undefined;
     let modelConfigured = true;
     let verificationPending = false;
     let speechConfigured = true;
@@ -2710,10 +2709,7 @@ test(
       synthesize: async () => {
         throw new Error('Not used by the fixture.');
       },
-      transcribe: async () => {
-        if (voiceFailure) throw voiceFailure;
-        return transcript;
-      },
+      transcribe: async () => transcript,
     });
     const transport = (): MessagingTransport => ({
       channels: [
@@ -2755,10 +2751,23 @@ test(
           privateCodes.push(text);
           return { messageText: 'Code entered privately.' };
         },
-        submit: async (text, sourceId, client, channel, _messageId, answer, _reply, files) => {
+        messageAccepted: () => (channel) => acceptedChannels.push(channel),
+        submit: async (
+          text,
+          sourceId,
+          client,
+          channel,
+          _messageId,
+          answer,
+          _reply,
+          files,
+          onInserted,
+        ) => {
           assert.equal(answer, undefined);
           submissions.push({ text, attachments: files ?? [] });
-          return fixtureTurn(client, threadId, owner, channel, sourceId);
+          const turnId = await fixtureTurn(client, threadId, owner, channel, sourceId);
+          onInserted?.();
+          return turnId;
         },
       });
       channels.registerRoutes(app);
@@ -2798,6 +2807,7 @@ test(
     await fixture.channels.drain();
     assert.equal(reads, 1);
     assert.equal(submissions.length, 1);
+    assert.deepEqual(acceptedChannels, ['telegram']);
     assert.equal(submissions[0].text, 'Inspect this image');
     assert.equal(submissions[0].attachments.length, 1);
     assert.deepEqual(
@@ -2810,6 +2820,7 @@ test(
     await fixture.channels.drain();
     assert.equal(reads, 1);
     assert.equal(submissions.length, 1);
+    assert.deepEqual(acceptedChannels, ['telegram']);
     message = {
       ...message,
       messageId: 'private-voice',
@@ -2820,6 +2831,7 @@ test(
     await fixture.channels.drain();
     assert.deepEqual(privateCodes, ['483729']);
     assert.equal(submissions.length, 1);
+    assert.deepEqual(acceptedChannels, ['telegram']);
     assert.equal(
       (await pool.query('SELECT count(*)::int AS count FROM artifacts')).rows[0].count,
       1,
@@ -2841,15 +2853,6 @@ test(
         url: '/api/webhooks/telegram',
         payload: { messageId },
       });
-    voiceFailure = new Error(spendingLimitReached);
-    await sendId('limited-voice');
-    await fixture.channels.drain();
-    assert.ok(
-      presentations.some(
-        (item) => item.kind === 'media_failure' && item.reason === 'spending_limit',
-      ),
-    );
-    voiceFailure = undefined;
     transcript = 'x'.repeat(100_001);
     await sendId('long-transcript');
     await fixture.channels.drain();
@@ -3180,8 +3183,8 @@ test(
 async function createFixtureTables(pool: pg.Pool, owner: string) {
   await pool.query(`${locksTable};
     CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text NOT NULL,status text NOT NULL DEFAULT 'idle',created_at timestamptz NOT NULL DEFAULT now(),archived_at timestamptz);
-    CREATE TABLE turns(id uuid PRIMARY KEY,parent_turn_id uuid,owner_id text NOT NULL,thread_id uuid NOT NULL REFERENCES threads(id),source text NOT NULL DEFAULT 'user',source_id text UNIQUE,channel text NOT NULL DEFAULT 'web',channel_source_id text,status text NOT NULL DEFAULT 'queued',waiting_reason text,handoff_browser_id text,background boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz,finished_at timestamptz,session_id uuid GENERATED ALWAYS AS (CASE WHEN background THEN id ELSE thread_id END) STORED);
-    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,approval_answer boolean,assistant_reaction text,assistant_reacted_at timestamptz,created_at timestamptz NOT NULL DEFAULT now())`);
+    CREATE TABLE turns(id uuid PRIMARY KEY,parent_turn_id uuid,owner_id text NOT NULL,thread_id uuid NOT NULL REFERENCES threads(id),message_id uuid,source text NOT NULL DEFAULT 'user',source_id text UNIQUE,channel text NOT NULL DEFAULT 'web',channel_source_id text,status text NOT NULL DEFAULT 'queued',waiting_reason text,handoff_browser_id text,background boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz,finished_at timestamptz,session_id uuid GENERATED ALWAYS AS (CASE WHEN background THEN id ELSE thread_id END) STORED);
+    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,approval_answer boolean,assistant_reaction text,assistant_reacted_at timestamptz,hidden_at timestamptz,created_at timestamptz NOT NULL DEFAULT now())`);
   const threadId = randomUUID();
   await pool.query('INSERT INTO threads(id,owner_id) VALUES($1,$2)', [threadId, owner]);
   return threadId;
@@ -3686,22 +3689,22 @@ test('channel presentation isolates private links from the model and rejects uns
   });
   assert.match(
     modelsLink,
-    /Reconnect \(Settings > Models\): https:\/\/nod-docs\.pages\.dev\/open\/#\/settings\/models/,
+    /Reconnect \(Settings > Models\): https:\/\/nod\.n8n\.io\/docs\/open\/#\/settings\/models/,
   );
   assert.doesNotMatch(modelsLink, /localhost|127\.0\.0\.1|nod:\/\//);
   const informationLink = await channelReply('See [Usage](/usage).', { threadId: 'owned-thread' });
-  assert.match(informationLink, /Usage: https:\/\/nod-docs\.pages\.dev\/open\/#\/usage/);
+  assert.match(informationLink, /Usage: https:\/\/nod\.n8n\.io\/docs\/open\/#\/usage/);
   const prepared = `/prepared/${randomUUID()}`;
   const resultLink = await channelReply(`See [Contract \\[reply\\]](${prepared}).`, {
     threadId: 'owned-thread',
   });
-  assert.ok(resultLink.includes(`https://nod-docs.pages.dev/open/#${prepared}`));
+  assert.ok(resultLink.includes(`https://nod.n8n.io/docs/open/#${prepared}`));
   assert.doesNotMatch(resultLink, /localhost|127\.0\.0\.1|nod:\/\//);
   const adapted = await channelReply('/credentials/request-id', {
     threadId: 'owned-thread',
     present: async () => 'Open [Settings > Models](/settings/models).',
   });
-  assert.match(adapted, /https:\/\/nod-docs\.pages\.dev\/open\/#\/settings\/models/);
+  assert.match(adapted, /https:\/\/nod\.n8n\.io\/docs\/open\/#\/settings\/models/);
   const presentation: unknown[] = [];
   const present = async (threadId: string | null, input: unknown) => {
     presentation.push({ threadId, input });
@@ -4157,6 +4160,13 @@ test(
         [telegramReply, '🤷‍♀️'],
         [whatsappReply, '❤️'],
       ]);
+      await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [telegramReply]);
+      try {
+        await sendTelegram(telegramReaction(101, ['👍']));
+        assert.equal(reactedTo.length, 6);
+      } finally {
+        await pool.query('UPDATE messages SET hidden_at=NULL WHERE id=$1', [telegramReply]);
+      }
       const whatsappOwnerMessage = await idOf(
         "SELECT message_id FROM channel_inbox WHERE source_id='channel:whatsapp:555000:wamid.good'",
       );
@@ -4366,6 +4376,20 @@ test(
         ],
       );
       assert.ok(!telegramMethods.includes('sendRichMessage'));
+      await transport.post({
+        channelId: 'telegram',
+        accountId: '987',
+        threadId: 'telegram:123456',
+        replyToMessageId: '123456:10',
+        text: 'Invoice https://example.com/canary?k=NS-1042',
+      });
+      const telegramTexts = sent.filter(
+        ({ provider, body }) => provider === 'telegram' && 'text' in body,
+      );
+      assert.ok(telegramTexts.some(({ body }) => body.reply_parameters));
+      assert.ok(telegramTexts.some(({ body }) => !body.parse_mode));
+      for (const { body } of telegramTexts)
+        assert.deepEqual(body.link_preview_options, { is_disabled: true });
 
       await pool.query("UPDATE channel_inbox SET received_at=now() WHERE provider='whatsapp'");
       const beforeFormattedWhatsApp = sent.length;
@@ -4476,6 +4500,25 @@ test(
         await sendWhatsApp(inbound);
         await channels.drain();
         assert.equal(replyTargets.at(-1)?.messageId, imageReply);
+      }
+      const unquoted = await addReply(
+        'channel:whatsapp:555000:wamid.good',
+        'Current response without a retired quote.',
+      );
+      await pool.query('UPDATE messages SET reply_to_message_id=$2 WHERE id=$1', [
+        unquoted,
+        whatsappReply,
+      ]);
+      await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [whatsappReply]);
+      try {
+        const before = sent.length;
+        await channels.drain();
+        assert.deepEqual(
+          sent.slice(before).map(({ provider, body }) => [provider, body.context ?? null]),
+          [['whatsapp', null]],
+        );
+      } finally {
+        await pool.query('UPDATE messages SET hidden_at=NULL WHERE id=$1', [whatsappReply]);
       }
       const rejectedImages = await addReply(
         'channel:whatsapp:555000:wamid.good',

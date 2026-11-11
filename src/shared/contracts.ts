@@ -22,6 +22,7 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  displayText?: string;
   audioCaption?: string;
   turnId: string | null;
   createdAt: string;
@@ -55,6 +56,7 @@ export interface SubmitMessageResponse {
   turnId: string;
   messageId: string;
   messageText?: string;
+  displayText?: string;
   audioCaption?: string;
   verificationStatus?: 'pending' | 'submitted' | 'unavailable';
 }
@@ -255,6 +257,8 @@ export interface AppState {
   tasks?: Task[];
   threadId: string;
   hasEarlierMessages?: boolean;
+  hiddenMessageCount?: number;
+  hiddenMessageIds?: string[];
   pendingAnswerChoiceMessageIds?: string[];
   verificationRequests?: VerificationRequest[];
   planningTasks?: boolean;
@@ -326,6 +330,7 @@ export interface Schedule {
   nextRun: string | null;
   lastRun: ScheduleRun | null;
   baselineObservation: ScheduleObservation | null;
+  watch: string[] | null;
   monthlyUsd: number | null;
 }
 export type ScheduleObservation = {

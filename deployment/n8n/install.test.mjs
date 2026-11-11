@@ -12,6 +12,7 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const certificate = Buffer.from('synthetic installer certificate');
 const pin = sha256(certificate);
 const source = 'a'.repeat(40);
+const githubReleases = 'https://github.com/n8n-io/nod/releases';
 
 async function fixture(options = {}) {
   const arch = options.intel ? 'x64' : 'arm64';
@@ -47,7 +48,9 @@ async function fixture(options = {}) {
     nodBuild: {
       source: options.wrongSource ? 'b'.repeat(40) : source,
       modified: false,
-      updateSourceUrl: base,
+      ...(options.legacyUpdateSource || options.badUpdateSource
+        ? { updateSourceUrl: options.badUpdateSource ? 'https://attacker.invalid' : base }
+        : {}),
     },
   });
   await write(join(app, 'Contents/MacOS/nod'), 'synthetic executable');
@@ -78,25 +81,22 @@ async function fixture(options = {}) {
   );
   await write(join(directory, 'certificate'), certificate);
   await write(join(directory, 'earlier-certificate'), 'synthetic earlier certificate');
-  await write(join(directory, 'latest.json'), {
-    schema: 1,
-    version,
-    releaseId: 42,
-    disk: {
-      url: options.hostileUrl
-        ? 'https://attacker.invalid/nod-arm64.dmg'
-        : `${base}/releases/42/assets/103/nod-${arch}.dmg`,
-      bytes: disk.length,
-      sha256: sha256(disk),
-    },
-    manifestUrl: `${base}/releases/42/assets/101/${manifestName}`,
-  });
   await write(join(directory, 'release.json'), {
     version,
     platform: `darwin-${arch}`,
     source,
+    ...(options.legacyUpdateSource || options.badUpdateSource
+      ? { updateSourceUrl: options.badUpdateSource ? 'https://attacker.invalid' : base }
+      : {}),
     minimumSystemVersion: '14.0',
-    signing: { certificateSha256: options.wrongPin ? 'b'.repeat(64) : pin },
+    signing: {
+      mode: options.selfSigned ? 'self-signed' : 'developer-id',
+      identity: options.selfSigned
+        ? 'Synthetic Nod Signing'
+        : 'Developer ID Application: n8n GmbH (GRHFXT3RL9)',
+      certificateSha256: options.wrongPin ? 'b'.repeat(64) : pin,
+      ...(!options.selfSigned ? { teamId: 'GRHFXT3RL9' } : {}),
+    },
     disk: { file: `nod-${arch}.dmg`, bytes: disk.length, sha256: sha256(disk) },
   });
   const driver = `#!${process.execPath}
@@ -111,8 +111,8 @@ else if(command==='stat'){const info=statSync(args[2]);print(args[1]==='%d:%i'?i
 else if(command==='pgrep')process.exit(options.running?0:1);
 else if(command==='launchctl'){if(args[1]!=='gui/1000/dev.nod.desktop.ShipIt')stop();const job=join(root,'shipit-job');if(args[0]==='print')process.exit(existsSync(job)?0:113);if(args[0]!=='bootout'||options.updaterStopFailure)stop();unlinkSync(job)}
 else if(command==='file')print('Mach-O 64-bit executable '+(options.intel&&!options.wrongArchitecture?'x86_64':'arm64'));
-else if(command==='plutil'){let value=JSON.parse(readFileSync(args.at(-1),'utf8'));for(const key of args[1].split('.'))value=value?.[key];const type=args[args.indexOf('-expect')+1];if((type==='string'&&typeof value!=='string')||(type==='bool'&&typeof value!=='boolean')||(type==='integer'&&!Number.isInteger(value)))stop();print(value)}
-else if(command==='curl'){const url=args.at(-1);if(!url.startsWith(${JSON.stringify(base + '/')}))stop();const input=url===${JSON.stringify(base + '/releases?installer=true')}+(options.intel?'&platform=darwin-x64':'')?'latest.json':url.endsWith(options.intel?'release-darwin-x64.json':'release.json')?'release.json':'disk';copyFileSync(join(root,input),args[args.indexOf('--output')+1]);if(options.targetChanged&&input==='disk'){const path=join(${JSON.stringify(target)},'Contents/Info.plist');const info=JSON.parse(readFileSync(path,'utf8'));info.CFBundleShortVersionString='0.1.1';writeFileSync(path,JSON.stringify(info))}}
+else if(command==='plutil'){let value=JSON.parse(readFileSync(args.at(-1),'utf8'));for(const key of args[1].split('.'))value=value?.[key];const type=args[args.indexOf('-expect')+1];if(value===undefined||value===null||(type==='string'&&typeof value!=='string')||(type==='bool'&&typeof value!=='boolean')||(type==='integer'&&!Number.isInteger(value)))stop();print(value)}
+else if(command==='curl'){const url=args.at(-1),tag='nod-v'+(options.releaseVersion||'0.2.0'),manifest=${JSON.stringify(`${githubReleases}/download/`)}+tag+'/'+${JSON.stringify(manifestName)},disk=${JSON.stringify(`${githubReleases}/download/`)}+tag+'/nod-'+(options.intel?'x64':'arm64')+'.dmg',alias=${JSON.stringify(`${githubReleases}/latest/download/${manifestName}`)};if(url===alias){const location=options.offRepoRedirect?'https://attacker.invalid/download/nod-v0.2.0/${manifestName}':options.badTag?${JSON.stringify(`${githubReleases}/download/other-v0.2.0/${manifestName}`)}:manifest;writeFileSync(args[args.indexOf('--dump-header')+1],'HTTP/2 302\\r\\nlocation: '+location+'\\r\\n\\r\\n');process.stdout.write('302')}else{const input=url===manifest?'release.json':url===disk?'disk':null;if(!input)stop();copyFileSync(join(root,input),args[args.indexOf('--output')+1]);if(options.targetChanged&&input==='disk'){const path=join(${JSON.stringify(target)},'Contents/Info.plist');const info=JSON.parse(readFileSync(path,'utf8'));info.CFBundleShortVersionString='0.1.1';writeFileSync(path,JSON.stringify(info))}}}
 else if(command==='codesign'){if(options.badSignature&&args.at(-1).includes('mount/'))stop();const extract=args.find(value=>value.startsWith('--extract-certificates='));if(extract)copyFileSync(join(root,options.earlierCertificate&&args.at(-1).endsWith('/Applications/nod.app')?'earlier-certificate':'certificate'),extract.split('=')[1]+'0')}
 else if(command==='hdiutil'){if(args[0]==='attach')cpSync(join(root,'fixture.app'),join(args[args.indexOf('-mountpoint')+1],'Nod.app'),{recursive:true})}
 else if(command==='ditto'){if(options.copyFailure){mkdirSync(args[1],{recursive:true});writeFileSync(join(args[1],'partial'),'partial copy');stop()}cpSync(args[0],args[1],{recursive:true})}
@@ -174,10 +174,16 @@ else stop();
   };
 }
 
-test('CLI-INSTALL: hosted script installs verified bytes and preserves the existing profile', async () => {
+test('CLI-INSTALL: GitHub script installs verified bytes and preserves the existing profile', async () => {
   const embedded = new Function(installNodes()[1].parameters.jsCode)()[0].json.body;
   assert.equal(embedded, installer);
-  for (const options of [{}, { fresh: true }, { legacyInstall: true }]) {
+  for (const options of [
+    {},
+    { fresh: true },
+    { legacyInstall: true },
+    { legacyUpdateSource: true },
+    { selfSigned: true },
+  ]) {
     const state = await fixture(options);
     try {
       const result = state.run();
@@ -236,7 +242,9 @@ test('CLI-INSTALL: rejected metadata, downloads, signatures and interrupted stag
     { staleUpdater: true, updaterStopFailure: true },
     { elevated: true },
     { wrongTarget: true },
-    { hostileUrl: true },
+    { badTag: true },
+    { offRepoRedirect: true },
+    { badUpdateSource: true },
     { wrongPin: true },
     { corruptDisk: true },
     { badSignature: true },
@@ -253,7 +261,8 @@ test('CLI-INSTALL: rejected metadata, downloads, signatures and interrupted stag
       try {
         const result = state.run();
         assert.equal(result.status, 1, result.stdout);
-        if (options.hostileUrl) assert.match(result.stderr, /download URL is invalid/);
+        if (options.badTag) assert.match(result.stderr, /release tag is invalid/);
+        if (options.badUpdateSource) assert.match(result.stderr, /update service does not match/);
         assert.equal(await readFile(join(state.target, 'previous'), 'utf8'), 'previous app');
         assert.equal(
           await readFile(state.profile, 'utf8'),
@@ -332,9 +341,14 @@ test('CLI-INSTALL: Intel metadata, installer and executable use the same archite
   }
 });
 
-const powershell = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
+const powershellCommands = process.platform === 'win32' ? ['pwsh', 'powershell.exe'] : ['pwsh'];
+const powershell = powershellCommands.every(
+  (command) => spawnSync(command, ['-NoProfile', '-Command', 'exit 0']).status === 0,
+);
 if (process.platform === 'win32' && !powershell) {
-  throw new Error('PowerShell 7 is required to validate the Windows installer.');
+  throw new Error(
+    'Windows PowerShell 5.1 and PowerShell 7 are required to test the Windows installer.',
+  );
 }
 
 async function windowsInstall(options = {}) {
@@ -343,37 +357,41 @@ async function windowsInstall(options = {}) {
   const localAppData = join(directory, 'Local App Data');
   const target = join(localAppData, options.existing ? 'Custom Nod' : 'Programs/nod');
   await mkdir(temporary);
+  if (options.currentVersion) {
+    const packagePath = join(target, 'resources/app/package.json');
+    await mkdir(dirname(packagePath), { recursive: true });
+    await writeFile(
+      packagePath,
+      JSON.stringify({ name: 'nod-desktop', version: options.currentVersion }),
+    );
+  }
   const bytes = {
     installer: Buffer.from('synthetic Windows installer'),
     runtime: Buffer.from('synthetic Windows runtime pack'),
   };
-  const url = (id, name) => `${base}/releases/42/assets/${id}/${name}`;
-  const entry = (id, name, value) => ({
-    url: url(id, name),
+  const tag = 'nod-v0.2.0';
+  const url = (name) => `${githubReleases}/download/${tag}/${name}`;
+  const entry = (name, value) => ({
+    file: name,
     bytes: value.length,
     sha256: sha256(value),
   });
-  const latest = {
-    schema: 1,
-    version: '0.2.0',
-    releaseId: 42,
-    installer: entry(7, 'nod-Setup-x64.exe', bytes.installer),
-    runtime: entry(8, 'nod-Runtime-win32-x64.tar.gz', bytes.runtime),
-    manifestUrl: url(9, 'release-win32-x64.json'),
-  };
+  const alias = `${githubReleases}/latest/download/release-win32-x64.json`;
+  const redirect = options.offRepoRedirect
+    ? 'https://attacker.invalid/releases/download/nod-v0.2.0/release-win32-x64.json'
+    : options.badTag
+      ? `${githubReleases}/download/other-v0.2.0/release-win32-x64.json`
+      : url('release-win32-x64.json');
   const manifest = {
-    version: '0.2.0',
+    version: options.wrongManifestVersion ? '0.3.0' : '0.2.0',
     platform: 'win32-x64',
-    installer: {
-      file: 'nod-Setup-x64.exe',
-      bytes: bytes.installer.length,
-      sha256: latest.installer.sha256,
-    },
-    runtime: {
-      file: 'nod-Runtime-win32-x64.tar.gz',
-      bytes: bytes.runtime.length,
-      sha256: latest.runtime.sha256,
-    },
+    source,
+    signing: { mode: 'artifact-signing' },
+    ...(options.legacyUpdateSource || options.badUpdateSource
+      ? { updateSourceUrl: options.badUpdateSource ? 'https://attacker.invalid' : base }
+      : {}),
+    installer: entry('nod-Setup-x64.exe', bytes.installer),
+    runtime: entry('nod-Runtime-win32-x64.tar.gz', bytes.runtime),
     ...options.manifest,
   };
   const served = { installer: options.installer || bytes.installer, runtime: bytes.runtime };
@@ -391,27 +409,53 @@ async function windowsInstall(options = {}) {
       wrongVersion: Boolean(options.wrongVersion),
       wrongTarget: Boolean(options.wrongTarget),
       launchFailure: Boolean(options.launchFailure),
+      badSignature: Boolean(options.badSignature),
+      lookupFailure: Boolean(options.lookupFailure),
+      ps7Redirect: Boolean(options.ps7Redirect && options.powershell !== 'powershell.exe'),
+      arrayRedirect: Boolean(options.arrayRedirect),
+      legacyUpdateSource: options.legacyUpdateSource ? base : null,
+      source,
       target,
       exitCode: options.exitCode || 0,
-      routes: { [`${base}/releases?installer=true&platform=win32-x64`]: latest },
+      redirects: { [alias]: redirect },
       files: {
-        [latest.installer.url]: served.installer.toString('base64'),
-        [latest.runtime.url]: served.runtime.toString('base64'),
-        [latest.manifestUrl]: Buffer.from(JSON.stringify(manifest)).toString('base64'),
+        [url('nod-Setup-x64.exe')]: served.installer.toString('base64'),
+        [url('nod-Runtime-win32-x64.tar.gz')]: served.runtime.toString('base64'),
+        [url('release-win32-x64.json')]: Buffer.from(JSON.stringify(manifest)).toString('base64'),
       },
     }),
   );
   const mocks = String.raw`
+$ErrorActionPreference = 'Stop'
 $fixture = Get-Content -Raw $env:NOD_FIXTURE | ConvertFrom-Json
 function Get-ItemProperty { param($Path, $ErrorAction)
   if ($Path -like 'HKLM:*') { [pscustomobject]@{ CurrentBuildNumber = $fixture.build } }
   elseif ($fixture.existing -or $script:installed) { [pscustomobject]@{ InstallDir = $(if ($script:installed -and $fixture.wrongTarget) { Join-Path $fixture.target 'other' } else { $fixture.target }) } } }
 function Get-Process { param($Name, $ErrorAction) if ($fixture.running) { [pscustomobject]@{ Name = $Name } } }
-function Invoke-RestMethod { param($Uri, [switch]$UseBasicParsing) Add-Content $env:NOD_LOG "metadata $Uri"; $fixture.routes.$Uri }
-function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing)
+function Invoke-WebRequest { [CmdletBinding()] param($Uri, $OutFile, [switch]$UseBasicParsing, $MaximumRedirection)
   Add-Content $env:NOD_LOG "download $Uri"
+  if ($MaximumRedirection -eq 0) {
+    if ($fixture.lookupFailure) {
+      $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([System.Net.WebException]::new('Synthetic connection failure.'), 'WebCmdletWebResponseException', [System.Management.Automation.ErrorCategory]::InvalidOperation, $null))
+      return
+    }
+    if ($fixture.ps7Redirect) {
+      $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Found)
+      $response.Headers.Location = [Uri]$fixture.redirects.$Uri
+      throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Synthetic redirect', $response)
+    }
+    if ($fixture.arrayRedirect) { [pscustomobject]@{ StatusCode = 302; Headers = @{ Location = [string[]]@($fixture.redirects.$Uri) } } }
+    else { [pscustomobject]@{ StatusCode = 302; Headers = @{ Location = $fixture.redirects.$Uri } } }
+    $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new('Maximum redirection count exceeded.'), 'MaximumRedirectExceeded', [System.Management.Automation.ErrorCategory]::InvalidOperation, $null))
+    return
+  }
   $value = [Convert]::FromBase64String($fixture.files.$Uri)
   if ($OutFile) { [IO.File]::WriteAllBytes($OutFile, $value) } else { [pscustomobject]@{ RawContentStream = [IO.MemoryStream]::new($value) } } }
+function Get-AuthenticodeSignature { param($LiteralPath)
+  Add-Content $env:NOD_LOG "signature $LiteralPath"
+  $certificate = [pscustomobject]@{ EnhancedKeyUsageList = @([pscustomobject]@{ ObjectId = '1.3.6.1.4.1.311.97.516399124.569093350.771684794.174905458' }) }
+  $certificate | Add-Member -MemberType ScriptMethod -Name GetNameInfo -Value { param($kind, $issuer) 'n8n GmbH' }
+  [pscustomobject]@{ Status = $(if ($fixture.badSignature) { 'NotSigned' } else { 'Valid' }); SignerCertificate = $certificate; TimeStamperCertificate = [pscustomobject]@{} } }
 function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$Wait, [switch]$PassThru)
   if ((Split-Path -Leaf $FilePath) -eq 'nod.exe') {
     if (-not $script:installed -or $Wait -or $PassThru) { throw 'Invalid launch ordering or arguments' }
@@ -427,7 +471,9 @@ function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, [swi
     $script:installed = $true
     $package = Join-Path $fixture.target 'resources/app'
     New-Item -ItemType Directory -Path $package -Force | Out-Null
-    @{ name = 'nod-desktop'; version = $(if ($fixture.wrongVersion) { '0.1.0' } else { '0.2.0' }) } | ConvertTo-Json | Set-Content (Join-Path $package 'package.json')
+    $build = @{ source = $fixture.source }
+    if ($fixture.legacyUpdateSource) { $build.updateSourceUrl = $fixture.legacyUpdateSource }
+    @{ name = 'nod-desktop'; version = $(if ($fixture.wrongVersion) { '0.1.0' } else { '0.2.0' }); nodBuild = $build } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $package 'package.json')
     if (-not $fixture.missingApp) { Set-Content (Join-Path $fixture.target 'nod.exe') 'synthetic installed app' }
   }
   [pscustomobject]@{ ExitCode = $fixture.exitCode } }
@@ -436,19 +482,23 @@ function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, [swi
   const runner = join(directory, 'runner.ps1');
   const elevated =
     '[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)';
-  const source = new Function(installNodes()[4].parameters.jsCode)()[0].json.body;
-  assert.equal(source.split(elevated).length, 2);
-  await writeFile(script, source.replace(elevated, '$fixture.elevated'));
+  const scriptSource = new Function(installNodes()[4].parameters.jsCode)()[0].json.body;
+  assert.equal(scriptSource.split(elevated).length, 2);
+  await writeFile(script, scriptSource.replace(elevated, '$fixture.elevated'));
   await writeFile(runner, `${mocks}\nInvoke-Expression (Get-Content -Raw $env:NOD_SCRIPT)\n`);
-  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', runner], {
+  const command = options.powershell || 'pwsh';
+  const result = spawnSync(command, ['-NoProfile', '-NonInteractive', '-File', runner], {
     encoding: 'utf8',
     env: {
-      ...process.env,
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => name.toLowerCase() !== 'psmodulepath'),
+      ),
       NOD_FIXTURE: fixture,
       NOD_LOG: log,
       NOD_SCRIPT: script,
       LOCALAPPDATA: localAppData,
       TMPDIR: temporary,
+      TMP: temporary,
       TEMP: temporary,
       NO_COLOR: '1',
     },
@@ -464,7 +514,13 @@ test(
   'CLI-INSTALL: the Windows script installs verified files silently and leaves nothing staged',
   { skip: !powershell && 'pwsh is unavailable' },
   async () => {
-    for (const options of [{}, { existing: true }]) {
+    for (const options of [
+      {},
+      { existing: true },
+      { legacyUpdateSource: true },
+      { ps7Redirect: true },
+      { arrayRedirect: true },
+    ].flatMap((options) => powershellCommands.map((powershell) => ({ ...options, powershell })))) {
       const installed = await windowsInstall(options);
       assert.equal(installed.result.status, 0, installed.output);
       assert.deepEqual(
@@ -486,6 +542,14 @@ test(
   async () => {
     for (const options of [
       { installer: Buffer.from('tampered Windows installer!') },
+      { badTag: true },
+      { lookupFailure: true },
+      { offRepoRedirect: true },
+      { offRepoRedirect: true, ps7Redirect: true },
+      { badUpdateSource: true },
+      { badSignature: true },
+      { currentVersion: '0.3.0' },
+      { existing: true, currentVersion: '0.3.0' },
       { manifest: { version: '0.3.0' } },
       {
         manifest: {
@@ -495,8 +559,10 @@ test(
       { running: true },
       { elevated: true },
       { build: '19045' },
-    ]) {
+    ].flatMap((options) => powershellCommands.map((powershell) => ({ ...options, powershell })))) {
       const rejected = await windowsInstall(options);
+      if (options.lookupFailure)
+        assert.match(rejected.output, /The latest Nod release is unavailable/);
       assert(!rejected.calls.some((call) => /^(install|launch)/.test(call)));
       assert.deepEqual(rejected.staged, []);
     }
@@ -511,7 +577,11 @@ test(
   'CLI-INSTALL: Windows refuses to launch incomplete or unexpected installed targets',
   { skip: !powershell && 'pwsh is unavailable' },
   async () => {
-    for (const options of [{ missingApp: true }, { wrongVersion: true }, { wrongTarget: true }]) {
+    for (const options of [
+      { missingApp: true },
+      { wrongVersion: true },
+      { wrongTarget: true },
+    ].flatMap((options) => powershellCommands.map((powershell) => ({ ...options, powershell })))) {
       const rejected = await windowsInstall(options);
       assert.match(rejected.output, /installed app|installation destination/);
       assert(!rejected.calls.some((call) => call.startsWith('launch')));
