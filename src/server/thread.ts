@@ -1404,7 +1404,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        FROM messages m CROSS JOIN seen CROSS JOIN boundary
        LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.id IS DISTINCT FROM $3::uuid
-       AND NOT ${withdrawnSql('m')}
+       AND NOT (m.role='user' AND ${withdrawnSql('m')})
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))

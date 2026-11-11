@@ -175,7 +175,7 @@ While the message box is empty, the send button becomes **Stop**. Select it to s
 
 The main Stop control ends active work, cancels queued messages and open questions, and closes all open tasks. To stop only one task, open its preview and select **Stop**. Your schedules stay configured. Stop can't undo something that already happened, such as an email that was already sent.
 
-A request you stop, or one whose model request fails at the provider, stays in the chat, but Nod doesn't pick it up again on its own and your words in it no longer allow an action. To continue it, ask again. See [Stop and failures](/how-it-works/threads-and-turns/#stop-and-failures).
+A request you stop, or one you started whose model request fails at the provider, stays in the chat, but Nod doesn't pick it up again on its own and your words in it no longer allow an action. To continue it, ask again. See [Stop and failures](/how-it-works/threads-and-turns/#stop-and-failures).
 
 You can also tell Nod in the main chat, from any app, for example "stop everything" or "stop the flight search". Nod stops every task, scheduled run and app check, or only the task you name, and tells you what it stopped. Nod reads your message after its current step, or after its current reply if you write from another app. For an immediate stop, use the Stop control, or `/stop` in Telegram.
 

@@ -13,8 +13,8 @@ export const laterSupersedingTurnSql = `EXISTS(SELECT 1 FROM turns n WHERE n.own
     AND n.source IN ('user','task')))`;
 
 export const withdrawnSql = (message: string) =>
-  `(${message}.role='user' AND EXISTS(SELECT 1 FROM turns w WHERE w.owner_id=${message}.owner_id AND w.withdrawn
-    AND (w.id=${message}.turn_id OR w.message_id=${message}.id)))`;
+  `EXISTS(SELECT 1 FROM turns w WHERE w.owner_id=${message}.owner_id AND w.withdrawn
+    AND (w.id=${message}.turn_id OR w.message_id=${message}.id))`;
 
 export function turnChainSql() {
   return `WITH RECURSIVE chain(id,next,thread_id) AS (

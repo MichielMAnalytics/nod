@@ -1050,7 +1050,7 @@ test(
       );
 
       await t.test(
-        'a request the owner stopped, or whose continuation the owner stopped, is never owner words for a later action',
+        'a request the owner stopped, or whose continuation the owner stopped, is never owner words or a proposal for a later reply',
         async () => {
           const answered = await begin('Email Ana the answered invoice.');
           await finish(answered.turnId);
@@ -1062,13 +1062,14 @@ test(
             `synthetic-resume:${continued.turnId}`,
             'The synthetic sign-in finished. Continue the request.',
           );
-          await begin('Email Bob the stopped invoice.');
+          const stopped = await begin('Email Bob the stopped invoice.');
+          await thread.reply(stopped, 'Should I send Bob the stopped invoice now?');
           await thread.stopThread();
-          const later = await begin('What is on my calendar today?');
+          const later = await begin('Yes, go ahead.');
           aligned = (input) =>
             input.userMessages.some((message: { text: string }) =>
               /continued invoice|stopped invoice/.test(message.text),
-            );
+            ) || /stopped invoice/.test(input.assistantMessageBeforeLatestUserMessage ?? '');
           try {
             assert.deepEqual(
               await trust.check(later, 'GMAIL_SEND_EMAIL', email('bob@example.test')),
@@ -1083,8 +1084,9 @@ test(
             assert.deepEqual(seen.slice(-3), [
               'Email Ana the answered invoice.',
               'Thanks, that is all.',
-              'What is on my calendar today?',
+              'Yes, go ahead.',
             ]);
+            assert.equal(reviews.at(-1)!.assistantMessageBeforeLatestUserMessage, undefined);
             assert.ok(!seen.some((text: string) => /continued invoice|stopped invoice/.test(text)));
           } finally {
             await finish(later.turnId, 'cancelled');

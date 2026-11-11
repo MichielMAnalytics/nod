@@ -149,10 +149,10 @@ Turns and tool calls are never retried. Pi retries a model request that fails wi
 
 When a turn that carries your message fails at the model provider, that turn is _withdrawn_. When you cancel work with **Stop**, `/stop`, a task's **Stop** or reset, the whole request is withdrawn: the stopped turn and the earlier turns it continues in that session, such as the turn that asked you a question or for a sign-in. A waiting turn that a later turn had already replaced isn't. Work that carries none of your words, such as an app check, has nothing to withdraw. When Nod stops tasks for you with `task stop`, or cancels a turn for another reason, nothing is withdrawn.
 
-A withdrawn turn's messages stay in the chat, and Nod can still find them with `history_search`. Nothing else gives them to a model:
+Your messages from a withdrawn turn stay in the chat, and Nod can still find them with `history_search`. Nothing else gives them to a model:
 
-- A session that starts fresh doesn't get them as recent chat, and related-message and memory recall leave them out.
-- The trust check doesn't count them as your words.
+- A session that starts fresh doesn't get them as recent chat, and related-message and memory recall leave them out. Nod's own replies from that turn stay, so later work knows what happened.
+- The trust check doesn't count them as your words, and a later short reply never accepts something Nod proposed in that turn.
 - The confirmation writer doesn't read them, and memory learning skips them unless Nod names one when you ask it to remember something.
 
 The session's next turn is told how its previous request ended, so Nod doesn't pick it up again on its own. What that turn already did stays in the session's context. To continue, ask again. Nod finds the request with `history_search`, and the trust check asks before any action your new words don't cover.
