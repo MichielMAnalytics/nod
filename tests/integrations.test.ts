@@ -1881,6 +1881,9 @@ fetch('/v2/connect/verify',{method:'POST',headers:{'Content-Type':'application/j
       returnPath = native.returnPath;
       return `${brokerOrigin}/v2/connect/pair?ticket=${state}`;
     });
+    const preview = await fetch(bridgeUrl);
+    assert.equal(preview.status, 200);
+    await preview.arrayBuffer();
     child = spawn(
       executable,
       [
