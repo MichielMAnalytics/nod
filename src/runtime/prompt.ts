@@ -275,7 +275,6 @@ function requestParts(
         'proactiveIssues',
         'quietHours',
         'previousFailure',
-        'withdrawnRequest',
         'currentInstruction',
       ]
     : [];

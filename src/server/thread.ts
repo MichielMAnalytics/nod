@@ -778,6 +778,21 @@ export async function submitUserMessage(
   return result;
 }
 
+async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boolean) {
+  if (!turnIds.length) return;
+  await client.query(
+    `WITH RECURSIVE line(id,parent,session_id,start) AS (
+       SELECT id,parent_turn_id,session_id,id FROM turns WHERE owner_id=$2 AND id=ANY($1::uuid[])
+       UNION
+       SELECT p.id,p.parent_turn_id,p.session_id,l.start FROM line l
+       JOIN turns p ON $3 AND p.id=l.parent AND p.owner_id=$2 AND p.session_id=l.session_id)
+     UPDATE turns t SET withdrawn=true FROM line l
+     WHERE t.id=l.id AND EXISTS(SELECT 1 FROM line said JOIN turns c ON c.id=said.id WHERE said.start=l.start
+       AND (c.message_id IS NOT NULL OR EXISTS(SELECT 1 FROM messages m WHERE m.owner_id=c.owner_id AND m.turn_id=c.id AND m.role='user')))`,
+    [turnIds, ownerId, wholeRequest],
+  );
+}
+
 export async function cancelTurns(
   client: PoolClient,
   threadId: string,
@@ -791,16 +806,24 @@ export async function cancelTurns(
     nextStop = new AbortController();
   }
   const values = [threadId, ownerId, scope.sessionId ?? null, scope.background ?? false];
-  const candidates = await client.query<{ id: string }>(
-    "SELECT id FROM turns WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND (NOT $4 OR session_id<>$1) AND status IN ('queued','running','waiting')",
+  const candidates = await client.query<{ id: string; live: boolean }>(
+    `SELECT u.id,u.status<>'waiting' OR NOT ${laterSupersedingTurnSql} AS live FROM turns u
+     WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND (NOT $4 OR u.session_id<>$1) AND u.status IN ('queued','running','waiting')`,
     values,
   );
   abortTurns(candidates.rows.map(({ id }) => id));
   const current = await client.query(
-    `UPDATE turns u SET status='cancelled',finished_at=now(),withdrawn=$5 AND (u.status<>'waiting' OR NOT ${laterSupersedingTurnSql})
-     WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND (NOT $4 OR u.session_id<>$1) AND u.status IN ('queued','running','waiting') RETURNING u.id,u.session_id`,
-    [...values, actor === 'owner'],
+    "UPDATE turns SET status='cancelled',finished_at=now() WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND (NOT $4 OR session_id<>$1) AND status IN ('queued','running','waiting') RETURNING id,session_id",
+    values,
   );
+  if (actor === 'owner') {
+    const stopped = new Set(current.rows.map((row) => row.id as string));
+    await withdraw(
+      client,
+      candidates.rows.flatMap(({ id, live }) => (live && stopped.has(id) ? [id] : [])),
+      true,
+    );
+  }
   const taskIds = (
     await client.query(
       `SELECT DISTINCT to_jsonb(u)->>'task_id' AS id FROM turns u
@@ -1017,22 +1040,16 @@ async function finishTurn(
   client: PoolClient,
   turnId: string,
   status: string,
-  fields: {
-    waitingReason?: string;
-    error?: string;
-    handoffBrowserId?: string;
-    withdrawn?: boolean;
-  } = {},
+  fields: { waitingReason?: string; error?: string; handoffBrowserId?: string } = {},
 ) {
   const updated = await client.query(
-    "UPDATE turns SET status=$2,waiting_reason=$3,error=$4,handoff_browser_id=$5,withdrawn=$6,finished_at=now() WHERE id=$1 AND status='running' RETURNING id",
+    "UPDATE turns SET status=$2,waiting_reason=$3,error=$4,handoff_browser_id=$5,finished_at=now() WHERE id=$1 AND status='running' RETURNING id",
     [
       turnId,
       status,
       fields.waitingReason ?? null,
       fields.error ?? null,
       fields.handoffBrowserId ?? null,
-      fields.withdrawn ?? false,
     ],
   );
   if (updated.rowCount)
@@ -1125,7 +1142,8 @@ async function failTurn(
       )
     ).rows[0];
     if (!turn) return;
-    await finishTurn(client, turnId, 'failed', { error, withdrawn });
+    await finishTurn(client, turnId, 'failed', { error });
+    if (withdrawn) await withdraw(client, [turnId], false);
     const task = turn.task_id
       ? (
           await client.query('SELECT message_id FROM tasks WHERE id=$1 AND owner_id=$2', [

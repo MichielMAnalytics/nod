@@ -8355,6 +8355,20 @@ test(
             const fresh = ran(scheduled)!.history.map(({ text }) => text);
             assert.ok(fresh.includes('Synthetic standing request'));
             assert.ok(!fresh.includes('Synthetic refused paste'));
+            const background = randomUUID();
+            modelErrors.set('Synthetic background check', 'The model request failed: overloaded.');
+            const failedCheck = await thread.enqueueTurn('Synthetic background check', {
+              source: 'event',
+              sessionId: background,
+            });
+            await waitFor(settled(failedCheck));
+            const nextCheck = await thread.enqueueTurn('Synthetic next background check', {
+              source: 'event',
+              sessionId: background,
+            });
+            await waitFor(settled(nextCheck));
+            assert.ok(ran(nextCheck)!.previousFailure);
+            assert.equal(ran(nextCheck)!.withdrawnRequest, undefined);
             const stopped = await thread.submitUserMessage('Synthetic stopped request');
             await waitFor(() => Boolean(ran(stopped.turnId)));
             await thread.stopThread();
@@ -8370,6 +8384,7 @@ test(
             assert.equal(ran(quiet.turnId)!.withdrawnRequest, undefined);
           } finally {
             modelErrors.delete('Synthetic refused paste');
+            modelErrors.delete('Synthetic background check');
             release('Synthetic stopped request');
           }
         },

@@ -1050,17 +1050,24 @@ test(
       );
 
       await t.test(
-        'a request the owner stopped is never owner words for a later action',
+        'a request the owner stopped, or whose continuation the owner stopped, is never owner words for a later action',
         async () => {
           const answered = await begin('Email Ana the answered invoice.');
           await finish(answered.turnId);
           await finish((await begin('Thanks, that is all.')).turnId, 'succeeded');
+          const continued = await begin('Email Carol the continued invoice.');
+          await finish(continued.turnId);
+          await thread.resumeTurn(
+            continued.turnId,
+            `synthetic-resume:${continued.turnId}`,
+            'The synthetic sign-in finished. Continue the request.',
+          );
           await begin('Email Bob the stopped invoice.');
           await thread.stopThread();
           const later = await begin('What is on my calendar today?');
           aligned = (input) =>
             input.userMessages.some((message: { text: string }) =>
-              message.text.includes('Bob the stopped invoice'),
+              /continued invoice|stopped invoice/.test(message.text),
             );
           try {
             assert.deepEqual(
@@ -1078,7 +1085,7 @@ test(
               'Thanks, that is all.',
               'What is on my calendar today?',
             ]);
-            assert.ok(!seen.some((text: string) => text.includes('stopped invoice')));
+            assert.ok(!seen.some((text: string) => /continued invoice|stopped invoice/.test(text)));
           } finally {
             await finish(later.turnId, 'cancelled');
           }
