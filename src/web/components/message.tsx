@@ -5,6 +5,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { splitQuestion } from '../../shared/answer-choices';
 import type { Message } from '../../shared/contracts';
 import { reactionEmoji } from '../../shared/emoji';
 import {
@@ -305,23 +306,31 @@ export function MessageBubble({
   onReply?(quote?: string): void;
   onAnswer?: AnswerChoicesProps['onAnswer'];
   answersDisabled?: boolean;
-  onApprove?(approved: boolean, label: string): Promise<boolean>;
+  onApprove?(approved: boolean, label: string): Promise<boolean | 'unavailable'>;
   codeRequest?: 'otp' | 'payment';
   handoff?: boolean;
   handoffPaused?: boolean;
 }) {
   const dateFormat = useDateFormat();
   const visibleText = message.audioCaption ?? message.text;
-  const choiceCard =
-    message.role === 'assistant' &&
-    !streaming &&
-    Boolean(
-      (message.approval && !message.approval.fields) ||
-      (message.answerChoices &&
-        ((message.answerChoicesPending && onAnswer) ||
-          (!message.answerChoicesPending && message.choiceAnswer))),
-    );
-  const cardText = splitQuestion(visibleText);
+  const card =
+    message.role !== 'assistant' || streaming
+      ? null
+      : message.approval && !message.approval.fields
+        ? 'approval'
+        : !message.answerChoices
+          ? null
+          : message.answerChoicesPending
+            ? onAnswer
+              ? 'choices'
+              : null
+            : message.choiceAnswer
+              ? 'answered'
+              : null;
+  const cardText = card ? splitQuestion(visibleText) : null;
+  const cardTitle = cardText && (
+    <MessageText text={cardText.question} connectedAppIds={connectedAppIds} />
+  );
   const canCopy = Boolean(
     visibleText.trim() || presentationSchema.safeParse(message.presentation).success,
   );
@@ -692,7 +701,7 @@ export function MessageBubble({
               }}
             >
               {visibleReply && <MessageQuote message={visibleReply} />}
-              {choiceCard && cardText.lead && (
+              {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />
               )}
               {pendingAudio && (
@@ -703,39 +712,28 @@ export function MessageBubble({
               {message.role === 'user' && message.attachments.length > 0 && (
                 <MessageAttachments attachments={message.attachments} />
               )}
-              {message.role === 'assistant' &&
-              message.approval &&
-              !message.approval.fields &&
-              !streaming ? (
+              {card === 'approval' ? (
                 <ApprovalChoiceCard
-                  approval={message.approval}
+                  approval={message.approval!}
                   disabled={answersDisabled}
                   onAnswer={onApprove}
                 >
-                  <MessageText text={cardText.question} connectedAppIds={connectedAppIds} />
+                  {cardTitle}
                 </ApprovalChoiceCard>
-              ) : message.role === 'assistant' &&
-                !streaming &&
-                message.answerChoices &&
-                message.answerChoicesPending &&
-                onAnswer ? (
+              ) : card === 'choices' ? (
                 <AnswerChoices
                   key={message.id}
-                  choices={message.answerChoices}
+                  choices={message.answerChoices!}
                   question={message}
-                  title={<MessageText text={cardText.question} connectedAppIds={connectedAppIds} />}
+                  title={cardTitle}
                   disabled={answersDisabled}
-                  onAnswer={onAnswer}
+                  onAnswer={onAnswer!}
                 />
-              ) : message.role === 'assistant' &&
-                !streaming &&
-                message.answerChoices &&
-                !message.answerChoicesPending &&
-                message.choiceAnswer ? (
+              ) : card === 'answered' ? (
                 <ChoiceAnswer
-                  choices={message.answerChoices}
-                  answer={message.choiceAnswer}
-                  title={<MessageText text={cardText.question} connectedAppIds={connectedAppIds} />}
+                  choices={message.answerChoices!}
+                  answer={message.choiceAnswer!}
+                  title={cardTitle}
                 />
               ) : (
                 visibleText && (
@@ -887,7 +885,11 @@ export function MessageBubble({
         )}
         {message.role === 'assistant' && !streaming && message.approval?.fields && (
           <ApprovalCard approval={message.approval} disabled={answersDisabled} onAnswer={onApprove}>
-            <ApprovalFields fields={message.approval.fields} body={message.approval.body} />
+            <ApprovalFields
+              fields={message.approval.fields}
+              body={message.approval.body}
+              bodyCut={message.approval.bodyCut}
+            />
           </ApprovalCard>
         )}
         {message.role === 'assistant' && !streaming && codeRequest && (
@@ -1012,9 +1014,4 @@ export function MessageBubble({
         )}
     </article>
   );
-}
-
-function splitQuestion(text: string) {
-  const match = /^([\s\S]*\S)[ \t]*\n[ \t]*\n\s*(\S[\s\S]*)$/.exec(text.trim());
-  return match ? { lead: match[1], question: match[2] } : { lead: '', question: text };
 }

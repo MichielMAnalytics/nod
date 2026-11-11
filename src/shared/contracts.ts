@@ -48,6 +48,7 @@ export interface MessageApproval {
   slug: string;
   fields?: Array<{ label: string; value: string }>;
   body?: string;
+  bodyCut?: true;
 }
 export interface SubmitMessageResponse {
   threadId: string;

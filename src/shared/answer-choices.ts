@@ -55,3 +55,19 @@ export function questionWithChoices(question: string, choices: AnswerChoices) {
       .join('\n'),
   ].join('\n\n');
 }
+
+export function splitQuestion(text: string) {
+  const whole = text.trim();
+  const question = whole
+    .split(/\n[ \t]*\n/)
+    .at(-1)!
+    .trim();
+  const lead = whole.slice(0, whole.length - question.length).trimEnd();
+  return lead &&
+    !question.includes('\n') &&
+    /[?？؟][*_"'”’)\]]*$/.test(question) &&
+    !/^(```|~~~|[-*+] |\d+[.)] |[|>#])/.test(question) &&
+    (lead.match(/^[ \t]*(```|~~~)/gm)?.length ?? 0) % 2 === 0
+    ? { lead, question }
+    : { lead: '', question: whole };
+}

@@ -57,6 +57,59 @@ function words(value: unknown): string[] {
   return Array.isArray(value) ? value.flatMap(words) : [];
 }
 
+function listed(values: string[]) {
+  const kept: string[] = [];
+  let length = 0;
+  for (const value of values) {
+    if (kept.length && length + value.length > 500) break;
+    kept.push(value);
+    length += value.length + 2;
+  }
+  const rest = values.length - kept.length;
+  const text = kept.join(', ');
+  return rest ? `${text} and ${rest} more` : text;
+}
+
+const entities: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+function character(code: number, fallback: string) {
+  return Number.isInteger(code) && code > 0 && code <= 0x10ffff
+    ? String.fromCodePoint(code)
+    : fallback;
+}
+
+function plainText(html: string) {
+  return html
+    .replace(/<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(
+      /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
+      (_, double, single, bare, label) => {
+        const address = String(double ?? single ?? bare ?? '').trim();
+        const shown = String(label)
+          .replace(/<[^>]+>/g, '')
+          .trim();
+        return !address || shown === address ? shown || address : `${shown} (${address})`;
+      },
+    )
+    .replace(/<br\s*\/?>|<\/(p|div|li|tr|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (match, decimal, hex, name) =>
+      decimal
+        ? character(Number(decimal), match)
+        : hex
+          ? character(Number.parseInt(hex, 16), match)
+          : (entities[String(name).toLowerCase()] ?? match),
+    )
+    .replace(/\n{3,}/g, '\n\n');
+}
+
 export function approvalContent(action: string, args: unknown) {
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
@@ -67,17 +120,17 @@ export function approvalContent(action: string, args: unknown) {
     return {};
   const input = args as Record<string, unknown>;
   const fields = fieldKeys.flatMap(([label, keys]) => {
-    const value = keys.flatMap((key) => words(input[key])).join(', ');
-    return value ? [{ label, value: value.slice(0, 500) }] : [];
+    const value = listed(keys.flatMap((key) => words(input[key])));
+    return value ? [{ label, value }] : [];
   });
   if (!fields.length) return {};
   const raw = bodyKeys.map((key) => input[key]).find((value) => typeof value === 'string');
   const text =
-    typeof raw === 'string' && input.is_html === true
-      ? raw.replace(/<br\s*\/?>|<\/p>/gi, '\n').replace(/<[^>]+>/g, '')
-      : raw;
-  const body = typeof text === 'string' ? text.trim().slice(0, 4000) : '';
-  return { fields, ...(body ? { body } : {}) };
+    typeof raw === 'string' ? (input.is_html === true ? plainText(raw) : raw).trim() : '';
+  if (!text) return { fields };
+  return text.length > 4000
+    ? { fields, body: text.slice(0, 4000), bodyCut: true as const }
+    : { fields, body: text };
 }
 
 const tools: Record<string, string> = {

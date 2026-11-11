@@ -966,7 +966,9 @@ export function Chat({
       attachments,
       turnId: null,
       createdAt: new Date().toISOString(),
-      ...(questionAnswer || approvalAnswer ? { cardAnswer: true as const } : {}),
+      ...((questionAnswer || approvalAnswer) && value.trim() && !attachments.length && !recording
+        ? { cardAnswer: true as const }
+        : {}),
       ...(reply
         ? {
             replyToMessageId: reply.id,
@@ -1655,7 +1657,7 @@ export function Chat({
                                 undefined,
                                 { approvalId: message.approval!.id, approved },
                               );
-                              if (result.questionUnavailable) return true;
+                              if (result.questionUnavailable) return 'unavailable';
                               if (!result.sent && result.error) throw new Error(result.error);
                               return result.sent;
                             }

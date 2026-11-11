@@ -41,9 +41,11 @@ export function ActionCard({
 export function ApprovalFields({
   fields,
   body,
+  bodyCut = false,
 }: {
   fields: Array<{ label: string; value: string }>;
   body?: string;
+  bodyCut?: boolean;
 }) {
   return (
     <>
@@ -56,15 +58,16 @@ export function ApprovalFields({
         ))}
       </dl>
       {body && <div className="action-card-content">{body}</div>}
+      {bodyCut && (
+        <p className="action-card-cut">Only the start is shown. The rest is included too.</p>
+      )}
     </>
   );
 }
 
-function useApproval(
-  approval: MessageApproval,
-  disabled: boolean,
-  onAnswer?: (approved: boolean, label: string) => Promise<boolean>,
-) {
+type Answer = (approved: boolean, label: string) => Promise<boolean | 'unavailable'>;
+
+function useApproval(approval: MessageApproval, disabled: boolean, onAnswer?: Answer) {
   const [answered, setAnswered] = useState<ApprovalState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -76,7 +79,9 @@ function useApproval(
     };
   }, []);
   useEffect(() => {
-    if (approval.state !== 'pending') setAnswered(null);
+    if (approval.state === 'pending') return;
+    setAnswered(null);
+    setError('');
   }, [approval.state]);
   async function answer(approved: boolean, label: string) {
     if (!onAnswer || busy || disabled) return;
@@ -85,7 +90,8 @@ function useApproval(
     try {
       const sent = await onAnswer(approved, label);
       if (!mounted.current) return;
-      if (sent) setAnswered(approved ? 'working' : 'declined');
+      if (sent === 'unavailable') setError('This can no longer be answered here.');
+      else if (sent) setAnswered(approved ? 'working' : 'declined');
       else setError('Your answer could not be sent. Try again.');
     } catch (cause) {
       if (mounted.current) setError(errorMessage(cause));
@@ -140,7 +146,7 @@ function UncertainNote({ app }: { app: string }) {
 interface ApprovalProps {
   approval: MessageApproval;
   disabled?: boolean;
-  onAnswer?: (approved: boolean, label: string) => Promise<boolean>;
+  onAnswer?: Answer;
   children: ReactNode;
 }
 

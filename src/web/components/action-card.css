@@ -387,6 +387,12 @@ button.choice-card-row[aria-disabled='true'] {
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
+.action-card-cut {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 20px;
+}
 .action-card-settled :is(.action-card-fields, .action-card-content) {
   color: color-mix(in srgb, var(--muted-foreground) 82%, var(--surface));
 }
